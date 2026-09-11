@@ -68,13 +68,34 @@ class TextSpan(BaseModel):
     bbox: List[float] = Field(default_factory=list)  # [x1, y1, x2, y2]
     style: TextStyle = Field(default_factory=TextStyle)
 
+class BoxStyle(BaseModel):
+    """CSS box painting for a reconstructed surface (a real div, not a raster)."""
+    backgroundColor: Optional[str] = None
+    backgroundImage: Optional[str] = None       # e.g. linear-gradient(...)
+    borderColor: Optional[str] = None
+    borderWidth: float = 0.0
+    borderStyle: str = 'solid'
+    borderRadius: Optional[str] = None          # e.g. '26px'
+    boxShadow: Optional[str] = None
+
 class DocumentElement(BaseModel):
     id: str = Field(default_factory=lambda: f'elem-{uuid.uuid4().hex[:8]}')
-    type: Literal['text', 'image', 'table', 'vector', 'formula', 'custom']
+    type: Literal['text', 'image', 'table', 'vector', 'formula', 'custom', 'rect']
     bbox: List[float]  # [x1, y1, x2, y2] in points/pixels
     zIndex: int = 1
     rotation: float = 0.0
     opacity: float = 1.0
+
+    # Semantic reconstruction. `tag` is the HTML element actually emitted; `role`
+    # labels what the analyzer believes it is, for the editor and for debugging.
+    # `confidence` records how strong the evidence was, and `fallbackSrc` keeps the
+    # original pixels so a wrong promotion can always be downgraded to an image.
+    tag: Optional[str] = None
+    role: Optional[str] = None
+    box: Optional[BoxStyle] = None
+    parentId: Optional[str] = None
+    confidence: Optional[float] = None
+    fallbackSrc: Optional[str] = None
 
     # Text fields
     text: Optional[str] = None
@@ -278,7 +299,68 @@ def _get_measure_font(bold: bool):
     _font_cache[bold] = font
     return font
 
-def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool) -> Tuple[float, float, float]:
+def cluster_font_sizes(runs: List[Dict[str, Any]], tol: float = 0.07) -> None:
+    """Snaps independently fitted sizes onto the few sizes a real design system uses.
+
+    Each run is fitted against its own ink box, so two lines of the same paragraph come
+    out at 19.4px and 20.1px. That jitter defeats every downstream rule that groups by
+    size -- paragraphs never merge and each stray value claims its own heading level.
+    Collapsing near-equal sizes restores the structure and yields cleaner CSS.
+    """
+    if not runs:
+        return
+    ordered = sorted(runs, key=lambda r: r['fontSize'])
+    clusters: List[List[Dict[str, Any]]] = [[ordered[0]]]
+    for r in ordered[1:]:
+        if r['fontSize'] <= clusters[-1][-1]['fontSize'] * (1.0 + tol):
+            clusters[-1].append(r)
+        else:
+            clusters.append([r])
+
+    for group in clusters:
+        centre = float(np.median([r['fontSize'] for r in group]))
+        for r in group:
+            if abs(r['fontSize'] - centre) < 0.01:
+                continue
+            # Re-solve spacing and line-height against the snapped size so the run still
+            # lands on the ink box it was measured from.
+            b = r['bbox']
+            _, ls, lh = fit_text_to_box(r['text'], b[2] - b[0], b[3] - b[1],
+                                        r['fontWeight'] == 'bold', force_size=centre)
+            r['fontSize'] = centre
+            r['style'].fontSize = centre
+            r['style'].letterSpacing = ls
+            r['style'].lineHeight = lh
+
+def cluster_text_colors(runs: List[Dict[str, Any]], tol: float = 26.0) -> None:
+    """Snaps per-run sampled colours onto shared values.
+
+    Colour is measured from the glyph pixels of each run, so the same ink comes back as
+    #4a4a4a on one line and #4b494b on the next. Exact-match grouping then fails, and
+    the CSS carries dozens of near-identical colours instead of a palette.
+    """
+    centres: List[Tuple[np.ndarray, List[Dict[str, Any]]]] = []
+    for r in sorted(runs, key=lambda r: -(r['bbox'][2] - r['bbox'][0])):
+        c = r['color'].lstrip('#')
+        try:
+            rgb = np.array([int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)], dtype=np.float64)
+        except Exception:
+            continue
+        for centre, members in centres:
+            if float(np.linalg.norm(rgb - centre)) <= tol:
+                members.append(r)
+                break
+        else:
+            centres.append((rgb, [r]))
+
+    for centre, members in centres:
+        hexed = f"#{int(centre[0]):02x}{int(centre[1]):02x}{int(centre[2]):02x}"
+        for r in members:
+            r['color'] = hexed
+            r['style'].color = hexed
+
+def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
+                    force_size: Optional[float] = None) -> Tuple[float, float, float]:
     """Fits a text run to an OCR ink box, returning (fontSize, letterSpacing, lineHeight).
 
     The OCR box bounds *ink*, not the em square, so its height depends on which glyphs
@@ -309,8 +391,12 @@ def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool) -> Tuple[
     if ink_h <= 0:
         return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2
 
-    scale = float(box_h) / ink_h
-    font_size = max(6.0, _MEASURE_REF_SIZE * scale)
+    if force_size is not None and force_size > 0:
+        font_size = float(force_size)
+        scale = font_size / float(_MEASURE_REF_SIZE)
+    else:
+        scale = float(box_h) / ink_h
+        font_size = max(6.0, _MEASURE_REF_SIZE * scale)
 
     # Spread (or pull in) the residual width across the gaps between glyphs. CSS adds
     # letter-spacing after every character, but the ink of the run ends before the last
@@ -330,6 +416,50 @@ def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool) -> Tuple[
     line_height = max(0.1, line_px / font_size)
 
     return round(font_size, 2), round(letter_spacing, 2), round(line_height, 3)
+
+def keep_core_ink(ink: np.ndarray) -> np.ndarray:
+    """Drops ink blobs that never reach this line's own body band.
+
+    Tightly stacked headlines overlap, so a detection box routinely catches the
+    descenders of the line above. Measuring those as part of this line inflates its ink
+    height and oversizes the font. A real descender hangs off a letter whose body sits
+    in the middle of the box; a stray one from another line does not.
+    """
+    h = ink.shape[0]
+    if h < 8:
+        return ink
+    lo, hi = int(h * 0.30), int(np.ceil(h * 0.70))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(ink, 8)
+    if n <= 1:
+        return ink
+    keep = np.zeros_like(ink)
+    for i in range(1, n):
+        top = stats[i, cv2.CC_STAT_TOP]
+        bottom = top + stats[i, cv2.CC_STAT_HEIGHT]
+        if top < hi and bottom > lo:
+            keep[lab == i] = 1
+    return keep if keep.any() else ink
+
+def ink_top_offset(text: str, font_size: float, line_px: float, bold: bool) -> float:
+    """Distance from a text element's top edge down to the first line's ink.
+
+    A paragraph has to use the measured line pitch for its line-height, which overrides
+    the per-run value that pinned a single line's ink to its box. Solving the same CSS
+    inline box model for the offset instead lets the element's top be shifted to
+    compensate, so the first line still lands where it was measured.
+    """
+    clean = (text or '').strip()
+    font = _get_measure_font(bold) if clean else None
+    if font is None or font_size <= 0:
+        return 0.0
+    try:
+        ink = font.getbbox(clean)
+        ascent, descent = font.getmetrics()
+    except Exception:
+        return 0.0
+    scale = font_size / float(_MEASURE_REF_SIZE)
+    content = (ascent + descent) * scale
+    return (line_px - content) / 2.0 + ink[1] * scale
 
 def erase_text_from_crop(crop: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
     """Paints out masked text pixels so a raster crop can sit underneath live text.
@@ -1246,6 +1376,567 @@ class DigitalExtractor:
         )
 
 # ==============================================================================
+# 7b. SURFACE ANALYSIS  (flat fills -> real CSS boxes)
+# ==============================================================================
+
+MIN_SURFACE_AREA = 140
+_K3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+def _fill_holes(mask: np.ndarray) -> np.ndarray:
+    """Returns `mask` with interior holes closed (border-connected background removed)."""
+    h, w = mask.shape
+    ff = np.zeros((h + 2, w + 2), np.uint8)
+    inv = (mask == 0).astype(np.uint8) * 255
+    cv2.floodFill(inv, ff, (0, 0), 0)
+    return ((mask > 0) | (inv > 0)).astype(np.uint8)
+
+class Surface:
+    """A flat-filled region recovered from the image, with the CSS needed to redraw it.
+
+    `shape` is one of 'rect' (paintable as a div with border-radius), 'ellipse'
+    (paintable as an SVG ellipse) or 'complex' (must stay pixels).
+    """
+    __slots__ = ('bbox', 'mask', 'color', 'shape', 'radius', 'border_color',
+                 'border_width', 'area', 'fill_ratio', 'children', 'parent', 'texts')
+
+    def __init__(self, bbox, mask, color, shape, radius, area, fill_ratio,
+                 border_color=None, border_width=0.0):
+        self.bbox = bbox                    # (x0, y0, x1, y1) in page pixels
+        self.mask = mask                    # component mask, crop-local
+        self.color = color
+        self.shape = shape
+        self.radius = radius
+        self.area = area
+        self.fill_ratio = fill_ratio
+        self.border_color = border_color
+        self.border_width = border_width
+        self.children: List['Surface'] = []
+        self.parent: Optional['Surface'] = None
+        self.texts: List[Dict[str, Any]] = []
+
+    @property
+    def width(self):
+        return self.bbox[2] - self.bbox[0]
+
+    @property
+    def height(self):
+        return self.bbox[3] - self.bbox[1]
+
+def _bgr_to_hex(bgr) -> str:
+    return f"#{int(bgr[2]):02x}{int(bgr[1]):02x}{int(bgr[0]):02x}"
+
+def _edge_straightness(filled: np.ndarray, radius: float) -> float:
+    """How straight the sides are, ignoring the corner arcs the radius accounts for.
+
+    Fill ratio alone cannot separate a rounded rectangle from a pill, a clipped
+    illustration or a blob of similar bulk. Straight sides can.
+    """
+    ch, cw = filled.shape
+    scores = []
+    pad = int(max(radius, 1.0))
+    if ch - 2 * pad >= 3:
+        band = filled[pad:ch - pad, :]
+        left = np.argmax(band, axis=1).astype(np.float32)
+        right = (cw - np.argmax(band[:, ::-1], axis=1)).astype(np.float32)
+        rows_with_ink = band.any(axis=1)
+        if rows_with_ink.sum() >= 3:
+            scores.append(float(np.std(left[rows_with_ink])))
+            scores.append(float(np.std(right[rows_with_ink])))
+    if cw - 2 * pad >= 3:
+        band = filled[:, pad:cw - pad]
+        top = np.argmax(band, axis=0).astype(np.float32)
+        bottom = (ch - np.argmax(band[::-1, :], axis=0)).astype(np.float32)
+        cols_with_ink = band.any(axis=0)
+        if cols_with_ink.sum() >= 3:
+            scores.append(float(np.std(top[cols_with_ink])))
+            scores.append(float(np.std(bottom[cols_with_ink])))
+    if not scores:
+        return 0.0
+    # 0 px deviation -> 1.0; 3 px or worse -> 0.0
+    return float(max(0.0, 1.0 - (sum(scores) / len(scores)) / 3.0))
+
+def _rect_evidence(filled, cw, ch, f_area, box_area, region_px) -> Tuple[float, float]:
+    """Scores 'is a rounded rectangle' from several independent signals.
+
+    Returns (score, radius). No single signal is trusted on its own -- a circle has a
+    plausible fill ratio, an irregular illustration can have symmetric corners, and a
+    clipped graphic can have straight edges on two sides.
+    """
+    radius = _corner_radius(cw, ch, f_area, box_area)
+    score = 0.0
+
+    # 1. Does the area actually match a rounded rect of the solved radius?
+    predicted = box_area - (4.0 - np.pi) * radius * radius
+    if box_area > 0 and abs(predicted - f_area) / box_area < 0.04:
+        score += 0.30
+
+    # 2. Straight sides outside the corner arcs.
+    score += 0.25 * _edge_straightness(filled, radius)
+
+    # 3. All four corners give up the same area.
+    if _corners_symmetric(filled):
+        score += 0.20
+
+    # 4. Polygonal approximation should resolve to a small number of vertices.
+    cnts, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if cnts:
+        c = max(cnts, key=cv2.contourArea)
+        peri = cv2.arcLength(c, True)
+        if peri > 0:
+            verts = len(cv2.approxPolyDP(c, 0.02 * peri, True))
+            if 4 <= verts <= 10:
+                score += 0.15
+            elif verts > 20:
+                score -= 0.10
+
+    # 5. A CSS fill is one colour by definition.
+    if region_px.size > 0 and float(region_px.reshape(-1, 3).std(axis=0).max()) < 16.0:
+        score += 0.10
+
+    return score, radius
+
+def _classify_region(img, x, y, cw, ch, comp, area) -> Optional[Surface]:
+    """Decides whether a connected flat region can be redrawn as CSS, or must stay pixels."""
+    filled = _fill_holes(comp)
+    f_area = int(filled.sum())
+    box_area = float(cw * ch)
+    if box_area <= 0 or f_area <= 0:
+        return None
+
+    fill_ratio = f_area / box_area
+    solid_ratio = area / float(f_area)      # well under 1 means this is an outline, not a fill
+    region_px = img[y:y+ch, x:x+cw][comp > 0]
+    if region_px.size == 0:
+        return None
+    color = _bgr_to_hex(np.median(region_px.reshape(-1, 3), axis=0))
+    bbox = (float(x), float(y), float(x + cw), float(y + ch))
+
+    # A thin ring around a hole is a border, not a fill: record it as one so the
+    # promoter can hand it to whatever surface sits inside. Kept deliberately narrow --
+    # gradients and artwork also segment into annular bands, and calling one of those a
+    # border paints a huge stroked box across the page.
+    if solid_ratio < 0.55 and fill_ratio > 0.80:
+        ring_thickness = (f_area - area) / max(2.0 * (cw + ch), 1.0)
+        rect_score, radius = _rect_evidence(filled, cw, ch, f_area, box_area, region_px)
+        if 0.5 <= ring_thickness <= 6.0 and min(cw, ch) >= 12 and rect_score >= 0.55:
+            return Surface(bbox, filled, None, 'rect', radius, area, fill_ratio,
+                           border_color=color, border_width=round(max(ring_thickness, 1.0), 1))
+        return Surface(bbox, filled, color, 'complex', 0.0, area, fill_ratio)
+
+    # Ellipse first: a circle scores plausibly on fill ratio, so test it explicitly
+    # against a fitted ellipse before the rectangle path can claim it.
+    if min(cw, ch) >= 6 and fill_ratio <= 0.88:
+        probe = np.zeros((ch, cw), np.uint8)
+        cv2.ellipse(probe, (cw // 2, ch // 2), (max(cw // 2, 1), max(ch // 2, 1)), 0, 0, 360, 1, -1)
+        inter = float(np.count_nonzero(probe & filled))
+        union = float(np.count_nonzero(probe | filled))
+        if union > 0 and inter / union >= 0.90:
+            return Surface(bbox, filled, color, 'ellipse', 0.0, area, fill_ratio)
+
+    rect_score, radius = _rect_evidence(filled, cw, ch, f_area, box_area, region_px)
+    if rect_score >= 0.62:
+        return Surface(bbox, filled, color, 'rect', radius, area, fill_ratio)
+
+    return Surface(bbox, filled, color, 'complex', 0.0, area, fill_ratio)
+
+def _corner_radius(cw, ch, f_area, box_area) -> float:
+    """Solves the corner radius from the area a rounded rectangle gives up: (4 - pi)r^2."""
+    missing = max(box_area - f_area, 0.0)
+    r = float(np.sqrt(missing / (4.0 - np.pi))) if missing > 1.0 else 0.0
+    return float(min(round(r, 1), min(cw, ch) / 2.0))
+
+def _corners_symmetric(filled: np.ndarray, tol: float = 0.34) -> bool:
+    """Guards the radius solve: real rounded rects give up the same area at all 4 corners."""
+    h, w = filled.shape
+    k = max(2, int(min(h, w) * 0.25))
+    if k * 2 >= min(h, w):
+        return True
+    quads = [filled[:k, :k], filled[:k, -k:], filled[-k:, :k], filled[-k:, -k:]]
+    missing = [1.0 - float(q.sum()) / float(k * k) for q in quads]
+    return (max(missing) - min(missing)) <= tol
+
+def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray] = None,
+                    max_colors: int = 90) -> List[Surface]:
+    """Segments the image into flat-filled regions by quantised colour.
+
+    UI is built from flat fills, so connected regions of one colour recover the real
+    component boxes -- including nested ones (a panel inside a card inside a page),
+    which a single global contour pass collapses into one blob. Anything that is not
+    flat (gradients, artwork, photos) falls out as 'complex' and stays pixels.
+    """
+    h, w = img.shape[:2]
+    smooth = cv2.medianBlur(img, 3)
+    quant = (smooth.astype(np.int32) // 8 * 8).astype(np.uint32)
+    packed = (quant[:, :, 0] << 16) | (quant[:, :, 1] << 8) | quant[:, :, 2]
+
+    vals, counts = np.unique(packed, return_counts=True)
+    order = np.argsort(-counts)
+    page_area = float(h * w)
+
+    surfaces: List[Surface] = []
+    for idx in order[:max_colors]:
+        if counts[idx] < MIN_SURFACE_AREA:
+            break
+        mask = (packed == vals[idx]).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _K3)
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        for i in range(1, n):
+            x, y, cw, ch, area = stats[i]
+            if area < MIN_SURFACE_AREA or cw < 5 or ch < 5:
+                continue
+            comp = (lab[y:y+ch, x:x+cw] == i).astype(np.uint8)
+
+            # Glyphs are flat fills too. A bold headline letter is a uniform connected
+            # region large enough to pass every shape test, so without this check the
+            # page fills with black boxes where the text should be.
+            if text_ink is not None:
+                overlap = float(np.count_nonzero(comp & text_ink[y:y+ch, x:x+cw]))
+                if overlap / float(area) > 0.45:
+                    continue
+
+            surf = _classify_region(img, x, y, cw, ch, comp, area)
+            if surf is None:
+                continue
+            # The page ground is not a component.
+            if surf.color == page_bg and (cw * ch) / page_area > 0.45:
+                continue
+            surfaces.append(surf)
+    return surfaces
+
+# ==============================================================================
+# 7c. CONTAINMENT TREE & SEMANTIC PROMOTION
+# ==============================================================================
+
+def _contains(outer, inner, pad: float = 1.5) -> bool:
+    return (inner[0] >= outer[0] - pad and inner[1] >= outer[1] - pad and
+            inner[2] <= outer[2] + pad and inner[3] <= outer[3] + pad)
+
+def build_containment(surfaces: List[Surface]) -> List[Surface]:
+    """Nests surfaces by area so each one's parent is the smallest box that holds it."""
+    ordered = sorted(surfaces, key=lambda s: -(s.width * s.height))
+    for i, inner in enumerate(ordered):
+        for outer in ordered[:i][::-1]:      # nearest-in-size enclosing box wins
+            if outer is not inner and _contains(outer.bbox, inner.bbox):
+                inner.parent = outer
+                outer.children.append(inner)
+                break
+    return [s for s in ordered if s.parent is None]
+
+def assign_texts(surfaces: List[Surface], text_runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attaches each text run to the innermost surface that contains it."""
+    unassigned = []
+    by_size = sorted(surfaces, key=lambda s: s.width * s.height)
+    for run in text_runs:
+        host = None
+        for s in by_size:
+            if s.shape != 'complex' and _contains(s.bbox, run['bbox'], pad=2.0):
+                host = s
+                break
+        if host is not None:
+            host.texts.append(run)
+            run['host'] = host
+        else:
+            unassigned.append(run)
+    return unassigned
+
+def _luminance(hex_color: str) -> float:
+    try:
+        c = hex_color.lstrip('#')
+        r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        return 0.299 * r + 0.587 * g + 0.114 * b
+    except Exception:
+        return 0.0
+
+def _contrast(a: str, b: str) -> float:
+    """Perceptual-ish distance between two hex colours, 0..1."""
+    return min(abs(_luminance(a) - _luminance(b)) / 160.0, 1.0)
+
+def _interior_ink(ctx, surf: 'Surface', exclude_boxes: List[List[float]]) -> float:
+    """Fraction of a surface's interior holding marks that are not its own text."""
+    img, text_ink = ctx['img'], ctx['text_ink']
+    x0, y0, x1, y1 = [int(v) for v in surf.bbox]
+    x0, y0 = max(0, x0 + 2), max(0, y0 + 2)
+    x1, y1 = min(img.shape[1], x1 - 2), min(img.shape[0], y1 - 2)
+    if x1 <= x0 or y1 <= y0 or surf.color is None:
+        return 0.0
+    c = surf.color.lstrip('#')
+    fill = np.array([int(c[4:6], 16), int(c[2:4], 16), int(c[0:2], 16)], dtype=np.int32)
+    patch = img[y0:y1, x0:x1].astype(np.int32)
+    mark = (np.abs(patch - fill).max(axis=2) > 26)
+    mark &= (text_ink[y0:y1, x0:x1] == 0)
+    for b in exclude_boxes:
+        bx0 = int(max(b[0] - x0, 0)); by0 = int(max(b[1] - y0, 0))
+        bx1 = int(min(b[2] - x0, x1 - x0)); by1 = int(min(b[3] - y0, y1 - y0))
+        if bx1 > bx0 and by1 > by0:
+            mark[by0:by1, bx0:bx1] = False
+    return float(mark.sum()) / float(mark.size or 1)
+
+def _leading_icon(ctx, surf: 'Surface', run: Optional[Dict[str, Any]]) -> bool:
+    """True when non-text marks sit in the left inset, ahead of any label."""
+    img, text_ink = ctx['img'], ctx['text_ink']
+    x0, y0, x1, y1 = [int(v) for v in surf.bbox]
+    limit = int(run['bbox'][0]) if run else x0 + int(surf.width * 0.2)
+    lx0, lx1 = max(0, x0 + 2), min(limit, x1)
+    ly0, ly1 = max(0, y0 + 2), min(img.shape[0], y1 - 2)
+    if lx1 - lx0 < 6 or ly1 <= ly0 or surf.color is None:
+        return False
+    c = surf.color.lstrip('#')
+    fill = np.array([int(c[4:6], 16), int(c[2:4], 16), int(c[0:2], 16)], dtype=np.int32)
+    patch = img[ly0:ly1, lx0:lx1].astype(np.int32)
+    mark = (np.abs(patch - fill).max(axis=2) > 26) & (text_ink[ly0:ly1, lx0:lx1] == 0)
+    return float(mark.sum()) / float(mark.size or 1) > 0.04
+
+def score_button(surf: 'Surface', ctx) -> float:
+    """Weighted evidence that a surface is a clickable control."""
+    if len(surf.texts) != 1 or surf.color is None:
+        return 0.0
+    run = surf.texts[0]
+    label = (run.get('text') or '').strip()
+    if not label:
+        return 0.0
+
+    w, h = surf.width, surf.height
+    aspect = w / max(h, 1.0)
+    score = 0.0
+
+    if surf.radius >= 3.0:
+        score += 0.25 if surf.radius < h * 0.45 else 0.25
+    parent_fill = surf.parent.color if (surf.parent and surf.parent.color) else ctx['page_bg']
+    if _contrast(surf.color, parent_fill) > 0.05 or surf.border_width > 0:
+        score += 0.15
+
+    tx0, tx1 = run['bbox'][0], run['bbox'][2]
+    if abs(((tx0 + tx1) / 2.0) - ((surf.bbox[0] + surf.bbox[2]) / 2.0)) <= max(10.0, w * 0.10):
+        score += 0.20
+    if len(label) <= 30:
+        score += 0.10
+    if 60 <= w <= 420 and 24 <= h <= 72 and 1.4 <= aspect <= 12.0:
+        score += 0.10
+    if _contrast(run.get('color', '#000000'), surf.color) > 0.30:
+        score += 0.10
+
+    # A control is mostly padding. A panel that happens to hold one centred line is not.
+    text_area = (run['bbox'][2] - run['bbox'][0]) * (run['bbox'][3] - run['bbox'][1])
+    if text_area / max(w * h, 1.0) < 0.55:
+        score += 0.10
+    return score
+
+def score_input(surf: 'Surface', ctx) -> float:
+    """Search/text fields demand strong evidence -- cards and filters look like them."""
+    if surf.color is None or len(surf.texts) > 1:
+        return 0.0
+    w, h = surf.width, surf.height
+    if not (24 <= h <= 60 and w >= 180 and w / max(h, 1.0) >= 4.0):
+        return 0.0
+
+    run = surf.texts[0] if surf.texts else None
+    score = 0.0
+    if _luminance(surf.color) > 200 or surf.border_width > 0:
+        score += 0.15
+    score += 0.15                                        # aspect already gated above
+    if surf.radius >= 3.0:
+        score += 0.10
+    if run is not None and _luminance(run.get('color', '#000000')) > 120:
+        score += 0.20                                    # placeholder grey, not body copy
+    if _leading_icon(ctx, surf, run):
+        score += 0.25
+    if _interior_ink(ctx, surf, [run['bbox']] if run else []) < 0.05:
+        score += 0.15
+    return score
+
+def score_card(surf: 'Surface', ctx) -> float:
+    """A card is a bounded region that genuinely groups aligned content."""
+    if surf.color is None:
+        return 0.0
+    kids = [c for c in surf.children if c.shape != 'complex']
+    members = len(kids) + len(surf.texts)
+    if members < 2:
+        return 0.0
+
+    score = 0.0
+    parent_fill = surf.parent.color if (surf.parent and surf.parent.color) else ctx['page_bg']
+    if _contrast(surf.color, parent_fill) > 0.03 or surf.border_width > 0:
+        score += 0.25                                    # a real visual boundary
+    score += 0.25 if members >= 3 else 0.15
+    if surf.width >= 120 and surf.height >= 90:
+        score += 0.15
+    if surf.radius >= 3.0 or surf.border_width > 0:
+        score += 0.15
+
+    edges = [c.bbox[0] for c in kids] + [t['bbox'][0] for t in surf.texts]
+    if len(edges) >= 2 and float(np.std(edges)) <= max(12.0, surf.width * 0.12):
+        score += 0.20                                    # children share an alignment
+    return score
+
+def classify_surface_role(surf: 'Surface', ctx) -> Tuple[str, str, float]:
+    """Chooses the HTML tag for a surface from scored evidence.
+
+    Deliberately conservative, and deliberately separate from how the surface is
+    painted: geometry and colour are reconstructed identically whatever this returns.
+    Below the promotion threshold a surface still renders pixel-for-pixel -- it just
+    renders as a <div> instead of claiming to be something it might not be.
+    """
+    b = score_button(surf, ctx)
+    i = score_input(surf, ctx)
+    c = score_card(surf, ctx)
+    best = max(b, i, c)
+
+    if best < 0.50:
+        return ('shape' if surf.shape == 'ellipse' else 'surface'), 'div', best
+
+    if b == best and b >= 0.75:
+        run = surf.texts[0]
+        label = (run.get('text') or '').strip()
+        if surf.height <= 30 and surf.width <= 170 and len(label) <= 18:
+            return 'badge', 'span', b
+        return 'button', 'button', b
+    if i == best and i >= 0.80:
+        return 'input', 'input', i
+    if c == best and c >= 0.70:
+        return 'card', 'div', c
+
+    # Enough evidence to be a container, not enough to name it. Visually identical.
+    return ('input-like' if i == best else 'panel'), 'div', best
+
+def assign_heading_levels(runs: List[Dict[str, Any]]) -> None:
+    """Ranks distinct body-independent font sizes into h1/h2/h3.
+
+    Headings are not 'big text' in absolute terms -- they are big relative to this
+    page's body copy, so the body size is derived first (the most common size,
+    weighted by how much text is set in it) and only clearly larger runs promote.
+    """
+    free = [r for r in runs if not r.get('host_role') in ('button', 'badge', 'input')]
+    if not free:
+        return
+    weight: Dict[float, int] = {}
+    for r in free:
+        size = round(float(r['fontSize']), 1)
+        weight[size] = weight.get(size, 0) + len((r.get('text') or ''))
+    body = max(weight.items(), key=lambda kv: kv[1])[0]
+
+    # Only the genuinely distinct display sizes become headings. A page has a handful
+    # of heading ranks, not one per measured size, and a document that is all <h6> is
+    # no more structured than one with none.
+    big = sorted({round(float(r['fontSize']), 1) for r in free if r['fontSize'] >= body * 1.35},
+                 reverse=True)[:3]
+    level_of = {size: f'h{i + 1}' for i, size in enumerate(big)}
+    for r in free:
+        size = round(float(r['fontSize']), 1)
+        if size in level_of:
+            r['tag'] = level_of[size]
+            r['role'] = 'heading'
+        elif abs(size - body) < 0.6:
+            r['role'] = 'body'
+
+def group_paragraphs(runs: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Merges consecutive same-style lines on a shared left edge into paragraph groups.
+
+    Requires a consistent line pitch as well as matching style, so a stack of unrelated
+    labels that happen to share an edge is not welded into one <p>.
+    """
+    cands = [r for r in runs
+             if r.get('role') == 'body' and not r.get('host_role') in ('button', 'badge', 'input')]
+    cands.sort(key=lambda r: (round(r['bbox'][0] / 4.0), r['bbox'][1]))
+
+    groups: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+
+    def flush():
+        if len(current) >= 2:
+            groups.append(list(current))
+        current.clear()
+
+    for r in cands:
+        if not current:
+            current.append(r)
+            continue
+        prev = current[-1]
+        same_style = (abs(prev['fontSize'] - r['fontSize']) < 0.8 and
+                      prev['color'] == r['color'] and
+                      prev['fontWeight'] == r['fontWeight'] and
+                      prev.get('host') is r.get('host'))
+        # Ink left edges differ by a few px purely from side bearings (an R vs a t).
+        aligned = abs(prev['bbox'][0] - r['bbox'][0]) <= 6.0
+        gap = r['bbox'][1] - prev['bbox'][3]
+        line_pitch = r['bbox'][1] - prev['bbox'][1]
+        plausible = -2.0 <= gap <= prev['fontSize'] * 1.1 and line_pitch > 0
+        if len(current) >= 2:
+            first_pitch = current[1]['bbox'][1] - current[0]['bbox'][1]
+            plausible = plausible and abs(line_pitch - first_pitch) <= max(3.0, first_pitch * 0.25)
+        if same_style and aligned and plausible:
+            current.append(r)
+        else:
+            flush()
+            current.append(r)
+    flush()
+    return groups
+
+def _columns_are_wrapped_labels(rows: List[List[Dict[str, Any]]]) -> bool:
+    """True when a candidate lattice is really a row of multi-line labels side by side.
+
+    Three stacked two-line captions line up exactly like a 2x3 table. The tell is that
+    each column is one continuous label -- same style, line-spacing pitch -- rather than
+    independent cell values.
+    """
+    if len(rows) > 2:
+        return False
+    n_cols = len(rows[0])
+    wrapped = 0
+    for c in range(n_cols):
+        col = [row[c] for row in rows]
+        a, b = col[0], col[-1]
+        same_style = (abs(a['fontSize'] - b['fontSize']) < 0.8 and a['color'] == b['color'])
+        tight = 0 < (b['bbox'][1] - a['bbox'][3]) <= a['fontSize'] * 0.9
+        if same_style and tight:
+            wrapped += 1
+    return wrapped >= max(1, n_cols - 1)
+
+def detect_text_lattice(runs: List[Dict[str, Any]], min_rows: int = 3,
+                        min_cols: int = 2) -> List[List[List[Dict[str, Any]]]]:
+    """Finds 2-D grids of text runs that should become real <table> elements.
+
+    Demands both a repeated row structure and columns that line up across those rows;
+    a single column of labels or one wide row is not a table.
+    """
+    free = [r for r in runs if r.get('host_role') not in ('button', 'badge', 'input')
+            and not r.get('consumed')]
+    if len(free) < min_rows * min_cols:
+        return []
+
+    rows: List[List[Dict[str, Any]]] = []
+    for r in sorted(free, key=lambda r: r['bbox'][1]):
+        placed = False
+        for row in rows:
+            ref = row[0]
+            overlap = min(ref['bbox'][3], r['bbox'][3]) - max(ref['bbox'][1], r['bbox'][1])
+            if overlap > 0.5 * min(ref['bbox'][3] - ref['bbox'][1], r['bbox'][3] - r['bbox'][1]):
+                row.append(r)
+                placed = True
+                break
+        if not placed:
+            rows.append([r])
+
+    grid_rows = [sorted(row, key=lambda r: r['bbox'][0]) for row in rows if len(row) >= min_cols]
+    if len(grid_rows) < min_rows:
+        return []
+
+    tables = []
+    run_group = [grid_rows[0]]
+    for row in grid_rows[1:]:
+        prev = run_group[-1]
+        if len(row) == len(prev) and all(
+            abs(a['bbox'][0] - b['bbox'][0]) <= 12.0 for a, b in zip(row, prev)
+        ):
+            run_group.append(row)
+        else:
+            if len(run_group) >= min_rows and not _columns_are_wrapped_labels(run_group):
+                tables.append(list(run_group))
+            run_group = [row]
+    if len(run_group) >= min_rows and not _columns_are_wrapped_labels(run_group):
+        tables.append(list(run_group))
+    return tables
+
+# ==============================================================================
 # 8. IMAGE RECONSTRUCTOR (LAYERED VISUAL ENGINE)
 # ==============================================================================
 
@@ -1288,6 +1979,231 @@ class ImageReconstructor:
         return ImageReconstructor.reconstruct_image_from_cv2(img, asset_dir=asset_dir, source_file=file_path)
 
     @staticmethod
+    def _extract_text_runs(img: np.ndarray) -> Tuple[List[Dict[str, Any]], np.ndarray]:
+        """OCRs the image into text runs sized against their true ink bounds."""
+        h, w = img.shape[:2]
+        runs: List[Dict[str, Any]] = []
+        text_mask = np.zeros((h, w), np.uint8)
+
+        ocr = ImageReconstructor._get_ocr()
+        if not ocr:
+            return runs, text_mask
+
+        try:
+            ocr_out = ocr.ocr(img)
+        except Exception as e:
+            logger.warning(f"OCR failed during image reconstruction: {e}")
+            return runs, text_mask
+        if not ocr_out:
+            return runs, text_mask
+
+        res = ocr_out[0]
+        if isinstance(res, dict):
+            texts = res.get('rec_texts', [])
+            boxes = res.get('rec_polys', [])
+            scores = res.get('rec_scores', [])
+        else:
+            texts = [l[1][0] for l in res if len(l) >= 2]
+            boxes = [l[0] for l in res if len(l) >= 2]
+            scores = [l[1][1] for l in res if len(l) >= 2 and len(l[1]) >= 2]
+
+        for text, box, score in zip(texts, boxes, scores):
+            label = str(text).strip()
+            if float(score) < 0.35 or not label:
+                continue
+            xs = [int(p[0]) for p in box]
+            ys = [int(p[1]) for p in box]
+            x0, y0 = max(0, min(xs)), max(0, min(ys))
+            x1, y1 = min(w, max(xs)), min(h, max(ys))
+            if x1 <= x0 or y1 <= y0:
+                continue
+
+            # A single character with no word around it is almost always an icon the
+            # recogniser forced into the alphabet (a magnifier read as 'Q', a bell as
+            # 'D'). Leave those pixels to the artwork pass instead of inventing text.
+            if len(label) == 1 and not label.isalnum():
+                continue
+            if len(label) == 1 and (x1 - x0) >= (y1 - y0) * 0.9:
+                continue
+
+            crop = img[y0:y1, x0:x1]
+            if crop.size == 0:
+                continue
+            x0_box, y0_box = x0, y0      # crop origin, before the ink box narrows it
+
+            box_h = y1 - y0
+            gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            _, bin_crop = cv2.threshold(gray_crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            stroke_ratio = np.count_nonzero(bin_crop) / float(crop.shape[0] * crop.shape[1])
+            font_weight = "bold" if (stroke_ratio > 0.28 or box_h > 32) else "normal"
+
+            border_px = np.concatenate([crop[0, :], crop[-1, :], crop[:, 0], crop[:, -1]], axis=0)
+            local_bg = np.median(border_px, axis=0)
+            diff = np.linalg.norm(crop.astype(float) - local_bg.astype(float), axis=2)
+            max_d = float(np.max(diff))
+
+            text_color = "#111111"
+            ink_box = None
+            if max_d > 22.0:
+                thresh = max(18.0, float(np.percentile(diff, 75)))
+                stroke_px = crop[diff >= thresh]
+                if len(stroke_px) > 0:
+                    text_color = _bgr_to_hex(np.median(stroke_px, axis=0).astype(int))
+
+                # Detection boxes carry padding, so they are not ink bounds. Fitting a
+                # font to them oversizes every run. Recover the true ink extent from the
+                # pixels that differ from the local background -- which also works for
+                # light-on-dark, where an Otsu "dark pixels are ink" test is backwards.
+                ink = (diff >= max(20.0, max_d * 0.45)).astype(np.uint8)
+                ink = keep_core_ink(ink)
+                rows, cols = np.any(ink, axis=1), np.any(ink, axis=0)
+                if rows.any() and cols.any():
+                    r0 = int(np.argmax(rows))
+                    r1 = len(rows) - int(np.argmax(rows[::-1]))
+                    c0 = int(np.argmax(cols))
+                    c1 = len(cols) - int(np.argmax(cols[::-1]))
+                    if r1 > r0 and c1 > c0:
+                        ink_box = (x0 + c0, y0 + r0, x0 + c1, y0 + r1)
+            else:
+                lum = 0.299 * local_bg[2] + 0.587 * local_bg[1] + 0.114 * local_bg[0]
+                text_color = "#ffffff" if lum < 128 else "#111111"
+
+            # Record the glyph pixels themselves, not the box. A filled box would hide
+            # whatever a control's background is doing between the letters.
+            if max_d > 22.0:
+                stroke = (diff >= max(20.0, max_d * 0.45)).astype(np.uint8) * 255
+                sub = text_mask[y0_box:y0_box + crop.shape[0], x0_box:x0_box + crop.shape[1]]
+                np.maximum(sub, stroke, out=sub)
+
+            if ink_box:
+                x0, y0, x1, y1 = ink_box
+
+            font_size, letter_spacing, line_height = fit_text_to_box(
+                label, x1 - x0, y1 - y0, font_weight == "bold"
+            )
+            runs.append({
+                'text': label,
+                'bbox': [float(x0), float(y0), float(x1), float(y1)],
+                'fontSize': float(font_size),
+                'fontWeight': font_weight,
+                'color': text_color,
+                'style': TextStyle(
+                    fontFamily=OCR_FONT_STACK,
+                    fontSize=float(font_size),
+                    fontWeight=font_weight,
+                    color=text_color,
+                    lineHeight=line_height,
+                    letterSpacing=letter_spacing,
+                ),
+            })
+        return runs, text_mask
+
+    @staticmethod
+    def _merge_borders(surfaces: List['Surface']) -> List['Surface']:
+        """Folds an outline ring into the fill it encloses, yielding one bordered box."""
+        rings = [s for s in surfaces if s.color is None and s.border_color]
+        fills = [s for s in surfaces if s.color is not None]
+        consumed = set()
+        for ring in rings:
+            best = None
+            for f in fills:
+                if not _contains(ring.bbox, f.bbox, pad=ring.border_width + 2.0):
+                    continue
+                if f.width * f.height < ring.width * ring.height * 0.55:
+                    continue
+                if best is None or f.width * f.height > best.width * best.height:
+                    best = f
+            if best is not None:
+                best.border_color = ring.border_color
+                best.border_width = ring.border_width
+                best.bbox = ring.bbox
+                if ring.radius > best.radius:
+                    best.radius = ring.radius
+                consumed.add(id(ring))
+        return [s for s in surfaces if id(s) not in consumed and
+                (s.color is not None or s.border_color is not None)]
+
+    @staticmethod
+    def _extract_residual_art(img, w, h, mean_bg, text_mask, paintable,
+                              asset_dir) -> List[DocumentElement]:
+        """Rasterises whatever no surface or text run explained.
+
+        This is the deliberate fallback for complex artwork -- gradients, mascots,
+        photographs, multi-colour icons. Trying to express those as CSS would be a
+        guess; keeping the original pixels is the honest answer.
+        """
+        # Paint what the CSS boxes will actually produce, then keep only the pixels that
+        # prediction gets wrong. Subtracting surface *areas* instead would erase every
+        # piece of artwork sitting on top of a card, and would silently hide a surface
+        # that was painted the wrong colour.
+        predicted = np.full_like(img, mean_bg, dtype=np.uint8)
+        for s in sorted(paintable, key=lambda s: -(s.width * s.height)):
+            if s.color is None:
+                continue
+            x0, y0, x1, y1 = [int(v) for v in s.bbox]
+            x0, y0 = max(0, x0), max(0, y0)
+            x1, y1 = min(w, x1), min(h, y1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            m = s.mask
+            if m.shape != (y1 - y0, x1 - x0):
+                m = cv2.resize(m, (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST)
+            c = s.color.lstrip('#')
+            bgr = np.array([int(c[4:6], 16), int(c[2:4], 16), int(c[0:2], 16)], dtype=np.uint8)
+            region = predicted[y0:y1, x0:x1]
+            region[m > 0] = bgr
+
+        delta = cv2.absdiff(img, predicted)
+        _, content = cv2.threshold(cv2.cvtColor(delta, cv2.COLOR_BGR2GRAY), 16, 255, cv2.THRESH_BINARY)
+        # Text is drawn as live text, so its ink is already accounted for.
+        ink = cv2.dilate(text_mask, _K3, iterations=1)
+        residual = cv2.bitwise_and(content, cv2.bitwise_not(ink))
+        residual = cv2.morphologyEx(residual, cv2.MORPH_OPEN, _K3)
+
+        grouped = cv2.morphologyEx(
+            residual, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)))
+        contours, _ = cv2.findContours(grouped, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        out: List[DocumentElement] = []
+        idx = 1
+        for c in contours:
+            x, y, cw, ch = cv2.boundingRect(c)
+            if cw < 3 or ch < 3:
+                continue
+            ink = int(np.count_nonzero(residual[y:y+ch, x:x+cw]))
+            # Small is fine -- icons are small. Sparse noise is not.
+            if ink < 40 or (cw * ch) < 40:
+                continue
+            if cw > w * 0.985 and ch > h * 0.985:
+                continue
+
+            crop = img[y:y+ch, x:x+cw]
+            local = residual[y:y+ch, x:x+cw]
+            if crop.size == 0:
+                continue
+            bgra = cv2.cvtColor(crop, cv2.COLOR_BGR2BGRA)
+            bgra[:, :, 3] = np.where(local > 0, 255, 0).astype(np.uint8)
+
+            ok, enc = cv2.imencode('.png', bgra)
+            if not ok:
+                continue
+            src = f"data:image/png;base64,{base64.b64encode(enc.tobytes()).decode('utf-8')}"
+            asset_name = f"art_{idx}.png"
+            if asset_dir:
+                os.makedirs(asset_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(asset_dir, asset_name), bgra)
+
+            out.append(DocumentElement(
+                id=f"art-{idx}", type='image',
+                bbox=[float(x), float(y), float(x + cw), float(y + ch)],
+                src=src, assetName=asset_name,
+                naturalWidth=float(cw), naturalHeight=float(ch),
+                tag='img', role='artwork', zIndex=9,
+            ))
+            idx += 1
+        return out
+
+    @staticmethod
     def reconstruct_image_from_cv2(
         img: np.ndarray,
         asset_dir: Optional[str] = None,
@@ -1296,217 +2212,176 @@ class ImageReconstructor:
     ) -> PageData:
         h, w = img.shape[:2]
 
-        # 1. Base64 of original image
+        # 1. Original pixels, kept for fidelity comparison and as the ultimate fallback
         _, enc_img = cv2.imencode('.png', img)
         orig_img_b64 = f"data:image/png;base64,{base64.b64encode(enc_img.tobytes()).decode('utf-8')}"
 
-        # 2. Detect page background color (median of border pixels)
+        # 2. Page ground colour (median of the border ring)
         borders = np.concatenate([img[0:8, :], img[-8:, :], img[:, 0:8], img[:, -8:]], axis=None).reshape(-1, 3)
         mean_bg = np.median(borders, axis=0).astype(np.uint8)
-        page_bg_hex = f"#{mean_bg[2]:02x}{mean_bg[1]:02x}{mean_bg[0]:02x}"
+        page_bg_hex = _bgr_to_hex(mean_bg)
+
+        # 3. Text runs, with sizes fitted to real ink bounds
+        text_runs, text_mask = ImageReconstructor._extract_text_runs(img)
+
+        # 4. Flat fills -> candidate CSS surfaces
+        surfaces = detect_surfaces(img, page_bg_hex, text_ink=(text_mask > 0).astype(np.uint8))
+        paintable = [s for s in surfaces if s.shape in ('rect', 'ellipse')]
+
+        # A bordered control arrives as two regions: a ring and the fill inside it.
+        # Fold the ring into the fill so it becomes one element with a real border.
+        paintable = ImageReconstructor._merge_borders(paintable)
+
+        build_containment(paintable)
+        assign_texts(paintable, text_runs)
+
+        # 5. Decide what each surface is, then let those roles inform the text roles
+        ctx = {'img': img, 'text_ink': (text_mask > 0).astype(np.uint8), 'page_bg': page_bg_hex}
+        roles: Dict[int, Tuple[str, str, float]] = {}
+        for s in paintable:
+            roles[id(s)] = classify_surface_role(s, ctx)
+            for run in s.texts:
+                run['host_role'] = roles[id(s)][0]
+
+        cluster_font_sizes(text_runs)
+        cluster_text_colors(text_runs)
+        assign_heading_levels(text_runs)
 
         elements: List[DocumentElement] = []
-        elem_counter = 1
+        counters: Dict[str, int] = {}
 
-        # 3. PaddleOCR for precision full-image text detection and typography
-        ocr = ImageReconstructor._get_ocr()
-        text_mask = np.zeros((h, w), np.uint8)
+        def next_id(kind: str) -> str:
+            counters[kind] = counters.get(kind, 0) + 1
+            return f"{kind}-{counters[kind]}"
 
-        if ocr:
-            try:
-                ocr_out = ocr.ocr(img)
-                if ocr_out and len(ocr_out) > 0:
-                    res = ocr_out[0]
-                    if isinstance(res, dict):
-                        texts = res.get('rec_texts', [])
-                        boxes = res.get('rec_polys', [])
-                        scores = res.get('rec_scores', [])
-                    else:
-                        texts = [l[1][0] for l in res if len(l) >= 2]
-                        boxes = [l[0] for l in res if len(l) >= 2]
-                        scores = [l[1][1] for l in res if len(l) >= 2 and len(l[1]) >= 2]
+        # 6. Emit surfaces as real boxes, absorbing a button's label into the button
+        surface_ids: Dict[int, str] = {}
+        for s in sorted(paintable, key=lambda s: -(s.width * s.height)):
+            role, tag, conf = roles[id(s)]
+            depth = 0
+            p = s.parent
+            while p is not None:
+                depth += 1
+                p = p.parent
 
-                    for text, box, score in zip(texts, boxes, scores):
-                        if float(score) < 0.35 or not str(text).strip():
-                            continue
-                        xs = [int(pt[0]) for pt in box]
-                        ys = [int(pt[1]) for pt in box]
-                        x0, y0, x1, y1 = max(0, min(xs)), max(0, min(ys)), min(w, max(xs)), min(h, max(ys))
-                        if x1 <= x0 or y1 <= y0:
-                            continue
+            eid = next_id(role if role in ('button', 'badge', 'card', 'input') else 'surface')
+            surface_ids[id(s)] = eid
 
-                        # Mark text mask with padding
-                        cv2.rectangle(text_mask, (max(0, x0 - 4), max(0, y0 - 4)), (min(w, x1 + 4), min(h, y1 + 4)), 255, -1)
+            box = BoxStyle(
+                backgroundColor=s.color,
+                borderColor=s.border_color,
+                borderWidth=s.border_width,
+                borderRadius=(f"{s.radius:.1f}px" if s.radius >= 1.0 else None),
+            )
+            if s.shape == 'ellipse':
+                box.borderRadius = "50%"
 
-                        box_h = y1 - y0
+            elem = DocumentElement(
+                id=eid,
+                type='rect',
+                bbox=[float(v) for v in s.bbox],
+                tag=tag,
+                role=role,
+                box=box,
+                confidence=conf,
+                parentId=surface_ids.get(id(s.parent)) if s.parent is not None else None,
+                zIndex=2 + depth * 2,
+            )
 
-                        # Typography & background-contrast stroke color sampling
-                        crop = img[y0:y1, x0:x1]
-                        text_color = "#111111"
-                        font_weight = "normal"
-                        ink_box = None
-                        if crop.size > 0:
-                            gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                            _, bin_crop = cv2.threshold(gray_crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                            stroke_ratio = np.count_nonzero(bin_crop) / float(crop.shape[0] * crop.shape[1])
-                            if stroke_ratio > 0.28 or box_h > 32:
-                                font_weight = "bold"
+            # An <input> is void, so its label has to become the placeholder attribute.
+            # Every other control keeps its label as a nested child at the exact
+            # coordinates it was measured at: the label really is inside the <button>,
+            # but naming the surface never moves a pixel.
+            if role == 'input' and len(s.texts) == 1:
+                run = s.texts[0]
+                elem.text = run['text']
+                elem.style = run['style']
+                run['consumed'] = True
 
-                            border_px = np.concatenate([crop[0, :], crop[-1, :], crop[:, 0], crop[:, -1]], axis=0)
-                            local_bg = np.median(border_px, axis=0)
-                            diff = np.linalg.norm(crop.astype(float) - local_bg.astype(float), axis=2)
-                            max_d = np.max(diff)
-                            if max_d > 22.0:
-                                thresh = max(18.0, np.percentile(diff, 75))
-                                stroke_px = crop[diff >= thresh]
-                                if len(stroke_px) > 0:
-                                    c_bgr = np.median(stroke_px, axis=0).astype(int)
-                                    text_color = f"#{c_bgr[2]:02x}{c_bgr[1]:02x}{c_bgr[0]:02x}"
+            elements.append(elem)
 
-                                # Detection boxes carry padding, so they are not ink bounds.
-                                # Fitting a font to them oversizes every run. Recover the
-                                # true ink extent from the pixels that differ from the local
-                                # background -- that works for light-on-dark too, which an
-                                # Otsu "dark pixels are ink" test gets backwards.
-                                ink = diff >= max(20.0, float(max_d) * 0.45)
-                                rows, cols = np.any(ink, axis=1), np.any(ink, axis=0)
-                                if rows.any() and cols.any():
-                                    r0 = int(np.argmax(rows))
-                                    r1 = len(rows) - int(np.argmax(rows[::-1]))
-                                    c0 = int(np.argmax(cols))
-                                    c1 = len(cols) - int(np.argmax(cols[::-1]))
-                                    if r1 > r0 and c1 > c0:
-                                        ink_box = (x0 + c0, y0 + r0, x0 + c1, y0 + r1)
-                            else:
-                                lum = 0.299 * local_bg[2] + 0.587 * local_bg[1] + 0.114 * local_bg[0]
-                                text_color = "#ffffff" if lum < 128 else "#111111"
+        # 7. Tables, then paragraphs, then whatever text is left over
+        for table_rows in detect_text_lattice(text_runs):
+            cells = [r for row in table_rows for r in row]
+            tx0 = min(r['bbox'][0] for r in cells)
+            ty0 = min(r['bbox'][1] for r in cells)
+            tx1 = max(r['bbox'][2] for r in cells)
+            ty1 = max(r['bbox'][3] for r in cells)
+            n_cols = len(table_rows[0])
+            widths = []
+            for c in range(n_cols):
+                col = [row[c] for row in table_rows]
+                widths.append(max(r['bbox'][2] for r in col) - min(r['bbox'][0] for r in col))
+            total = sum(widths) or 1.0
 
-                        if ink_box:
-                            x0, y0, x1, y1 = ink_box
-                        font_size, letter_spacing, line_height = fit_text_to_box(
-                            str(text), x1 - x0, y1 - y0, font_weight == "bold"
-                        )
-
-                        elements.append(DocumentElement(
-                            id=f"text-{elem_counter}",
-                            type='text',
-                            bbox=[float(x0), float(y0), float(x1), float(y1)],
-                            text=str(text).strip(),
-                            style=TextStyle(
-                                fontFamily=OCR_FONT_STACK,
-                                fontSize=float(font_size),
-                                fontWeight=font_weight,
-                                color=text_color,
-                                lineHeight=line_height,
-                                letterSpacing=letter_spacing
-                            ),
-                            zIndex=10
-                        ))
-                        elem_counter += 1
-            except Exception as e:
-                logger.warning(f"OCR failed during image reconstruction: {e}")
-
-        # 4. Extract Graphic Regions & Shapes (after text is masked out)
-        non_text = cv2.bitwise_and(img, img, mask=cv2.bitwise_not(text_mask))
-        diff = cv2.absdiff(non_text, np.full_like(non_text, mean_bg, dtype=np.uint8))
-        diff_gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-        _, graphic_mask = cv2.threshold(diff_gray, 24, 255, cv2.THRESH_BINARY)
-        graphic_mask = cv2.bitwise_and(graphic_mask, graphic_mask, mask=cv2.bitwise_not(text_mask))
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
-        closed = cv2.morphologyEx(graphic_mask, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-        img_counter = 1
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area < 400:
-                continue
-            x, y, cw, ch = cv2.boundingRect(c)
-            # Ignore border slivers (e.g. scrollbars or window borders)
-            if cw < 60 and ch > h * 0.7:
-                continue
-            # Ignore full canvas wrappers
-            if cw > w * 0.96 and ch > h * 0.96:
-                continue
-
-            # Check for divider line
-            if ch <= 4 and cw > 40:
-                line_color = f"#{img[y, x+cw//2][2]:02x}{img[y, x+cw//2][1]:02x}{img[y, x+cw//2][0]:02x}"
-                svg_line = f'<svg viewBox="0 0 {cw} {ch}" width="100%" height="100%"><line x1="0" y1="{ch/2}" x2="{cw}" y2="{ch/2}" stroke="{line_color}" stroke-width="{ch}"/></svg>'
-                elements.append(DocumentElement(
-                    id=f"vector-{elem_counter}",
-                    type='vector',
-                    bbox=[float(x), float(y), float(x + cw), float(y + ch)],
-                    svg=svg_line,
-                    zIndex=3
-                ))
-                elem_counter += 1
-                continue
-
-            # Check for circle
-            peri = cv2.arcLength(c, True)
-            circularity = 4 * np.pi * (area / (peri * peri)) if peri > 0 else 0
-            aspect = cw / float(max(ch, 1))
-            if circularity > 0.82 and 0.8 < aspect < 1.25 and cw < 120:
-                # A round outline is not the same as a solid disc. Logos, avatars and
-                # icon buttons are circular too, and replacing them with a flat fill
-                # destroys the artwork inside. Only vectorise when the interior really
-                # is one colour; otherwise fall through and keep the pixels.
-                disc = np.zeros((ch, cw), np.uint8)
-                cv2.ellipse(disc, (cw // 2, ch // 2),
-                            (max(cw // 2 - 2, 1), max(ch // 2 - 2, 1)), 0, 0, 360, 255, -1)
-                interior = img[y:y+ch, x:x+cw][disc > 0]
-                if interior.size > 0 and float(interior.reshape(-1, 3).std(axis=0).max()) < 12.0:
-                    c_bgr = np.median(interior.reshape(-1, 3), axis=0).astype(int)
-                    circle_color = f"#{c_bgr[2]:02x}{c_bgr[1]:02x}{c_bgr[0]:02x}"
-                    svg_circle = f'<svg viewBox="0 0 {cw} {ch}" width="100%" height="100%"><ellipse cx="{cw/2}" cy="{ch/2}" rx="{cw/2}" ry="{ch/2}" fill="{circle_color}"/></svg>'
-                    elements.append(DocumentElement(
-                        id=f"vector-{elem_counter}",
-                        type='vector',
-                        bbox=[float(x), float(y), float(x + cw), float(y + ch)],
-                        svg=svg_circle,
-                        zIndex=3
-                    ))
-                    elem_counter += 1
-                    continue
-
-            # Graphic asset extraction
-            cropped = img[y:y+ch, x:x+cw]
-            if cropped.size == 0:
-                continue
-
-            # Every glyph is re-emitted as a live text element, so it must be erased from
-            # the raster crop underneath. Skipping this double-renders all text.
-            is_bg_shape = (cw * ch > w * h * 0.25)
-            c_mask = text_mask[y:y+ch, x:x+cw]
-            if np.any(c_mask):
-                cropped = erase_text_from_crop(cropped, c_mask)
-
-            bgra = cv2.cvtColor(cropped, cv2.COLOR_BGR2BGRA)
-            if not is_bg_shape:
-                bg_diff = np.max(np.abs(cropped.astype(np.int32) - mean_bg.astype(np.int32)), axis=2)
-                bgra[bg_diff < 16, 3] = 0
-
-            _, enc_asset = cv2.imencode('.png', bgra)
-            src = f"data:image/png;base64,{base64.b64encode(enc_asset.tobytes()).decode('utf-8')}"
-            asset_name = f"image_asset_{img_counter}.png"
-
-            if asset_dir:
-                os.makedirs(asset_dir, exist_ok=True)
-                cv2.imwrite(os.path.join(asset_dir, asset_name), bgra)
+            parts = ['<table style="width:100%;height:100%;border-collapse:collapse;table-layout:fixed;">',
+                     '<colgroup>']
+            parts += [f'<col style="width:{(cw / total) * 100.0:.2f}%;">' for cw in widths]
+            parts.append('</colgroup><tbody>')
+            for row in table_rows:
+                parts.append('<tr>')
+                for cell in row:
+                    st = cell['style']
+                    parts.append(
+                        f'<td style="padding:2px 4px;vertical-align:middle;'
+                        f'font-size:{st.fontSize:.2f}px;font-weight:{st.fontWeight};'
+                        f'color:{st.color};">{html.escape(cell["text"])}</td>'
+                    )
+                    cell['consumed'] = True
+                parts.append('</tr>')
+            parts.append('</tbody></table>')
 
             elements.append(DocumentElement(
-                id=f"image-{img_counter}",
-                type='image',
-                bbox=[float(x), float(y), float(x + cw), float(y + ch)],
-                src=src,
-                assetName=asset_name,
-                naturalWidth=float(cw),
-                naturalHeight=float(ch),
-                zIndex=1 if is_bg_shape else 5
+                id=next_id('table'), type='table',
+                bbox=[float(tx0), float(ty0), float(tx1), float(ty1)],
+                tag='table', role='table', rows=len(table_rows), cols=n_cols,
+                html=''.join(parts), confidence=0.7, zIndex=11,
             ))
-            img_counter += 1
+
+        for group in group_paragraphs(text_runs):
+            if any(r.get('consumed') for r in group):
+                continue
+            px0 = min(r['bbox'][0] for r in group)
+            py0 = min(r['bbox'][1] for r in group)
+            px1 = max(r['bbox'][2] for r in group)
+            py1 = max(r['bbox'][3] for r in group)
+            lead = group[0]
+            pitch = max(group[1]['bbox'][1] - group[0]['bbox'][1], 1.0)
+            fs = max(lead['style'].fontSize, 1.0)
+            style = lead['style'].model_copy(update={'lineHeight': round(pitch / fs, 3)})
+            # Shift the block up by however far the first line's ink now sits below the
+            # element top, so switching to the measured pitch does not move line one.
+            py0 -= ink_top_offset(lead['text'], fs, pitch, lead['fontWeight'] == 'bold')
+            for r in group:
+                r['consumed'] = True
+            elements.append(DocumentElement(
+                id=next_id('para'), type='text',
+                bbox=[float(px0), float(py0), float(px1), float(py1)],
+                text=' '.join(r['text'] for r in group),
+                tag='p', role='paragraph', style=style, confidence=0.75,
+                parentId=surface_ids.get(id(lead.get('host'))) if lead.get('host') is not None else None,
+                zIndex=12,
+            ))
+
+        for run in text_runs:
+            if run.get('consumed'):
+                continue
+            host = run.get('host')
+            elements.append(DocumentElement(
+                id=next_id('text'), type='text',
+                bbox=[float(v) for v in run['bbox']],
+                text=run['text'],
+                tag=run.get('tag') or 'span',
+                role=run.get('role') or 'text',
+                style=run['style'],
+                parentId=surface_ids.get(id(host)) if host is not None else None,
+                zIndex=12,
+            ))
+
+        # 8. Residual artwork: everything no surface or text explained stays as pixels
+        elements.extend(ImageReconstructor._extract_residual_art(
+            img, w, h, mean_bg, text_mask, paintable, asset_dir
+        ))
 
         elements.sort(key=lambda e: e.zIndex or 1)
 
@@ -1595,44 +2470,127 @@ body.reconstructed-doc {
 .pdf-vector-container { pointer-events: none; }
 .pdf-formula-container { display: flex; align-items: center; justify-content: center; }
 .pdf-custom-container { width: 100%; height: 100%; overflow: hidden; }
+/* Reconstructed surfaces are real elements (button, h1, p, div), so the UA defaults
+   those tags carry -- margins, padding, borders, system button chrome -- have to be
+   cleared or they fight the measured geometry. */
+.pdf-rect { margin: 0; padding: 0; border: 0 none; background: none; appearance: none;
+    -webkit-appearance: none; font: inherit; text-decoration: none; }
+button.pdf-rect, .pdf-rect button { cursor: pointer; }
+.pdf-text { margin: 0; padding: 0; }
+h1.pdf-text, h2.pdf-text, h3.pdf-text, h4.pdf-text, h5.pdf-text, h6.pdf-text,
+p.pdf-text { margin: 0; padding: 0; font-weight: inherit; font-size: inherit; }
 @media print {
     body.reconstructed-doc { padding: 0; background: transparent; gap: 0; }
     .pdf-page { box-shadow: none; page-break-after: always; break-after: page; margin: 0; }
 }"""
 
 class HTMLRenderer:
+    VOID_TAGS = {'input', 'img', 'br', 'hr'}
+
     @staticmethod
-    def render_element(elem: DocumentElement, editable: bool = True) -> str:
+    def _box_css(box: Optional[BoxStyle]) -> str:
+        if box is None:
+            return ""
+        parts = []
+        if box.backgroundColor:
+            parts.append(f"background-color: {box.backgroundColor};")
+        if box.backgroundImage:
+            parts.append(f"background-image: {box.backgroundImage};")
+        if box.borderColor and box.borderWidth and box.borderWidth > 0:
+            parts.append(f"border: {box.borderWidth:.1f}px {box.borderStyle} {box.borderColor};")
+        if box.borderRadius:
+            parts.append(f"border-radius: {box.borderRadius};")
+        if box.boxShadow:
+            parts.append(f"box-shadow: {box.boxShadow};")
+        return " ".join(parts)
+
+    @staticmethod
+    def _text_css(style: Optional[TextStyle], default_align: str = 'left') -> str:
+        s = style
+        ff = s.fontFamily if (s and s.fontFamily) else "'Segoe UI', Arial, sans-serif"
+        fs = float(s.fontSize if (s and s.fontSize is not None) else 12.0)
+        fw = s.fontWeight if (s and s.fontWeight) else "normal"
+        fst = s.fontStyle if (s and s.fontStyle) else "normal"
+        col = s.color if (s and s.color) else "#000000"
+        ta = (s.textAlign if (s and s.textAlign) else default_align)
+        lh = float(s.lineHeight if (s and s.lineHeight is not None) else 1.0)
+        raw_ls = float(s.letterSpacing) if (s and s.letterSpacing) else 0.0
+        ls = f"letter-spacing: {raw_ls:.2f}px; " if abs(raw_ls) > 0.01 else ""
+        bg = f"background-color: {s.backgroundColor};" if (s and s.backgroundColor) else ""
+        return (f"font-family: {ff}; font-size: {fs:.2f}px; font-weight: {fw}; "
+                f"font-style: {fst}; color: {col}; text-align: {ta}; "
+                f"line-height: {lh:.3f}; {ls}{bg}")
+
+    @staticmethod
+    def render_element(elem: DocumentElement, editable: bool = True,
+                       origin: Tuple[float, float] = (0.0, 0.0),
+                       children: Optional[Dict[str, List[DocumentElement]]] = None) -> str:
         bbox = elem.bbox or [0, 0, 10, 10]
         x0 = float(bbox[0] if len(bbox) > 0 and bbox[0] is not None else 0.0)
         y0 = float(bbox[1] if len(bbox) > 1 and bbox[1] is not None else 0.0)
         x1 = float(bbox[2] if len(bbox) > 2 and bbox[2] is not None else x0 + 10.0)
         y1 = float(bbox[3] if len(bbox) > 3 and bbox[3] is not None else y0 + 10.0)
         width, height = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+        left, top = x0 - origin[0], y0 - origin[1]
+
         z_index = elem.zIndex or 1
         rot_deg = float(elem.rotation or 0.0)
         rot = f"transform: rotate({rot_deg}deg);" if rot_deg != 0.0 else ""
         elem_op = float(elem.opacity if elem.opacity is not None else 1.0)
         op_str = f"opacity: {elem_op:.2f}; " if elem_op < 0.999 else ""
 
-        common_style = f"position: absolute; left: {x0:.2f}px; top: {y0:.2f}px; width: {width:.2f}px; height: {height:.2f}px; z-index: {z_index}; {op_str}{rot}"
+        common_style = (f"position: absolute; left: {left:.2f}px; top: {top:.2f}px; "
+                        f"width: {width:.2f}px; height: {height:.2f}px; "
+                        f"z-index: {z_index}; {op_str}{rot}")
+
+        kids = (children or {}).get(elem.id, [])
+        kids_html = "".join(
+            HTMLRenderer.render_element(k, editable=editable, origin=(x0, y0), children=children)
+            for k in kids
+        )
+        data_attrs = (f'id="{elem.id}" data-id="{elem.id}" data-type="{elem.type}"'
+                      f'{f" data-role={chr(34)}{elem.role}{chr(34)}" if elem.role else ""}')
+
+        # --- Real CSS boxes: buttons, cards, inputs, panels, shapes ---
+        if elem.type == 'rect':
+            tag = (elem.tag or 'div').lower()
+            box_css = HTMLRenderer._box_css(elem.box)
+            if elem.text is not None:
+                # A control owns its label, so centre it inside the control itself.
+                label_css = HTMLRenderer._text_css(elem.style, default_align='center')
+                inner = (f"{common_style} {box_css} {label_css} display: flex; "
+                         f"align-items: center; justify-content: center; "
+                         f"margin: 0; padding: 0; cursor: pointer; white-space: nowrap;")
+                if tag in HTMLRenderer.VOID_TAGS:
+                    ph = html.escape(elem.text or "")
+                    return (f'<input class="pdf-element pdf-rect" {data_attrs} '
+                            f'placeholder="{ph}" style="{inner} justify-content: flex-start; '
+                            f'padding-left: 10px; border-style: {elem.box.borderStyle if elem.box else "solid"};"/>')
+                edit_attr = ' contenteditable="true" spellcheck="false"' if editable else ''
+                return (f'<{tag} class="pdf-element pdf-rect" {data_attrs}{edit_attr} '
+                        f'style="{inner}">{html.escape(elem.text)}</{tag}>')
+            if tag in HTMLRenderer.VOID_TAGS:
+                return f'<{tag} class="pdf-element pdf-rect" {data_attrs} style="{common_style} {box_css}"/>'
+            return (f'<{tag} class="pdf-element pdf-rect" {data_attrs} '
+                    f'style="{common_style} {box_css} margin: 0; padding: 0;">{kids_html}</{tag}>')
 
         if elem.type == 'text':
-            style = elem.style
-            ff = style.fontFamily if (style and style.fontFamily) else "'Segoe UI', Arial, sans-serif"
-            fs = float(style.fontSize if (style and style.fontSize is not None) else 12.0)
-            fw = style.fontWeight if (style and style.fontWeight) else "normal"
-            fst = style.fontStyle if (style and style.fontStyle) else "normal"
-            col = style.color if (style and style.color) else "#000000"
-            ta = style.textAlign if (style and style.textAlign) else "left"
-            lh = float(style.lineHeight if (style and style.lineHeight is not None) else 1.0)
-            bg = f"background-color: {style.backgroundColor};" if (style and style.backgroundColor) else ""
-            raw_ls = float(style.letterSpacing) if (style and style.letterSpacing) else 0.0
-            ls = f"letter-spacing: {raw_ls:.2f}px; " if abs(raw_ls) > 0.01 else ""
-
-            text_style = f"{common_style} font-family: {ff}; font-size: {fs:.2f}px; font-weight: {fw}; font-style: {fst}; color: {col}; text-align: {ta}; line-height: {lh:.3f}; {ls}white-space: nowrap; overflow: visible; {bg}"
+            tag = (elem.tag or 'div').lower()
+            if tag in HTMLRenderer.VOID_TAGS:
+                tag = 'div'
+            # Paragraphs are allowed to wrap; single runs are positioned by their ink box
+            # and must not reflow, or they would drift off the coordinates they were fitted to.
+            wrap = "white-space: normal; overflow-wrap: break-word;" if tag == 'p' else "white-space: nowrap;"
+            text_style = (f"{common_style} {HTMLRenderer._text_css(elem.style)} "
+                          f"margin: 0; padding: 0; {wrap} overflow: visible;")
 
             if elem.spans and len(elem.spans) > 1:
+                base = elem.style
+                ff = base.fontFamily if (base and base.fontFamily) else ""
+                fs = float(base.fontSize if (base and base.fontSize is not None) else 12.0)
+                fw = base.fontWeight if (base and base.fontWeight) else "normal"
+                fst = base.fontStyle if (base and base.fontStyle) else "normal"
+                col = base.color if (base and base.color) else "#000000"
                 parts = []
                 for sp in elem.spans:
                     s = sp.style
@@ -1650,28 +2608,35 @@ class HTMLRenderer:
                 content_html = html.escape(elem.text or '')
 
             edit_attr = ' contenteditable="true" spellcheck="false"' if editable else ''
-            return f'<div class="pdf-element pdf-text" id="{elem.id}" data-id="{elem.id}" data-type="text"{edit_attr} style="{text_style}">{content_html}</div>'
+            return (f'<{tag} class="pdf-element pdf-text" {data_attrs}{edit_attr} '
+                    f'style="{text_style}">{content_html}{kids_html}</{tag}>')
 
-        elif elem.type == 'image':
+        if elem.type == 'image':
             src = elem.src or ''
-            return f'<div class="pdf-element pdf-image-container" id="{elem.id}" data-id="{elem.id}" data-type="image" style="{common_style}"><img src="{src}" alt="Embedded Asset" loading="lazy" /></div>'
+            return (f'<div class="pdf-element pdf-image-container" {data_attrs} '
+                    f'style="{common_style}"><img src="{src}" alt="{elem.role or "Embedded Asset"}" '
+                    f'loading="lazy" /></div>')
 
-        elif elem.type == 'table':
+        if elem.type == 'table':
             content = elem.html or '<table><tr><td>Table</td></tr></table>'
             if editable:
-                content = content.replace('<td', '<td contenteditable="true" spellcheck="false"').replace('<th', '<th contenteditable="true" spellcheck="false"')
-            return f'<div class="pdf-element pdf-table-container" id="{elem.id}" data-id="{elem.id}" data-type="table" style="{common_style}">{content}</div>'
+                content = content.replace('<td', '<td contenteditable="true" spellcheck="false"').replace(
+                    '<th', '<th contenteditable="true" spellcheck="false"')
+            return (f'<div class="pdf-element pdf-table-container" {data_attrs} '
+                    f'style="{common_style}">{content}</div>')
 
-        elif elem.type == 'vector':
-            return f'<div class="pdf-element pdf-vector-container" id="{elem.id}" data-id="{elem.id}" data-type="vector" style="{common_style}">{elem.svg or "<svg></svg>"}</div>'
+        if elem.type == 'vector':
+            return (f'<div class="pdf-element pdf-vector-container" {data_attrs} '
+                    f'style="{common_style}">{elem.svg or "<svg></svg>"}</div>')
 
-        elif elem.type == 'formula':
+        if elem.type == 'formula':
             formula_html = elem.renderedHtml or f'<div>{html.escape(elem.text or "")}</div>'
-            return f'<div class="pdf-element pdf-formula-container" id="{elem.id}" data-id="{elem.id}" data-type="formula" style="{common_style}">{formula_html}</div>'
+            return (f'<div class="pdf-element pdf-formula-container" {data_attrs} '
+                    f'style="{common_style}">{formula_html}</div>')
 
-        elif elem.type == 'custom' or elem.html:
-            content = elem.html or ''
-            return f'<div class="pdf-element pdf-custom-container" id="{elem.id}" data-id="{elem.id}" data-type="custom" style="{common_style}">{content}</div>'
+        if elem.type == 'custom' or elem.html:
+            return (f'<div class="pdf-element pdf-custom-container" {data_attrs} '
+                    f'style="{common_style}">{elem.html or ""}</div>')
         return ''
 
     @staticmethod
@@ -1679,11 +2644,24 @@ class HTMLRenderer:
         w = float(page.width if page.width is not None else 595.0)
         h = float(page.height if page.height is not None else 842.0)
         bg = f" background-color: {page.backgroundColor};" if getattr(page, 'backgroundColor', None) else ""
-        rendered_elements = [HTMLRenderer.render_element(elem, editable=editable) for elem in page.elements]
+
+        # Nest by parentId so a card really contains its contents in the markup.
+        ids = {e.id for e in page.elements}
+        children: Dict[str, List[DocumentElement]] = {}
+        roots: List[DocumentElement] = []
+        for e in page.elements:
+            pid = getattr(e, 'parentId', None)
+            if pid and pid in ids and pid != e.id:
+                children.setdefault(pid, []).append(e)
+            else:
+                roots.append(e)
+
+        rendered = [HTMLRenderer.render_element(e, editable=editable, children=children)
+                    for e in roots]
         return (
             f'<div class="pdf-page" id="pdf-page-{page.pageNumber}" data-page="{page.pageNumber}" '
             f'data-scanned="{"true" if page.isScanned else "false"}" style="width: {w:.2f}px; height: {h:.2f}px;{bg}">\n'
-            f'{"\n".join(rendered_elements)}\n</div>'
+            f'{"\n".join(rendered)}\n</div>'
         )
 
     @staticmethod
@@ -1743,20 +2721,15 @@ class Exporter:
 
             exported_pages_html = []
             for page in doc_data.pages:
-                rendered_elems = []
-                for elem in page.elements:
-                    if elem.type == 'image' and elem.id in assets_map:
-                        cloned_elem = elem.model_copy(update={'src': assets_map[elem.id]})
-                        rendered_elems.append(HTMLRenderer.render_element(cloned_elem, editable=False))
-                    else:
-                        rendered_elems.append(HTMLRenderer.render_element(elem, editable=False))
-
-                w = float(page.width if page.width is not None else 595.0)
-                h = float(page.height if page.height is not None else 842.0)
-                exported_pages_html.append(
-                    f'<div class="pdf-page" id="pdf-page-{page.pageNumber}" style="width: {w:.2f}px; height: {h:.2f}px;">\n'
-                    + "\n".join(rendered_elems) + '\n</div>'
-                )
+                # Swap embedded data URLs for the extracted asset files, then let
+                # render_page rebuild the containment tree -- rendering elements flat
+                # here would emit every nested child twice.
+                relinked = page.model_copy(update={'elements': [
+                    e.model_copy(update={'src': assets_map[e.id]})
+                    if (e.type == 'image' and e.id in assets_map) else e
+                    for e in page.elements
+                ]})
+                exported_pages_html.append(HTMLRenderer.render_page(relinked, editable=False))
 
             index_html = f"""<!DOCTYPE html>
 <html lang="en">
