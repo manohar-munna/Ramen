@@ -19,6 +19,8 @@ def test_health_and_index():
     assert "RAMEN" in response.text
     assert "<style>" in response.text
     assert "<script>" in response.text
+    assert "btn-view-code" in response.text
+    assert "btn-page-code" in response.text
 
 def test_models_status_endpoint():
     response = client.get("/api/models/status")

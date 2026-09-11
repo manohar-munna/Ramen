@@ -1127,6 +1127,114 @@ html, body {
     flex-direction: column;
 }
 
+/* Page HTML & CSS Code Viewer */
+.fidelity-code-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    overflow: hidden;
+}
+
+.code-view-layout {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    gap: 16px;
+}
+
+.code-view-preview-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background-color: #0f172a;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    overflow: hidden;
+    min-width: 300px;
+}
+
+.code-view-source-pane {
+    flex: 1.25;
+    display: flex;
+    flex-direction: column;
+    background-color: #0b1120;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.code-view-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px;
+    background-color: var(--bg-chrome);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.code-tabs {
+    display: flex;
+    gap: 6px;
+}
+
+.code-tab-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-secondary);
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.code-tab-btn:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-surface-hover);
+}
+
+.code-tab-btn.active {
+    color: #ffffff;
+    background-color: var(--accent-blue);
+    font-weight: 600;
+}
+
+.code-info-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.code-page-badge {
+    font-size: 11px;
+    padding: 3px 8px;
+    background-color: var(--bg-surface);
+    color: var(--text-secondary);
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+.code-editor-area {
+    flex: 1;
+    overflow: auto;
+    background-color: #070b14;
+    padding: 16px;
+    position: relative;
+}
+
+.code-pre {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: #e2e8f0;
+    white-space: pre-wrap;
+    word-break: break-all;
+    tab-size: 2;
+    user-select: text;
+}
+
 /* Local Models Modal */
 .model-desc-p {
     font-size: 12px;
@@ -1227,6 +1335,14 @@ html, body {
                     <line x1="12" y1="3" x2="12" y2="21"></line>
                 </svg>
                 Fidelity Diff
+            </button>
+
+            <button id="btn-page-code" class="btn btn-secondary" title="View HTML and CSS of current page">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="16 18 22 12 16 6"></polyline>
+                    <polyline points="8 6 2 12 8 18"></polyline>
+                </svg>
+                Page Code
             </button>
 
             <div class="dropdown-container">
@@ -1418,6 +1534,7 @@ html, body {
                 <div class="fidelity-header-actions">
                     <div class="view-mode-toggle">
                         <button id="btn-view-split" class="btn-toggle active">Side-by-Side</button>
+                        <button id="btn-view-code" class="btn-toggle">HTML &amp; CSS</button>
                         <button id="btn-view-slider" class="btn-toggle">Split Slider</button>
                         <button id="btn-view-heatmap" class="btn-toggle">Diff Heatmap</button>
                     </div>
@@ -1438,6 +1555,40 @@ html, body {
                         <div class="diff-pane-title">Generated HTML Page</div>
                         <div class="diff-pane-canvas" id="fidelity-html-pane">
                             <!-- Cloned page rendered here -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- HTML & CSS Page Code view -->
+                <div id="fidelity-code-container" class="fidelity-code-container" style="display: none;">
+                    <div class="code-view-layout">
+                        <div class="code-view-preview-pane">
+                            <div class="diff-pane-title" id="code-preview-title">Page Preview</div>
+                            <div class="diff-pane-canvas" id="code-preview-canvas">
+                                <!-- Scaled page preview rendered here -->
+                            </div>
+                        </div>
+                        <div class="code-view-source-pane">
+                            <div class="code-view-toolbar">
+                                <div class="code-tabs">
+                                    <button id="btn-code-tab-html" class="code-tab-btn active">Page HTML</button>
+                                    <button id="btn-code-tab-css" class="code-tab-btn">Base CSS</button>
+                                    <button id="btn-code-tab-full" class="code-tab-btn">Standalone HTML</button>
+                                </div>
+                                <div class="code-info-meta">
+                                    <span id="code-page-indicator" class="code-page-badge">Page 1</span>
+                                    <button id="btn-copy-page-code" class="btn-control-subtle" title="Copy code to clipboard">
+                                        <svg class="btn-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;vertical-align:-2px;margin-right:4px;">
+                                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                                        </svg>
+                                        <span id="copy-btn-label">Copy</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="code-editor-area">
+                                <pre class="code-pre"><code id="page-code-content" class="code-content"></code></pre>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1512,6 +1663,7 @@ const elements = {
     btnOpenPdf: document.getElementById('btn-open-pdf'),
     pdfFileInput: document.getElementById('pdf-file-input'),
     btnCompareMode: document.getElementById('btn-compare-mode'),
+    btnPageCode: document.getElementById('btn-page-code'),
     btnExportDropdown: document.getElementById('btn-export-dropdown'),
     exportMenu: document.getElementById('export-menu'),
     btnModelSettings: document.getElementById('btn-model-settings'),
@@ -1567,9 +1719,11 @@ const elements = {
     metricSsim: document.getElementById('metric-ssim'),
     metricPixdiff: document.getElementById('metric-pixdiff'),
     btnViewSplit: document.getElementById('btn-view-split'),
+    btnViewCode: document.getElementById('btn-view-code'),
     btnViewSlider: document.getElementById('btn-view-slider'),
     btnViewHeatmap: document.getElementById('btn-view-heatmap'),
     fidelitySplitContainer: document.getElementById('fidelity-split-container'),
+    fidelityCodeContainer: document.getElementById('fidelity-code-container'),
     fidelitySliderContainer: document.getElementById('fidelity-slider-container'),
     fidelityHeatmapContainer: document.getElementById('fidelity-heatmap-container'),
     fidelityOrigPane: document.getElementById('fidelity-orig-pane'),
@@ -1581,6 +1735,14 @@ const elements = {
     sliderClipper: document.getElementById('slider-clipper'),
     sliderHandle: document.getElementById('slider-handle'),
     fidelityHeatmapImg: document.getElementById('fidelity-heatmap-img'),
+    btnCodeTabHtml: document.getElementById('btn-code-tab-html'),
+    btnCodeTabCss: document.getElementById('btn-code-tab-css'),
+    btnCodeTabFull: document.getElementById('btn-code-tab-full'),
+    btnCopyPageCode: document.getElementById('btn-copy-page-code'),
+    pageCodeContent: document.getElementById('page-code-content'),
+    codePreviewCanvas: document.getElementById('code-preview-canvas'),
+    codePreviewTitle: document.getElementById('code-preview-title'),
+    codePageIndicator: document.getElementById('code-page-indicator'),
     
     // Models Modal
     modelsModal: document.getElementById('models-modal'),
@@ -1640,13 +1802,27 @@ function setupEventListeners() {
     // Keyboard navigation
     window.addEventListener('keydown', handleGlobalKeyDown);
     
-    // Fidelity Diff Modal
+    // Fidelity Diff Modal & Page Code
     elements.btnCompareMode.addEventListener('click', openFidelityModal);
+    if (elements.btnPageCode) {
+        elements.btnPageCode.addEventListener('click', () => {
+            if (!state.doc || !state.doc.pages[state.currentPageIndex]) {
+                alert('Please open a PDF document first.');
+                return;
+            }
+            openFidelityModal();
+            setDiffViewMode('code');
+        });
+    }
     elements.btnCloseFidelity.addEventListener('click', () => elements.fidelityModal.style.display = 'none');
     elements.btnViewSplit.addEventListener('click', () => setDiffViewMode('split'));
+    if (elements.btnViewCode) {
+        elements.btnViewCode.addEventListener('click', () => setDiffViewMode('code'));
+    }
     elements.btnViewSlider.addEventListener('click', () => setDiffViewMode('slider'));
     elements.btnViewHeatmap.addEventListener('click', () => setDiffViewMode('heatmap'));
     setupSliderInteraction();
+    setupCodeViewerInteraction();
     
     // Models Modal
     elements.btnModelSettings.addEventListener('click', openModelsModal);
@@ -2652,18 +2828,241 @@ function syncSliderDimensions() {
     }
 }
 
+let currentCodeTab = 'html';
+
+const BASE_DOC_CSS = `/* PDF Reconstructed Document Styling */
+* { box-sizing: border-box; }
+body.reconstructed-doc {
+    margin: 0; padding: 24px; background-color: #525659;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 24px;
+}
+.pdf-page {
+    position: relative; background-color: #ffffff; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    overflow: hidden; transform-origin: top center; user-select: text; -webkit-user-select: text; margin: 0 auto;
+    color: #000000 !important;
+}
+.pdf-element { box-sizing: border-box; color: #000000; }
+.pdf-text { cursor: text; outline: none; word-break: break-word; white-space: pre-wrap; user-select: text; }
+.pdf-text[contenteditable="true"]:focus { outline: 1px dashed #3b82f6; background-color: rgba(59, 130, 246, 0.05); }
+.pdf-image-container { user-select: none; }
+.pdf-image-container img { display: block; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
+.pdf-table-container { overflow: hidden; user-select: text; color: #000000 !important; }
+.reconstructed-table {
+    width: 100%; height: 100%; border-collapse: collapse;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    font-size: 11px; line-height: 1.35; color: #000000 !important; background-color: #ffffff;
+}
+.reconstructed-table th {
+    background-color: #e5e7eb !important; color: #000000 !important;
+    border: 1px solid #333333 !important; font-weight: 700 !important;
+    padding: 6px 10px; text-align: left; vertical-align: middle;
+}
+.reconstructed-table td {
+    color: #000000 !important; border: 1px solid #475569 !important;
+    padding: 6px 10px; text-align: left; vertical-align: middle;
+}
+.pdf-table-container table { width: 100%; height: 100%; border-collapse: collapse; }
+.pdf-table-container th, .pdf-table-container td { outline: none; color: #000000 !important; }
+.pdf-table-container th[contenteditable="true"]:focus, .pdf-table-container td[contenteditable="true"]:focus {
+    outline: 2px solid #3b82f6; background-color: rgba(59, 130, 246, 0.08);
+}
+.pdf-vector-container { pointer-events: none; }
+.pdf-formula-container { display: flex; align-items: center; justify-content: center; }
+@media print {
+    body.reconstructed-doc { padding: 0; background: transparent; gap: 0; }
+    .pdf-page { box-shadow: none; page-break-after: always; break-after: page; margin: 0; }
+}`;
+
+function formatHTML(htmlStr) {
+    if (!htmlStr) return '';
+    let formatted = '';
+    let indent = 0;
+    const tokens = htmlStr.replace(/>\s*</g, '><').split(/(?=<)|(?<=>)/g);
+    const selfClosing = ['<img', '<input', '<br', '<hr', '<meta', '<link'];
+    tokens.forEach(token => {
+        const t = token.trim();
+        if (!t) return;
+        if (t.startsWith('</')) {
+            indent = Math.max(0, indent - 1);
+            formatted += '  '.repeat(indent) + t + '\n';
+        } else if (t.startsWith('<') && !t.endsWith('/>') && !t.startsWith('<!') && !selfClosing.some(sc => t.toLowerCase().startsWith(sc))) {
+            formatted += '  '.repeat(indent) + t + '\n';
+            indent++;
+        } else {
+            formatted += '  '.repeat(indent) + t + '\n';
+        }
+    });
+    return formatted.trim();
+}
+
+function getPageHTML(page, truncateImages = true) {
+    if (!page) return '';
+    const domPage = document.getElementById(`pdf-page-${page.pageNumber}`);
+    if (domPage) {
+        const clone = domPage.cloneNode(true);
+        clone.querySelectorAll('[contenteditable]').forEach(el => el.removeAttribute('contenteditable'));
+        clone.querySelectorAll('.selected').forEach(el => el.classList.remove('selected'));
+        clone.style.boxShadow = '';
+        clone.style.transform = '';
+        clone.style.margin = '0';
+        if (truncateImages) {
+            clone.querySelectorAll('img').forEach(img => {
+                if (img.src && img.src.startsWith('data:') && img.src.length > 100) {
+                    img.setAttribute('src', img.src.substring(0, 48) + '... [base64 data truncated] ...');
+                }
+            });
+        }
+        return formatHTML(clone.outerHTML);
+    }
+    return '';
+}
+
+function getStandalonePageHTML(page) {
+    const pageHtml = getPageHTML(page, false);
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page ${page.pageNumber} - Reconstructed PDF</title>
+    <style>
+${BASE_DOC_CSS}
+    </style>
+</head>
+<body class="reconstructed-doc">
+${pageHtml}
+</body>
+</html>`;
+}
+
+function renderCodeViewPreview(page) {
+    const previewCanvas = elements.codePreviewCanvas || document.getElementById('code-preview-canvas');
+    if (!previewCanvas) return;
+    previewCanvas.innerHTML = '';
+    
+    const domPage = document.getElementById(`pdf-page-${page.pageNumber}`);
+    if (domPage) {
+        const availW = Math.max((previewCanvas.clientWidth || 360) - 32, 200);
+        const availH = Math.max((previewCanvas.clientHeight || 500) - 32, 200);
+        const pageW = page.width || 595.0;
+        const pageH = page.height || 842.0;
+        const scale = Math.min(availW / pageW, availH / pageH, 1.0);
+        const targetW = Math.round(pageW * scale);
+        const targetH = Math.round(pageH * scale);
+        
+        const clonedPage = domPage.cloneNode(true);
+        clonedPage.style.boxShadow = 'none';
+        clonedPage.style.margin = '0';
+        clonedPage.style.position = 'absolute';
+        clonedPage.style.top = '0';
+        clonedPage.style.left = '0';
+        clonedPage.style.width = `${pageW}px`;
+        clonedPage.style.height = `${pageH}px`;
+        clonedPage.style.transformOrigin = '0 0';
+        clonedPage.style.transform = `scale(${scale})`;
+        clonedPage.style.pointerEvents = 'none';
+        clonedPage.style.color = '#000000';
+        clonedPage.querySelectorAll('[contenteditable]').forEach(el => el.removeAttribute('contenteditable'));
+        
+        const wrapper = document.createElement('div');
+        wrapper.className = 'diff-html-page-wrapper';
+        wrapper.style.width = `${targetW}px`;
+        wrapper.style.height = `${targetH}px`;
+        wrapper.appendChild(clonedPage);
+        previewCanvas.appendChild(wrapper);
+    }
+}
+
+function updatePageCodeDisplay() {
+    if (!state.doc || !state.doc.pages[state.currentPageIndex]) return;
+    const page = state.doc.pages[state.currentPageIndex];
+    
+    if (elements.codePageIndicator) {
+        elements.codePageIndicator.textContent = `Page ${page.pageNumber} of ${state.doc.pages.length}`;
+    }
+    if (elements.codePreviewTitle) {
+        elements.codePreviewTitle.textContent = `Page ${page.pageNumber} Live Preview`;
+    }
+    
+    if (elements.btnCodeTabHtml) elements.btnCodeTabHtml.classList.toggle('active', currentCodeTab === 'html');
+    if (elements.btnCodeTabCss) elements.btnCodeTabCss.classList.toggle('active', currentCodeTab === 'css');
+    if (elements.btnCodeTabFull) elements.btnCodeTabFull.classList.toggle('active', currentCodeTab === 'full');
+    
+    if (elements.pageCodeContent) {
+        if (currentCodeTab === 'html') {
+            elements.pageCodeContent.textContent = getPageHTML(page, true);
+        } else if (currentCodeTab === 'css') {
+            elements.pageCodeContent.textContent = BASE_DOC_CSS;
+        } else if (currentCodeTab === 'full') {
+            elements.pageCodeContent.textContent = getStandalonePageHTML(page);
+        }
+    }
+    
+    renderCodeViewPreview(page);
+}
+
+function setupCodeViewerInteraction() {
+    if (elements.btnCodeTabHtml) {
+        elements.btnCodeTabHtml.addEventListener('click', () => {
+            currentCodeTab = 'html';
+            updatePageCodeDisplay();
+        });
+    }
+    if (elements.btnCodeTabCss) {
+        elements.btnCodeTabCss.addEventListener('click', () => {
+            currentCodeTab = 'css';
+            updatePageCodeDisplay();
+        });
+    }
+    if (elements.btnCodeTabFull) {
+        elements.btnCodeTabFull.addEventListener('click', () => {
+            currentCodeTab = 'full';
+            updatePageCodeDisplay();
+        });
+    }
+    if (elements.btnCopyPageCode) {
+        elements.btnCopyPageCode.addEventListener('click', () => {
+            if (!state.doc || !state.doc.pages[state.currentPageIndex]) return;
+            const page = state.doc.pages[state.currentPageIndex];
+            let textToCopy = '';
+            if (currentCodeTab === 'html') {
+                textToCopy = getPageHTML(page, false);
+            } else if (currentCodeTab === 'css') {
+                textToCopy = BASE_DOC_CSS;
+            } else if (currentCodeTab === 'full') {
+                textToCopy = getStandalonePageHTML(page);
+            }
+            navigator.clipboard.writeText(textToCopy).then(() => {
+                const lbl = document.getElementById('copy-btn-label');
+                if (lbl) {
+                    const originalText = lbl.textContent;
+                    lbl.textContent = 'Copied!';
+                    setTimeout(() => { lbl.textContent = originalText; }, 2000);
+                }
+            }).catch(err => {
+                console.warn('Copy to clipboard failed:', err);
+            });
+        });
+    }
+}
+
 function setDiffViewMode(mode) {
     state.diffViewMode = mode;
     elements.btnViewSplit.classList.toggle('active', mode === 'split');
+    if (elements.btnViewCode) elements.btnViewCode.classList.toggle('active', mode === 'code');
     elements.btnViewSlider.classList.toggle('active', mode === 'slider');
     elements.btnViewHeatmap.classList.toggle('active', mode === 'heatmap');
     
     elements.fidelitySplitContainer.style.display = mode === 'split' ? 'flex' : 'none';
+    if (elements.fidelityCodeContainer) elements.fidelityCodeContainer.style.display = mode === 'code' ? 'flex' : 'none';
     elements.fidelitySliderContainer.style.display = mode === 'slider' ? 'flex' : 'none';
     elements.fidelityHeatmapContainer.style.display = mode === 'heatmap' ? 'flex' : 'none';
     
     if (mode === 'slider') {
         syncSliderDimensions();
+    } else if (mode === 'code') {
+        updatePageCodeDisplay();
     }
 }
 
