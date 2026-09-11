@@ -14,7 +14,7 @@ import pymupdf
 
 from engine import (
     DocumentData, PageData, DocumentElement,
-    PDFAnalyzer, DigitalExtractor, ScannedExtractor,
+    PDFAnalyzer, DigitalExtractor, ScannedExtractor, ImageReconstructor,
     HTMLRenderer, Exporter, FidelityChecker, ModelManager
 )
 
@@ -105,51 +105,74 @@ async def convert_pdf(file: UploadFile = File(...)):
         f.write(contents)
 
     try:
-        update_job_stage(job_id, "Analyzing Document Structure", "Detecting digital objects vs scanned pages...", 15)
-        analysis = PDFAnalyzer.analyze_document(file_path)
-        page_count = analysis["pageCount"]
-
-        doc = pymupdf.open(file_path)
-        reconstructed_pages: List[PageData] = []
+        ext = os.path.splitext(file.filename)[1].lower()
+        is_image = ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff']
         asset_dir = os.path.join(OUTPUTS_DIR, job_id, "assets")
         os.makedirs(asset_dir, exist_ok=True)
-
-        for p_idx in range(page_count):
-            p_info = analysis["pages"][p_idx]
-            is_scanned = p_info["isScanned"]
-            p_num = p_idx + 1
-            pct = int(20 + (p_idx / max(page_count, 1)) * 70)
-
-            if is_scanned:
-                update_job_stage(
-                    job_id,
-                    "Layout & OCR Analysis",
-                    f"Processing scanned page {p_num} of {page_count} (PP-DocLayout / OCR / Table)...",
-                    pct
-                )
-                p_data = ScannedExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
-            else:
-                update_job_stage(
-                    job_id,
-                    "Native Extraction",
-                    f"Extracting digital geometry, fonts, tables & vectors for page {p_num} of {page_count}...",
-                    pct
-                )
-                p_data = DigitalExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
-
-            reconstructed_pages.append(p_data)
-
-        update_job_stage(job_id, "Finalizing HTML", "Assembling 2D coordinate canvas and intermediate JSON...", 95)
         doc_title = os.path.splitext(file.filename)[0]
-        final_doc = DocumentData(
-            title=doc_title,
-            pageCount=page_count,
-            pages=reconstructed_pages,
-            metadata={
-                "filename": file.filename,
-                "analysis": analysis
+
+        if is_image:
+            update_job_stage(job_id, "Layered Visual Engine", "Analyzing image resolution, color palette, typography & shapes...", 25)
+            p_data = ImageReconstructor.reconstruct_image(file_path, asset_dir=asset_dir)
+            update_job_stage(job_id, "Finalizing HTML", "Assembling 2D coordinate canvas and intermediate JSON...", 90)
+            analysis = {
+                "pageCount": 1,
+                "isScannedDoc": True,
+                "pages": [{"page": 1, "isScanned": True, "textLength": len(p_data.elements)}]
             }
-        )
+            final_doc = DocumentData(
+                title=doc_title,
+                pageCount=1,
+                pages=[p_data],
+                metadata={
+                    "filename": file.filename,
+                    "isImage": True,
+                    "analysis": analysis
+                }
+            )
+        else:
+            update_job_stage(job_id, "Analyzing Document Structure", "Detecting digital objects vs scanned pages...", 15)
+            analysis = PDFAnalyzer.analyze_document(file_path)
+            page_count = analysis["pageCount"]
+
+            doc = pymupdf.open(file_path)
+            reconstructed_pages: List[PageData] = []
+
+            for p_idx in range(page_count):
+                p_info = analysis["pages"][p_idx]
+                is_scanned = p_info["isScanned"]
+                p_num = p_idx + 1
+                pct = int(20 + (p_idx / max(page_count, 1)) * 70)
+
+                if is_scanned:
+                    update_job_stage(
+                        job_id,
+                        "Layout & OCR Analysis",
+                        f"Processing scanned page {p_num} of {page_count} (PP-DocLayout / OCR / Table)...",
+                        pct
+                    )
+                    p_data = ScannedExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
+                else:
+                    update_job_stage(
+                        job_id,
+                        "Native Extraction",
+                        f"Extracting digital geometry, fonts, tables & vectors for page {p_num} of {page_count}...",
+                        pct
+                    )
+                    p_data = DigitalExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
+
+                reconstructed_pages.append(p_data)
+
+            update_job_stage(job_id, "Finalizing HTML", "Assembling 2D coordinate canvas and intermediate JSON...", 95)
+            final_doc = DocumentData(
+                title=doc_title,
+                pageCount=page_count,
+                pages=reconstructed_pages,
+                metadata={
+                    "filename": file.filename,
+                    "analysis": analysis
+                }
+            )
 
         CONVERTED_DOCUMENTS[job_id] = final_doc
         update_job_stage(job_id, "Completed", "Document successfully reconstructed!", 100, completed=True)

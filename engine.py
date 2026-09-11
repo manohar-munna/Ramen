@@ -32,6 +32,19 @@ if sys.platform == 'win32':
             except Exception:
                 pass
 
+# Patch Paddle static runner config resolver to disable PIR & mkldnn on Windows
+try:
+    import paddlex.inference.models.runners.paddle_static.runner as psr
+    _orig_static_resolve = psr.resolve_paddle_static_engine_config
+    def _safe_static_resolve(model_name, engine_config):
+        cfg = _orig_static_resolve(model_name, engine_config)
+        cfg['enable_new_ir'] = False
+        cfg['run_mode'] = 'paddle'
+        return cfg
+    psr.resolve_paddle_static_engine_config = _safe_static_resolve
+except Exception:
+    pass
+
 logger = logging.getLogger("RamenEngine")
 
 # ==============================================================================
@@ -95,6 +108,7 @@ class PageData(BaseModel):
     isScanned: bool = False
     elements: List[DocumentElement] = Field(default_factory=list)
     originalImageSrc: Optional[str] = None  # Base64 data URL
+    backgroundColor: Optional[str] = "#ffffff"
 
 class DocumentData(BaseModel):
     title: str = "Reconstructed Document"
@@ -1378,6 +1392,213 @@ class ScannedExtractor:
         )
 
 # ==============================================================================
+# 8b. IMAGE RECONSTRUCTOR (LAYERED VISUAL ENGINE)
+# ==============================================================================
+
+class ImageReconstructor:
+    _cached_ocr = None
+    _ocr_disabled = False
+
+    @classmethod
+    def _get_ocr(cls):
+        if cls._ocr_disabled:
+            return None
+        if cls._cached_ocr is None:
+            try:
+                from paddleocr import PaddleOCR
+                cls._cached_ocr = PaddleOCR(lang='en')
+            except Exception as e:
+                logger.warning(f"Could not initialize PaddleOCR: {e}")
+                cls._ocr_disabled = True
+                return None
+        return cls._cached_ocr
+
+    @staticmethod
+    def reconstruct_image(file_path: str, asset_dir: Optional[str] = None) -> PageData:
+        img = cv2.imread(file_path)
+        if img is None:
+            raise ValueError(f"Unable to read image at {file_path}")
+        h, w = img.shape[:2]
+
+        # 1. Base64 of original image
+        _, enc_img = cv2.imencode('.png', img)
+        orig_img_b64 = f"data:image/png;base64,{base64.b64encode(enc_img.tobytes()).decode('utf-8')}"
+
+        # 2. Detect page background color (median of border pixels)
+        borders = np.concatenate([img[0:8, :], img[-8:, :], img[:, 0:8], img[:, -8:]], axis=None).reshape(-1, 3)
+        mean_bg = np.median(borders, axis=0).astype(np.uint8)
+        page_bg_hex = f"#{mean_bg[2]:02x}{mean_bg[1]:02x}{mean_bg[0]:02x}"
+
+        elements: List[DocumentElement] = []
+        elem_counter = 1
+
+        # 3. PaddleOCR for precision text detection and typography
+        ocr = ImageReconstructor._get_ocr()
+        text_mask = np.zeros((h, w), np.uint8)
+
+        if ocr:
+            try:
+                ocr_out = ocr.ocr(file_path)
+                if ocr_out and len(ocr_out) > 0:
+                    res = ocr_out[0]
+                    # Handle both dict-based OCRResult (PP-OCRv6) and legacy list format
+                    if isinstance(res, dict):
+                        texts = res.get('rec_texts', [])
+                        boxes = res.get('rec_polys', [])
+                        scores = res.get('rec_scores', [])
+                    else:
+                        texts = [l[1][0] for l in res if len(l) >= 2]
+                        boxes = [l[0] for l in res if len(l) >= 2]
+                        scores = [l[1][1] for l in res if len(l) >= 2 and len(l[1]) >= 2]
+
+                    for text, box, score in zip(texts, boxes, scores):
+                        if float(score) < 0.35 or not str(text).strip():
+                            continue
+                        xs = [int(pt[0]) for pt in box]
+                        ys = [int(pt[1]) for pt in box]
+                        x0, y0, x1, y1 = max(0, min(xs)), max(0, min(ys)), min(w, max(xs)), min(h, max(ys))
+                        if x1 <= x0 or y1 <= y0:
+                            continue
+
+                        # Mark text mask with padding
+                        cv2.rectangle(text_mask, (max(0, x0 - 4), max(0, y0 - 4)), (min(w, x1 + 4), min(h, y1 + 4)), 255, -1)
+
+                        box_h = y1 - y0
+                        font_size = max(9.0, round(box_h * 0.82, 1))
+
+                        # Typography & color sampling
+                        crop = img[y0:y1, x0:x1]
+                        text_color = "#111111"
+                        font_weight = "normal"
+                        if crop.size > 0:
+                            gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                            _, bin_crop = cv2.threshold(gray_crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                            stroke_ratio = np.count_nonzero(bin_crop) / float(crop.shape[0] * crop.shape[1])
+                            if stroke_ratio > 0.30 or box_h > 35:
+                                font_weight = "bold"
+
+                            med_lum = np.median(gray_crop)
+                            sample_mask = gray_crop < np.percentile(gray_crop, 35) if med_lum > 128 else gray_crop > np.percentile(gray_crop, 65)
+                            if np.any(sample_mask):
+                                c_bgr = np.median(crop[sample_mask], axis=0).astype(int)
+                                text_color = f"#{c_bgr[2]:02x}{c_bgr[1]:02x}{c_bgr[0]:02x}"
+
+                        elements.append(DocumentElement(
+                            id=f"text-{elem_counter}",
+                            type='text',
+                            bbox=[float(x0), float(y0), float(x1), float(y1)],
+                            text=str(text).strip(),
+                            style=TextStyle(
+                                fontFamily="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+                                fontSize=float(font_size),
+                                fontWeight=font_weight,
+                                color=text_color,
+                                lineHeight=1.25
+                            ),
+                            zIndex=10
+                        ))
+                        elem_counter += 1
+            except Exception as e:
+                logger.warning(f"OCR failed during image reconstruction: {e}")
+
+        # 4. Extract Graphic Regions & Shapes (after text is masked out)
+        non_text = cv2.bitwise_and(img, img, mask=cv2.bitwise_not(text_mask))
+        diff = cv2.absdiff(non_text, np.full_like(non_text, mean_bg, dtype=np.uint8))
+        diff_gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        _, graphic_mask = cv2.threshold(diff_gray, 24, 255, cv2.THRESH_BINARY)
+        graphic_mask = cv2.bitwise_and(graphic_mask, graphic_mask, mask=cv2.bitwise_not(text_mask))
+
+        # Close gaps to find coherent visual regions
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (12, 12))
+        closed = cv2.morphologyEx(graphic_mask, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        img_counter = 1
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < 500:  # ignore tiny specks
+                continue
+            x, y, cw, ch = cv2.boundingRect(c)
+            # ignore if it covers almost the whole canvas
+            if cw > w * 0.96 and ch > h * 0.96:
+                continue
+
+            # Check if this is a simple shape (e.g. circle or divider line)
+            peri = cv2.arcLength(c, True)
+            circularity = 4 * np.pi * (area / (peri * peri)) if peri > 0 else 0
+            aspect = cw / float(max(ch, 1))
+
+            # If it's a divider line:
+            if ch <= 3 and cw > 40:
+                line_color = f"#{img[y, x+cw//2][2]:02x}{img[y, x+cw//2][1]:02x}{img[y, x+cw//2][0]:02x}"
+                svg_line = f'<svg viewBox="0 0 {cw} {ch}" width="100%" height="100%"><line x1="0" y1="{ch/2}" x2="{cw}" y2="{ch/2}" stroke="{line_color}" stroke-width="{ch}"/></svg>'
+                elements.append(DocumentElement(
+                    id=f"vector-{elem_counter}",
+                    type='vector',
+                    bbox=[float(x), float(y), float(x + cw), float(y + ch)],
+                    svg=svg_line,
+                    zIndex=3
+                ))
+                elem_counter += 1
+                continue
+
+            # If it's a circle:
+            if circularity > 0.82 and 0.8 < aspect < 1.25 and cw < 120:
+                circle_color = f"#{img[y+ch//2, x+cw//2][2]:02x}{img[y+ch//2, x+cw//2][1]:02x}{img[y+ch//2, x+cw//2][0]:02x}"
+                svg_circle = f'<svg viewBox="0 0 {cw} {ch}" width="100%" height="100%"><ellipse cx="{cw/2}" cy="{ch/2}" rx="{cw/2}" ry="{ch/2}" fill="{circle_color}"/></svg>'
+                elements.append(DocumentElement(
+                    id=f"vector-{elem_counter}",
+                    type='vector',
+                    bbox=[float(x), float(y), float(x + cw), float(y + ch)],
+                    svg=svg_circle,
+                    zIndex=3
+                ))
+                elem_counter += 1
+                continue
+
+            # Otherwise, extract as cropped visual asset (with alpha matting if against page background)
+            cropped = img[y:y+ch, x:x+cw]
+            if cropped.size == 0:
+                continue
+
+            bgra = cv2.cvtColor(cropped, cv2.COLOR_BGR2BGRA)
+            bg_diff = np.max(np.abs(cropped.astype(np.int32) - mean_bg.astype(np.int32)), axis=2)
+            bgra[bg_diff < 16, 3] = 0
+
+            _, enc_asset = cv2.imencode('.png', bgra)
+            src = f"data:image/png;base64,{base64.b64encode(enc_asset.tobytes()).decode('utf-8')}"
+            asset_name = f"image_asset_{img_counter}.png"
+
+            if asset_dir:
+                os.makedirs(asset_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(asset_dir, asset_name), bgra)
+
+            elements.append(DocumentElement(
+                id=f"image-{img_counter}",
+                type='image',
+                bbox=[float(x), float(y), float(x + cw), float(y + ch)],
+                src=src,
+                assetName=asset_name,
+                naturalWidth=float(cw),
+                naturalHeight=float(ch),
+                zIndex=5
+            ))
+            img_counter += 1
+
+        # Sort elements by zIndex so background cards/images render under text
+        elements.sort(key=lambda e: e.zIndex)
+
+        return PageData(
+            pageNumber=1,
+            width=float(w),
+            height=float(h),
+            isScanned=True,
+            elements=elements,
+            originalImageSrc=orig_img_b64,
+            backgroundColor=page_bg_hex
+        )
+
+# ==============================================================================
 # 9. HTML RENDERER & EXPORTER
 # ==============================================================================
 
@@ -1496,10 +1717,11 @@ class HTMLRenderer:
     def render_page(page: PageData, editable: bool = True) -> str:
         w = float(page.width if page.width is not None else 595.0)
         h = float(page.height if page.height is not None else 842.0)
+        bg = f" background-color: {page.backgroundColor};" if getattr(page, 'backgroundColor', None) else ""
         rendered_elements = [HTMLRenderer.render_element(elem, editable=editable) for elem in page.elements]
         return (
             f'<div class="pdf-page" id="pdf-page-{page.pageNumber}" data-page="{page.pageNumber}" '
-            f'data-scanned="{"true" if page.isScanned else "false"}" style="width: {w:.2f}px; height: {h:.2f}px;">\n'
+            f'data-scanned="{"true" if page.isScanned else "false"}" style="width: {w:.2f}px; height: {h:.2f}px;{bg}">\n'
             f'{"\n".join(rendered_elements)}\n</div>'
         )
 

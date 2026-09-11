@@ -7,7 +7,7 @@ import pymupdf
 from app import app
 from engine import (
     DocumentData, PageData, DocumentElement, TextStyle,
-    PDFAnalyzer, DigitalExtractor, ScannedExtractor, TableExtractor,
+    PDFAnalyzer, DigitalExtractor, ScannedExtractor, TableExtractor, ImageReconstructor,
     HTMLRenderer, Exporter, FidelityChecker
 )
 
@@ -155,5 +155,38 @@ def test_clean_table_data_and_styling():
     assert cleaned_rows[1]["cells"] == ["Asset type", "Raster image"]
     assert cleaned_rows[3]["is_merged"] is True
     assert "EXPECTED BEHAVIOUR" in cleaned_rows[3]["text"]
+
+def test_image_conversion_and_reconstruction():
+    import numpy as np
+    import cv2
+
+    # Create a synthetic landing page image with background, circle, button, and divider
+    test_img = np.full((600, 800, 3), (245, 248, 251), dtype=np.uint8) # BGR ivory bg
+    # Draw a blue circle
+    cv2.circle(test_img, (100, 100), 30, (230, 100, 40), -1)
+    # Draw a divider line
+    cv2.line(test_img, (50, 200), (750, 200), (180, 180, 180), 2)
+    # Draw a graphic rectangle card
+    cv2.rectangle(test_img, (400, 250), (700, 450), (255, 255, 255), -1)
+
+    _, enc = cv2.imencode(".png", test_img)
+    img_bytes = enc.tobytes()
+
+    res = client.post(
+        "/api/convert",
+        files={"file": ("synthetic_landing.png", img_bytes, "image/png")}
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert "document" in data
+    doc = data["document"]
+    assert doc["pageCount"] == 1
+    assert len(doc["pages"]) == 1
+    p = doc["pages"][0]
+    assert p["width"] == 800
+    assert p["height"] == 600
+    assert len(p["elements"]) >= 1
+    assert p["originalImageSrc"].startswith("data:image/png;base64,")
+
 
 

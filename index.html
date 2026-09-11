@@ -1315,14 +1315,14 @@ html, body {
         </div>
 
         <div class="top-bar-actions">
-            <input type="file" id="pdf-file-input" accept="application/pdf" style="display: none;">
+            <input type="file" id="pdf-file-input" accept=".pdf, .png, .jpg, .jpeg, .webp, image/*, application/pdf" style="display: none;">
             <button id="btn-open-pdf" class="btn btn-secondary">
                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                     <polyline points="17 8 12 3 7 8"></polyline>
                     <line x1="12" y1="3" x2="12" y2="15"></line>
                 </svg>
-                Open PDF
+                Open PDF / Image
             </button>
 
             <button id="btn-compare-mode" class="btn btn-secondary" title="Compare Reconstructed HTML vs Original PDF">
@@ -1402,10 +1402,10 @@ html, body {
                             <polyline points="14 2 14 8 20 8"></polyline>
                         </svg>
                     </div>
-                    <h3>Open a PDF to Reconstruct</h3>
-                    <p>Converts native digital objects or scanned pages into pixel-perfect, editable HTML without LLMs/VLMs.</p>
+                    <h3>Open a PDF or Image to Reconstruct</h3>
+                    <p>Converts PDFs and images (JPG, PNG, WebP) into pixel-perfect, editable HTML without LLMs/VLMs.</p>
                     <div class="empty-actions">
-                        <button id="btn-welcome-open" class="btn btn-primary">Select PDF File</button>
+                        <button id="btn-welcome-open" class="btn btn-primary">Select PDF or Image</button>
                         <button id="btn-load-sample-digital" class="btn btn-outline">Load Sample Report</button>
                     </div>
                 </div>
@@ -2031,6 +2031,9 @@ function renderCurrentPage() {
     pageContainer.id = `pdf-page-${page.pageNumber}`;
     pageContainer.style.width = `${page.width}px`;
     pageContainer.style.height = `${page.height}px`;
+    if (page.backgroundColor) {
+        pageContainer.style.backgroundColor = page.backgroundColor;
+    }
     
     page.elements.forEach(elem => {
         const domElem = renderElementToDOM(elem);
