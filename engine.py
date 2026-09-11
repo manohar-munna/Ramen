@@ -70,7 +70,7 @@ class TextSpan(BaseModel):
 
 class DocumentElement(BaseModel):
     id: str = Field(default_factory=lambda: f'elem-{uuid.uuid4().hex[:8]}')
-    type: Literal['text', 'image', 'table', 'vector', 'formula']
+    type: Literal['text', 'image', 'table', 'vector', 'formula', 'custom']
     bbox: List[float]  # [x1, y1, x2, y2] in points/pixels
     zIndex: int = 1
     rotation: float = 0.0
@@ -237,6 +237,132 @@ def get_image_color_score(img_bytes: bytes) -> float:
         return float(arr.std())
     except Exception:
         return 0.0
+
+# Font stack the renderer applies to OCR'd text. The measurement faces below are
+# ordered to match how a browser resolves it, so measured metrics track what is drawn.
+OCR_FONT_STACK = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+
+_MEASURE_FACES = {
+    False: ['segoeui.ttf', 'Roboto-Regular.ttf', 'Helvetica.ttc', 'arial.ttf',
+            'DejaVuSans.ttf', 'LiberationSans-Regular.ttf'],
+    True: ['segoeuib.ttf', 'Roboto-Bold.ttf', 'Helvetica-Bold.ttf', 'arialbd.ttf',
+           'DejaVuSans-Bold.ttf', 'LiberationSans-Bold.ttf'],
+}
+_FONT_DIRS = [
+    os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts'),
+    '/usr/share/fonts/truetype/dejavu', '/usr/share/fonts/truetype/liberation',
+    '/usr/share/fonts', '/Library/Fonts', '/System/Library/Fonts',
+]
+_MEASURE_REF_SIZE = 100  # metrics scale linearly, so measure once and scale
+_font_cache: Dict[bool, Any] = {}
+
+def _get_measure_font(bold: bool):
+    """Loads a TTF approximating the rendered font stack, at a fixed reference size."""
+    if bold in _font_cache:
+        return _font_cache[bold]
+    from PIL import ImageFont
+    font = None
+    for face in _MEASURE_FACES[bold]:
+        for d in _FONT_DIRS:
+            p = os.path.join(d, face)
+            if os.path.exists(p):
+                try:
+                    font = ImageFont.truetype(p, _MEASURE_REF_SIZE)
+                    break
+                except Exception:
+                    continue
+        if font is not None:
+            break
+    if font is None:
+        logger.warning("No measurement font found; falling back to box-height heuristic.")
+    _font_cache[bold] = font
+    return font
+
+def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool) -> Tuple[float, float, float]:
+    """Fits a text run to an OCR ink box, returning (fontSize, letterSpacing, lineHeight).
+
+    The OCR box bounds *ink*, not the em square, so its height depends on which glyphs
+    the run happens to contain -- 'Product' (cap to baseline) and 'Pricing' (cap to
+    descender) are different heights at the same font size. Measuring the actual string
+    removes that dependence:
+
+      * fontSize    scales the reference ink height onto the box height, so glyphs come
+                    out the size they look in the image.
+      * letterSpacing absorbs the residual width error, so the run still spans the box
+                    even when the real face is wider or narrower than our stand-in.
+      * lineHeight  is solved from the CSS inline box model so the ink top lands exactly
+                    on the box top, instead of floating on an arbitrary 1.2 multiplier.
+    """
+    clean = (text or '').strip()
+    font = _get_measure_font(bold) if clean else None
+    if font is None:
+        return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2
+
+    try:
+        ink = font.getbbox(clean)
+        ascent, descent = font.getmetrics()
+    except Exception:
+        return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2
+
+    ink_h = float(ink[3] - ink[1])
+    ink_w = float(ink[2] - ink[0])
+    if ink_h <= 0:
+        return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2
+
+    scale = float(box_h) / ink_h
+    font_size = max(6.0, _MEASURE_REF_SIZE * scale)
+
+    # Spread (or pull in) the residual width across the gaps between glyphs. CSS adds
+    # letter-spacing after every character, but the ink of the run ends before the last
+    # one, so the gaps that matter number len-1.
+    # Both boxes are ink bounds now, so the residual is genuine face-width mismatch and
+    # should be small. Clamp hard: a wrong measurement font must not be allowed to shred
+    # the run into spaced-out characters.
+    gaps = max(len(clean) - 1, 1)
+    letter_spacing = (float(box_w) - ink_w * scale) / gaps
+    limit = font_size * 0.06
+    letter_spacing = max(-limit, min(limit, letter_spacing))
+
+    # CSS centres the (ascent + descent) content box inside the line box, so the ink top
+    # sits at  top + (L - ascent - descent)/2 + ink_offset.  Setting that equal to the
+    # element top and solving for L gives the line-height that pins ink to the box.
+    line_px = (ascent + descent - 2.0 * ink[1]) * scale
+    line_height = max(0.1, line_px / font_size)
+
+    return round(font_size, 2), round(letter_spacing, 2), round(line_height, 3)
+
+def erase_text_from_crop(crop: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
+    """Paints out masked text pixels so a raster crop can sit underneath live text.
+
+    UI screenshots are dominated by flat fills, so each masked region is filled with
+    the median colour of the ring of pixels immediately surrounding it — that restores
+    a button's solid fill far more cleanly than inpainting, which smears gradients
+    across the glyphs. Falls back to Telea inpainting when a region has no clean ring
+    (e.g. text running to the crop edge).
+    """
+    if crop.size == 0 or not np.any(text_mask):
+        return crop
+
+    out = crop.copy()
+    mask = (text_mask > 0).astype(np.uint8)
+    num, labels = cv2.connectedComponents(mask)
+
+    ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    unresolved = np.zeros(mask.shape, np.uint8)
+
+    for label in range(1, num):
+        region = (labels == label).astype(np.uint8)
+        ring = cv2.subtract(cv2.dilate(region, ring_kernel), region)
+        ring[mask > 0] = 0  # never sample from other text
+        ring_px = out[ring > 0]
+        if ring_px.size == 0:
+            unresolved[region > 0] = 255
+            continue
+        out[region > 0] = np.median(ring_px, axis=0).astype(out.dtype)
+
+    if np.any(unresolved):
+        out = cv2.inpaint(out, unresolved, 3, cv2.INPAINT_TELEA)
+    return out
 
 # ==============================================================================
 # 3. FORMULA HANDLER
@@ -1120,279 +1246,7 @@ class DigitalExtractor:
         )
 
 # ==============================================================================
-# 8. SCANNED EXTRACTOR
-# ==============================================================================
-
-class ScannedExtractor:
-    _cached_ocr = None
-    _ocr_disabled = False
-
-    @classmethod
-    def _get_ocr_engine(cls):
-        if cls._ocr_disabled:
-            return None
-        if cls._cached_ocr is None:
-            try:
-                from paddleocr import PaddleOCR
-                cls._cached_ocr = PaddleOCR(lang='en')
-            except Exception as e:
-                cls._ocr_disabled = True
-                return None
-        return cls._cached_ocr
-
-    @staticmethod
-    def _ocr_region(cropped_img: np.ndarray, paddle_available: bool) -> str:
-        if cropped_img.size == 0 or not paddle_available or ScannedExtractor._ocr_disabled:
-            return ""
-        try:
-            ocr = ScannedExtractor._get_ocr_engine()
-            if not ocr:
-                return ""
-            res = ocr.ocr(cropped_img)
-            lines = []
-            if res and len(res) > 0 and res[0]:
-                for line in res[0]:
-                    if len(line) >= 2 and len(line[1]) >= 1:
-                        lines.append(line[1][0])
-            return "\n".join(lines)
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _cv_layout_detection(cv_img: np.ndarray, scale: float) -> List[Dict[str, Any]]:
-        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 8)
-
-        # Detect tables
-        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (int(w * 0.03), 1))
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(h * 0.02)))
-        lines_h = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_h)
-        lines_v = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_v)
-        table_grid = cv2.add(lines_h, lines_v)
-        contours_t, _ = cv2.findContours(table_grid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        table_regions, table_mask = [], np.zeros_like(gray)
-        for c in contours_t:
-            x, y, cw, ch = cv2.boundingRect(c)
-            if cw > w * 0.2 and ch > h * 0.05:
-                table_regions.append({
-                    'type': 'table',
-                    'bbox_px': [x, y, x + cw, y + ch],
-                    'bbox': [round(x / scale, 2), round(y / scale, 2), round((x + cw) / scale, 2), round((y + ch) / scale, 2)]
-                })
-                cv2.rectangle(table_mask, (x, y), (x + cw, y + ch), 255, -1)
-
-        # Detect text paragraphs
-        thresh_no_tables = cv2.bitwise_and(thresh, thresh, mask=cv2.bitwise_not(table_mask))
-        text_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(w * 0.02), int(h * 0.008)))
-        dilated = cv2.dilate(thresh_no_tables, text_kernel, iterations=2)
-        contours_txt, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        text_regions = []
-        for c in contours_txt:
-            x, y, cw, ch = cv2.boundingRect(c)
-            if cw > 20 and ch > 10:
-                aspect = cw / float(ch)
-                area = cw * ch
-                rtype = 'image' if (area > (w * h * 0.08) and 0.4 < aspect < 2.5) else ('title' if (ch > 35 and aspect > 2.0 and y < h * 0.25) else 'text')
-                text_regions.append({
-                    'type': rtype,
-                    'bbox_px': [x, y, x + cw, y + ch],
-                    'bbox': [round(x / scale, 2), round(y / scale, 2), round((x + cw) / scale, 2), round((y + ch) / scale, 2)]
-                })
-
-        all_regions = table_regions + text_regions
-        all_regions.sort(key=lambda r: (r['bbox'][1], r['bbox'][0]))
-        return all_regions
-
-    @staticmethod
-    def _cv_extract_table_html(cropped_img: np.ndarray) -> str:
-        if cropped_img.size == 0:
-            return '<table class="reconstructed-table"><tr><td>Table</td></tr></table>'
-        gray = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2GRAY)
-        th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 4)
-        h, w = gray.shape
-        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (max(1, w // 20), 1))
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(1, h // 20)))
-        grid = cv2.add(cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel_h), cv2.morphologyEx(th, cv2.MORPH_OPEN, kernel_v))
-        cells_c, _ = cv2.findContours(grid, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-        boxes = [(x, y, cw, ch) for c in cells_c for x, y, cw, ch in [cv2.boundingRect(c)] if cw > 15 and ch > 10 and cw < w * 0.98 and ch < h * 0.98]
-        if not boxes:
-            return '<table class="reconstructed-table" style="width:100%; height:100%; border-collapse:collapse;"><tr><td style="border:1px solid #ccc; padding:6px;">Data Cell</td><td style="border:1px solid #ccc; padding:6px;">Data Cell</td></tr></table>'
-
-        boxes.sort(key=lambda b: (b[1], b[0]))
-        rows, curr_row = [], [boxes[0]]
-        for b in boxes[1:]:
-            if abs(b[1] - curr_row[0][1]) < 15:
-                curr_row.append(b)
-            else:
-                curr_row.sort(key=lambda item: item[0])
-                rows.append(curr_row)
-                curr_row = [b]
-        if curr_row:
-            curr_row.sort(key=lambda item: item[0])
-            rows.append(curr_row)
-
-        html_out = ['<table class="reconstructed-table" style="width:100%; height:100%; border-collapse:collapse; font-size:11px;">']
-        for r_idx, row in enumerate(rows):
-            html_out.append('  <tr>')
-            for cell in row:
-                tag = 'th' if r_idx == 0 else 'td'
-                bg = 'background-color:#f8fafc;' if r_idx == 0 else ''
-                html_out.append(f'    <{tag} style="border:1px solid #cbd5e1; padding:4px 8px; {bg}">Cell</{tag}>')
-            html_out.append('  </tr>')
-        html_out.append('</table>')
-        return '\n'.join(html_out)
-
-    @staticmethod
-    def extract_page(doc: pymupdf.Document, page_num: int, asset_dir: Optional[str] = None) -> PageData:
-        page = doc[page_num]
-        rect = page.rect
-        page_width, page_height = float(rect.width), float(rect.height)
-
-        dpi = 150
-        scale = dpi / 72.0
-        pix = page.get_pixmap(dpi=dpi)
-        img_bytes = pix.tobytes("png")
-        orig_img_base64 = f"data:image/png;base64,{base64.b64encode(img_bytes).decode('utf-8')}"
-
-        cv_img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
-        img_h, img_w = cv_img.shape[:2]
-
-        elements: List[DocumentElement] = []
-        paddle_available = False
-        try:
-            import paddleocr
-            paddle_available = True
-        except Exception:
-            paddle_available = False
-
-        layout_regions = []
-        if paddle_available:
-            try:
-                from paddleocr import PPStructureV3
-                engine = PPStructureV3(use_table_recognition=True, use_formula_recognition=True)
-                res = engine(cv_img)
-                res_items = res.json.get('blocks', []) if hasattr(res, 'json') else (res if isinstance(res, list) else [])
-                for item in res_items:
-                    b = item.get('bbox', [0, 0, 0, 0])
-                    layout_regions.append({
-                        'type': item.get('type', 'text').lower(),
-                        'bbox_px': b,
-                        'bbox': [round(b[0] / scale, 2), round(b[1] / scale, 2), round(b[2] / scale, 2), round(b[3] / scale, 2)],
-                        'res': item.get('res') or item
-                    })
-            except Exception:
-                layout_regions = []
-
-        if not layout_regions:
-            layout_regions = ScannedExtractor._cv_layout_detection(cv_img, scale)
-
-        table_counter, img_counter, text_counter, elem_counter = 1, 1, 1, 1
-
-        for region in layout_regions:
-            rtype, pdf_bbox, b_px = region['type'], region['bbox'], region['bbox_px']
-            x0_px = max(0, min(int(b_px[0]), img_w - 1))
-            y0_px = max(0, min(int(b_px[1]), img_h - 1))
-            x1_px = max(x0_px + 1, min(int(b_px[2]), img_w))
-            y1_px = max(y0_px + 1, min(int(b_px[3]), img_h))
-            cropped = cv_img[y0_px:y1_px, x0_px:x1_px]
-
-            if rtype == 'table':
-                table_html = None
-                if region.get('res') and isinstance(region['res'], dict) and 'html' in region['res']:
-                    table_html = TableExtractor.structure_v3_to_html(region['res']['html'])
-                elif paddle_available:
-                    try:
-                        from paddleocr import PPStructure
-                        t_res = PPStructure(table=True, ocr=True, show_log=False)(cropped)
-                        if t_res and len(t_res) > 0 and 'res' in t_res[0] and 'html' in t_res[0]['res']:
-                            table_html = TableExtractor.structure_v3_to_html(t_res[0]['res']['html'])
-                    except Exception:
-                        pass
-                if not table_html:
-                    table_html = ScannedExtractor._cv_extract_table_html(cropped)
-
-                elements.append(DocumentElement(
-                    id=f"table-{table_counter}",
-                    type='table',
-                    bbox=pdf_bbox,
-                    html=table_html,
-                    tableData={'rows': []}
-                ))
-                table_counter += 1
-
-            elif rtype in ['image', 'figure', 'chart']:
-                _, enc_img = cv2.imencode('.png', cropped)
-                src = f"data:image/png;base64,{base64.b64encode(enc_img.tobytes()).decode('utf-8')}"
-                asset_name = f"scanned_p{page_num + 1}_img_{img_counter}.png"
-                if asset_dir:
-                    os.makedirs(asset_dir, exist_ok=True)
-                    cv2.imwrite(os.path.join(asset_dir, asset_name), cropped)
-                elements.append(DocumentElement(
-                    id=f"image-{img_counter}",
-                    type='image',
-                    bbox=pdf_bbox,
-                    src=src,
-                    assetName=asset_name,
-                    naturalWidth=float(cropped.shape[1]),
-                    naturalHeight=float(cropped.shape[0])
-                ))
-                img_counter += 1
-
-            elif rtype == 'formula':
-                text_content = ScannedExtractor._ocr_region(cropped, paddle_available)
-                f_elem = FormulaHandler.create_formula_element(pdf_bbox, text_content)
-                elements.append(DocumentElement(
-                    id=f"formula-{elem_counter}",
-                    type='formula',
-                    bbox=f_elem['bbox'],
-                    text=f_elem['text'],
-                    latex=f_elem['latex'],
-                    mathml=f_elem['mathml'],
-                    renderedHtml=f_elem['renderedHtml']
-                ))
-                elem_counter += 1
-
-            else:
-                text_content = ""
-                if region.get('res') and isinstance(region['res'], list):
-                    text_content = "\n".join([line.get('text', '') for line in region['res'] if isinstance(line, dict)])
-                if not text_content:
-                    text_content = ScannedExtractor._ocr_region(cropped, paddle_available)
-                if not text_content.strip():
-                    continue
-
-                is_title = rtype in ['title', 'header', 'paragraph_title']
-                elements.append(DocumentElement(
-                    id=f"text-{text_counter}",
-                    type='text',
-                    bbox=pdf_bbox,
-                    text=text_content.strip(),
-                    style=TextStyle(
-                        fontFamily="'Segoe UI', Arial, sans-serif",
-                        fontSize=18.0 if is_title else 12.0,
-                        fontWeight='bold' if is_title else 'normal',
-                        color="#0f172a",
-                        textAlign='center' if (is_title and pdf_bbox[0] > page_width * 0.2) else 'left',
-                        lineHeight=1.3
-                    )
-                ))
-                text_counter += 1
-
-        return PageData(
-            pageNumber=page_num + 1,
-            width=page_width,
-            height=page_height,
-            isScanned=True,
-            elements=elements,
-            originalImageSrc=orig_img_base64
-        )
-
-# ==============================================================================
-# 8b. IMAGE RECONSTRUCTOR (LAYERED VISUAL ENGINE)
+# 8. IMAGE RECONSTRUCTOR (LAYERED VISUAL ENGINE)
 # ==============================================================================
 
 class ImageReconstructor:
@@ -1406,7 +1260,20 @@ class ImageReconstructor:
         if cls._cached_ocr is None:
             try:
                 from paddleocr import PaddleOCR
-                cls._cached_ocr = PaddleOCR(lang='en')
+                try:
+                    # Screenshots and rendered pages are already axis-aligned and flat.
+                    # PaddleOCR's document preprocessing (orientation classification and
+                    # UVDoc dewarping) geometrically resamples the page, which shifts every
+                    # returned box away from the pixels we position elements against.
+                    cls._cached_ocr = PaddleOCR(
+                        lang='en',
+                        use_doc_orientation_classify=False,
+                        use_doc_unwarping=False,
+                        use_textline_orientation=False,
+                    )
+                except TypeError:
+                    # Older PaddleOCR builds do not expose these switches.
+                    cls._cached_ocr = PaddleOCR(lang='en')
             except Exception as e:
                 logger.warning(f"Could not initialize PaddleOCR: {e}")
                 cls._ocr_disabled = True
@@ -1418,6 +1285,15 @@ class ImageReconstructor:
         img = cv2.imread(file_path)
         if img is None:
             raise ValueError(f"Unable to read image at {file_path}")
+        return ImageReconstructor.reconstruct_image_from_cv2(img, asset_dir=asset_dir, source_file=file_path)
+
+    @staticmethod
+    def reconstruct_image_from_cv2(
+        img: np.ndarray,
+        asset_dir: Optional[str] = None,
+        page_num: int = 1,
+        source_file: Optional[str] = None
+    ) -> PageData:
         h, w = img.shape[:2]
 
         # 1. Base64 of original image
@@ -1432,16 +1308,15 @@ class ImageReconstructor:
         elements: List[DocumentElement] = []
         elem_counter = 1
 
-        # 3. PaddleOCR for precision text detection and typography
+        # 3. PaddleOCR for precision full-image text detection and typography
         ocr = ImageReconstructor._get_ocr()
         text_mask = np.zeros((h, w), np.uint8)
 
         if ocr:
             try:
-                ocr_out = ocr.ocr(file_path)
+                ocr_out = ocr.ocr(img)
                 if ocr_out and len(ocr_out) > 0:
                     res = ocr_out[0]
-                    # Handle both dict-based OCRResult (PP-OCRv6) and legacy list format
                     if isinstance(res, dict):
                         texts = res.get('rec_texts', [])
                         boxes = res.get('rec_polys', [])
@@ -1464,24 +1339,53 @@ class ImageReconstructor:
                         cv2.rectangle(text_mask, (max(0, x0 - 4), max(0, y0 - 4)), (min(w, x1 + 4), min(h, y1 + 4)), 255, -1)
 
                         box_h = y1 - y0
-                        font_size = max(9.0, round(box_h * 0.82, 1))
 
-                        # Typography & color sampling
+                        # Typography & background-contrast stroke color sampling
                         crop = img[y0:y1, x0:x1]
                         text_color = "#111111"
                         font_weight = "normal"
+                        ink_box = None
                         if crop.size > 0:
                             gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                             _, bin_crop = cv2.threshold(gray_crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
                             stroke_ratio = np.count_nonzero(bin_crop) / float(crop.shape[0] * crop.shape[1])
-                            if stroke_ratio > 0.30 or box_h > 35:
+                            if stroke_ratio > 0.28 or box_h > 32:
                                 font_weight = "bold"
 
-                            med_lum = np.median(gray_crop)
-                            sample_mask = gray_crop < np.percentile(gray_crop, 35) if med_lum > 128 else gray_crop > np.percentile(gray_crop, 65)
-                            if np.any(sample_mask):
-                                c_bgr = np.median(crop[sample_mask], axis=0).astype(int)
-                                text_color = f"#{c_bgr[2]:02x}{c_bgr[1]:02x}{c_bgr[0]:02x}"
+                            border_px = np.concatenate([crop[0, :], crop[-1, :], crop[:, 0], crop[:, -1]], axis=0)
+                            local_bg = np.median(border_px, axis=0)
+                            diff = np.linalg.norm(crop.astype(float) - local_bg.astype(float), axis=2)
+                            max_d = np.max(diff)
+                            if max_d > 22.0:
+                                thresh = max(18.0, np.percentile(diff, 75))
+                                stroke_px = crop[diff >= thresh]
+                                if len(stroke_px) > 0:
+                                    c_bgr = np.median(stroke_px, axis=0).astype(int)
+                                    text_color = f"#{c_bgr[2]:02x}{c_bgr[1]:02x}{c_bgr[0]:02x}"
+
+                                # Detection boxes carry padding, so they are not ink bounds.
+                                # Fitting a font to them oversizes every run. Recover the
+                                # true ink extent from the pixels that differ from the local
+                                # background -- that works for light-on-dark too, which an
+                                # Otsu "dark pixels are ink" test gets backwards.
+                                ink = diff >= max(20.0, float(max_d) * 0.45)
+                                rows, cols = np.any(ink, axis=1), np.any(ink, axis=0)
+                                if rows.any() and cols.any():
+                                    r0 = int(np.argmax(rows))
+                                    r1 = len(rows) - int(np.argmax(rows[::-1]))
+                                    c0 = int(np.argmax(cols))
+                                    c1 = len(cols) - int(np.argmax(cols[::-1]))
+                                    if r1 > r0 and c1 > c0:
+                                        ink_box = (x0 + c0, y0 + r0, x0 + c1, y0 + r1)
+                            else:
+                                lum = 0.299 * local_bg[2] + 0.587 * local_bg[1] + 0.114 * local_bg[0]
+                                text_color = "#ffffff" if lum < 128 else "#111111"
+
+                        if ink_box:
+                            x0, y0, x1, y1 = ink_box
+                        font_size, letter_spacing, line_height = fit_text_to_box(
+                            str(text), x1 - x0, y1 - y0, font_weight == "bold"
+                        )
 
                         elements.append(DocumentElement(
                             id=f"text-{elem_counter}",
@@ -1489,11 +1393,12 @@ class ImageReconstructor:
                             bbox=[float(x0), float(y0), float(x1), float(y1)],
                             text=str(text).strip(),
                             style=TextStyle(
-                                fontFamily="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+                                fontFamily=OCR_FONT_STACK,
                                 fontSize=float(font_size),
                                 fontWeight=font_weight,
                                 color=text_color,
-                                lineHeight=1.25
+                                lineHeight=line_height,
+                                letterSpacing=letter_spacing
                             ),
                             zIndex=10
                         ))
@@ -1508,28 +1413,25 @@ class ImageReconstructor:
         _, graphic_mask = cv2.threshold(diff_gray, 24, 255, cv2.THRESH_BINARY)
         graphic_mask = cv2.bitwise_and(graphic_mask, graphic_mask, mask=cv2.bitwise_not(text_mask))
 
-        # Close gaps to find coherent visual regions
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (12, 12))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
         closed = cv2.morphologyEx(graphic_mask, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
         img_counter = 1
         for c in contours:
             area = cv2.contourArea(c)
-            if area < 500:  # ignore tiny specks
+            if area < 400:
                 continue
             x, y, cw, ch = cv2.boundingRect(c)
-            # ignore if it covers almost the whole canvas
+            # Ignore border slivers (e.g. scrollbars or window borders)
+            if cw < 60 and ch > h * 0.7:
+                continue
+            # Ignore full canvas wrappers
             if cw > w * 0.96 and ch > h * 0.96:
                 continue
 
-            # Check if this is a simple shape (e.g. circle or divider line)
-            peri = cv2.arcLength(c, True)
-            circularity = 4 * np.pi * (area / (peri * peri)) if peri > 0 else 0
-            aspect = cw / float(max(ch, 1))
-
-            # If it's a divider line:
-            if ch <= 3 and cw > 40:
+            # Check for divider line
+            if ch <= 4 and cw > 40:
                 line_color = f"#{img[y, x+cw//2][2]:02x}{img[y, x+cw//2][1]:02x}{img[y, x+cw//2][0]:02x}"
                 svg_line = f'<svg viewBox="0 0 {cw} {ch}" width="100%" height="100%"><line x1="0" y1="{ch/2}" x2="{cw}" y2="{ch/2}" stroke="{line_color}" stroke-width="{ch}"/></svg>'
                 elements.append(DocumentElement(
@@ -1542,28 +1444,49 @@ class ImageReconstructor:
                 elem_counter += 1
                 continue
 
-            # If it's a circle:
+            # Check for circle
+            peri = cv2.arcLength(c, True)
+            circularity = 4 * np.pi * (area / (peri * peri)) if peri > 0 else 0
+            aspect = cw / float(max(ch, 1))
             if circularity > 0.82 and 0.8 < aspect < 1.25 and cw < 120:
-                circle_color = f"#{img[y+ch//2, x+cw//2][2]:02x}{img[y+ch//2, x+cw//2][1]:02x}{img[y+ch//2, x+cw//2][0]:02x}"
-                svg_circle = f'<svg viewBox="0 0 {cw} {ch}" width="100%" height="100%"><ellipse cx="{cw/2}" cy="{ch/2}" rx="{cw/2}" ry="{ch/2}" fill="{circle_color}"/></svg>'
-                elements.append(DocumentElement(
-                    id=f"vector-{elem_counter}",
-                    type='vector',
-                    bbox=[float(x), float(y), float(x + cw), float(y + ch)],
-                    svg=svg_circle,
-                    zIndex=3
-                ))
-                elem_counter += 1
-                continue
+                # A round outline is not the same as a solid disc. Logos, avatars and
+                # icon buttons are circular too, and replacing them with a flat fill
+                # destroys the artwork inside. Only vectorise when the interior really
+                # is one colour; otherwise fall through and keep the pixels.
+                disc = np.zeros((ch, cw), np.uint8)
+                cv2.ellipse(disc, (cw // 2, ch // 2),
+                            (max(cw // 2 - 2, 1), max(ch // 2 - 2, 1)), 0, 0, 360, 255, -1)
+                interior = img[y:y+ch, x:x+cw][disc > 0]
+                if interior.size > 0 and float(interior.reshape(-1, 3).std(axis=0).max()) < 12.0:
+                    c_bgr = np.median(interior.reshape(-1, 3), axis=0).astype(int)
+                    circle_color = f"#{c_bgr[2]:02x}{c_bgr[1]:02x}{c_bgr[0]:02x}"
+                    svg_circle = f'<svg viewBox="0 0 {cw} {ch}" width="100%" height="100%"><ellipse cx="{cw/2}" cy="{ch/2}" rx="{cw/2}" ry="{ch/2}" fill="{circle_color}"/></svg>'
+                    elements.append(DocumentElement(
+                        id=f"vector-{elem_counter}",
+                        type='vector',
+                        bbox=[float(x), float(y), float(x + cw), float(y + ch)],
+                        svg=svg_circle,
+                        zIndex=3
+                    ))
+                    elem_counter += 1
+                    continue
 
-            # Otherwise, extract as cropped visual asset (with alpha matting if against page background)
+            # Graphic asset extraction
             cropped = img[y:y+ch, x:x+cw]
             if cropped.size == 0:
                 continue
 
+            # Every glyph is re-emitted as a live text element, so it must be erased from
+            # the raster crop underneath. Skipping this double-renders all text.
+            is_bg_shape = (cw * ch > w * h * 0.25)
+            c_mask = text_mask[y:y+ch, x:x+cw]
+            if np.any(c_mask):
+                cropped = erase_text_from_crop(cropped, c_mask)
+
             bgra = cv2.cvtColor(cropped, cv2.COLOR_BGR2BGRA)
-            bg_diff = np.max(np.abs(cropped.astype(np.int32) - mean_bg.astype(np.int32)), axis=2)
-            bgra[bg_diff < 16, 3] = 0
+            if not is_bg_shape:
+                bg_diff = np.max(np.abs(cropped.astype(np.int32) - mean_bg.astype(np.int32)), axis=2)
+                bgra[bg_diff < 16, 3] = 0
 
             _, enc_asset = cv2.imencode('.png', bgra)
             src = f"data:image/png;base64,{base64.b64encode(enc_asset.tobytes()).decode('utf-8')}"
@@ -1581,21 +1504,52 @@ class ImageReconstructor:
                 assetName=asset_name,
                 naturalWidth=float(cw),
                 naturalHeight=float(ch),
-                zIndex=5
+                zIndex=1 if is_bg_shape else 5
             ))
             img_counter += 1
 
-        # Sort elements by zIndex so background cards/images render under text
-        elements.sort(key=lambda e: e.zIndex)
+        elements.sort(key=lambda e: e.zIndex or 1)
 
         return PageData(
-            pageNumber=1,
+            pageNumber=page_num,
             width=float(w),
             height=float(h),
             isScanned=True,
             elements=elements,
             originalImageSrc=orig_img_b64,
             backgroundColor=page_bg_hex
+        )
+
+# ==============================================================================
+# 8b. SCANNED EXTRACTOR
+# ==============================================================================
+
+class ScannedExtractor:
+    @staticmethod
+    def extract_page(doc: pymupdf.Document, page_num: int, asset_dir: Optional[str] = None) -> PageData:
+        page = doc[page_num]
+
+        # 1. Check if the page is an image wrapper (e.g. single large image covering the page)
+        imgs = page.get_images()
+        if len(imgs) == 1:
+            try:
+                xref = imgs[0][0]
+                base_img = doc.extract_image(xref)
+                img_bytes = base_img["image"]
+                cv_img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if cv_img is not None and cv_img.shape[0] > 100 and cv_img.shape[1] > 100:
+                    return ImageReconstructor.reconstruct_image_from_cv2(
+                        cv_img, asset_dir=asset_dir, page_num=page_num + 1, source_file=getattr(doc, 'name', None)
+                    )
+            except Exception as e:
+                logger.warning(f"Could not extract direct image from scanned PDF page: {e}")
+
+        # 2. Render page at 150 DPI for high-res reconstruction
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = pix.tobytes("png")
+        cv_img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+        return ImageReconstructor.reconstruct_image_from_cv2(
+            cv_img, asset_dir=asset_dir, page_num=page_num + 1, source_file=getattr(doc, 'name', None)
         )
 
 # ==============================================================================
@@ -1615,7 +1569,7 @@ body.reconstructed-doc {
     color: #000000 !important;
 }
 .pdf-element { box-sizing: border-box; color: #000000; }
-.pdf-text { cursor: text; outline: none; word-break: break-word; white-space: pre-wrap; user-select: text; }
+.pdf-text { cursor: text; outline: none; white-space: nowrap; overflow: visible; user-select: text; }
 .pdf-text[contenteditable="true"]:focus { outline: 1px dashed #3b82f6; background-color: rgba(59, 130, 246, 0.05); }
 .pdf-image-container { user-select: none; }
 .pdf-image-container img { display: block; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
@@ -1640,6 +1594,7 @@ body.reconstructed-doc {
 }
 .pdf-vector-container { pointer-events: none; }
 .pdf-formula-container { display: flex; align-items: center; justify-content: center; }
+.pdf-custom-container { width: 100%; height: 100%; overflow: hidden; }
 @media print {
     body.reconstructed-doc { padding: 0; background: transparent; gap: 0; }
     .pdf-page { box-shadow: none; page-break-after: always; break-after: page; margin: 0; }
@@ -1672,8 +1627,10 @@ class HTMLRenderer:
             ta = style.textAlign if (style and style.textAlign) else "left"
             lh = float(style.lineHeight if (style and style.lineHeight is not None) else 1.0)
             bg = f"background-color: {style.backgroundColor};" if (style and style.backgroundColor) else ""
+            raw_ls = float(style.letterSpacing) if (style and style.letterSpacing) else 0.0
+            ls = f"letter-spacing: {raw_ls:.2f}px; " if abs(raw_ls) > 0.01 else ""
 
-            text_style = f"{common_style} font-family: {ff}; font-size: {fs:.2f}px; font-weight: {fw}; font-style: {fst}; color: {col}; text-align: {ta}; line-height: {lh:.2f}; white-space: pre; {bg}"
+            text_style = f"{common_style} font-family: {ff}; font-size: {fs:.2f}px; font-weight: {fw}; font-style: {fst}; color: {col}; text-align: {ta}; line-height: {lh:.3f}; {ls}white-space: nowrap; overflow: visible; {bg}"
 
             if elem.spans and len(elem.spans) > 1:
                 parts = []
@@ -1711,6 +1668,10 @@ class HTMLRenderer:
         elif elem.type == 'formula':
             formula_html = elem.renderedHtml or f'<div>{html.escape(elem.text or "")}</div>'
             return f'<div class="pdf-element pdf-formula-container" id="{elem.id}" data-id="{elem.id}" data-type="formula" style="{common_style}">{formula_html}</div>'
+
+        elif elem.type == 'custom' or elem.html:
+            content = elem.html or ''
+            return f'<div class="pdf-element pdf-custom-container" id="{elem.id}" data-id="{elem.id}" data-type="custom" style="{common_style}">{content}</div>'
         return ''
 
     @staticmethod
@@ -1729,6 +1690,7 @@ class HTMLRenderer:
     def render_document(doc: DocumentData, editable: bool = False, title: Optional[str] = None) -> str:
         doc_title = title or doc.title or "Reconstructed PDF Document"
         pages_html = "\n\n".join([HTMLRenderer.render_page(p, editable=editable) for p in doc.pages])
+
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
