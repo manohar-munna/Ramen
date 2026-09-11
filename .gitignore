@@ -1,0 +1,28 @@
+# Models and large binaries
+models/
+cache/
+outputs/
+temp/
+*.onnx
+*.pdmodel
+*.pdiparams
+*.pdopt
+*.bin
+*.tar
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.env
+venv/
+env/
+.venv/
+build/
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db

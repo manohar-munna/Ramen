@@ -1,0 +1,2747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ramen — Precision PDF Reconstruction & Editor</title>
+    <style>
+/* ==========================================================================
+   RAMEN: Precision PDF-to-HTML Reconstruction & Editor Styling
+   Desktop-First, Focused Professional Document Tool
+   ========================================================================== */
+
+:root {
+    --bg-app: #090d16;
+    --bg-chrome: #0f172a;
+    --bg-surface: #1e293b;
+    --bg-surface-hover: #334155;
+    --bg-viewport: #334155;
+    --bg-input: #0b1120;
+    --border-subtle: #1e293b;
+    --border-strong: #334155;
+    --border-focus: #3b82f6;
+    --text-primary: #f8fafc;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent-blue: #2563eb;
+    --accent-blue-hover: #1d4ed8;
+    --accent-blue-subtle: rgba(37, 99, 235, 0.15);
+    --accent-green: #10b981;
+    --accent-red: #ef4444;
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: var(--font-ui);
+    background-color: var(--bg-app);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+}
+
+.app-container {
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    height: 100vh;
+}
+
+/* ==========================================================================
+   Top Application Bar
+   ========================================================================== */
+.top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 52px;
+    padding: 0 16px;
+    background-color: var(--bg-chrome);
+    border-bottom: 1px solid var(--border-subtle);
+    z-index: 100;
+}
+
+.top-bar-left {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.app-branding {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.app-logo {
+    width: 20px;
+    height: 20px;
+    color: #60a5fa;
+}
+
+.app-title {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--text-primary);
+}
+
+.app-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    background-color: var(--bg-surface);
+    color: #93c5fd;
+    border-radius: 4px;
+    letter-spacing: 0.04em;
+}
+
+.document-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-left: 1px solid var(--border-strong);
+    padding-left: 16px;
+}
+
+.doc-title-text {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    max-width: 320px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.doc-type-tag {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    background-color: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    border-radius: 12px;
+}
+
+.top-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* Button System */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+    user-select: none;
+    border: 1px solid transparent;
+}
+
+.btn-primary {
+    background-color: var(--accent-blue);
+    color: #ffffff;
+    border-color: var(--accent-blue);
+}
+
+.btn-primary:hover {
+    background-color: var(--accent-blue-hover);
+}
+
+.btn-secondary {
+    background-color: var(--bg-surface);
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+}
+
+.btn-secondary:hover {
+    background-color: var(--bg-surface-hover);
+}
+
+.btn-outline {
+    background: transparent;
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+}
+
+.btn-outline:hover {
+    background-color: var(--bg-surface);
+}
+
+.btn-icon-only {
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--text-secondary);
+    padding: 6px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.btn-icon-only:hover {
+    background-color: var(--bg-surface);
+    color: var(--text-primary);
+}
+
+.btn-icon-subtle {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 18px;
+    cursor: pointer;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.btn-icon-subtle:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-surface);
+}
+
+.btn-icon {
+    width: 14px;
+    height: 14px;
+}
+
+.caret-down {
+    font-size: 8px;
+    margin-left: 2px;
+}
+
+/* Dropdown */
+.dropdown-container {
+    position: relative;
+}
+
+.dropdown-menu {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    width: 220px;
+    background-color: var(--bg-chrome);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    padding: 6px;
+    z-index: 200;
+}
+
+.dropdown-menu.show {
+    display: block;
+}
+
+.dropdown-item {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    padding: 8px 10px;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.dropdown-item:hover {
+    background-color: var(--bg-surface);
+}
+
+.dropdown-item strong {
+    font-size: 12px;
+}
+
+.dropdown-item small {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* ==========================================================================
+   Workspace Layout
+   ========================================================================== */
+.workspace {
+    display: flex;
+    flex: 1;
+    height: calc(100vh - 52px - 40px);
+    overflow: hidden;
+    position: relative;
+}
+
+/* Left Sidebar: Page Thumbnails Only */
+.sidebar-thumbnails {
+    width: 220px;
+    background-color: var(--bg-chrome);
+    border-right: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+}
+
+.badge-count {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.thumbnails-scrollable {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.empty-thumbnails-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
+    margin-top: 40px;
+}
+
+.thumbnail-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    border-radius: 6px;
+    padding: 8px;
+    border: 1px solid transparent;
+    transition: all 0.15s ease;
+}
+
+.thumbnail-card:hover {
+    background-color: var(--bg-surface);
+}
+
+.thumbnail-card.active {
+    background-color: var(--accent-blue-subtle);
+    border-color: var(--accent-blue);
+}
+
+.thumbnail-preview {
+    width: 140px;
+    height: 198px;
+    background-color: #ffffff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    border-radius: 3px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.thumbnail-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.thumbnail-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+/* Main Canvas Viewport */
+.canvas-viewport {
+    flex: 1;
+    background-color: var(--bg-viewport);
+    overflow: auto;
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 40px;
+    user-select: none;
+}
+
+.canvas-wrapper {
+    position: relative;
+    transform-origin: top center;
+    transition: transform 0.1s ease-out;
+}
+
+/* Empty Welcome State */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 60px 40px;
+    background-color: var(--bg-chrome);
+    border: 1px dashed var(--border-strong);
+    border-radius: 12px;
+    max-width: 460px;
+    margin-top: 80px;
+}
+
+.empty-icon-circle {
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    background-color: var(--bg-surface);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #60a5fa;
+    margin-bottom: 16px;
+}
+
+.empty-icon-circle svg {
+    width: 28px;
+    height: 28px;
+}
+
+.empty-state h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text-primary);
+}
+
+.empty-state p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-bottom: 24px;
+}
+
+.empty-actions {
+    display: flex;
+    gap: 12px;
+}
+
+/* Rendered PDF Page Stage */
+.document-stage {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+}
+
+.pdf-page {
+    position: relative;
+    background-color: #ffffff;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+    overflow: hidden;
+    user-select: text;
+    -webkit-user-select: text;
+    color: #000000 !important;
+}
+
+.pdf-element {
+    box-sizing: border-box;
+    cursor: default;
+    color: #000000;
+}
+
+.pdf-text {
+    cursor: text;
+    outline: none;
+    white-space: pre;
+    line-height: 1.0;
+    user-select: text;
+    overflow: visible;
+}
+
+.pdf-text[contenteditable="true"]:focus {
+    outline: 1px dashed var(--border-focus);
+    background-color: rgba(59, 130, 246, 0.05);
+}
+
+.pdf-image-container img,
+.pdf-image img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    pointer-events: none;
+}
+
+.pdf-vector-container,
+.pdf-vector {
+    pointer-events: none;
+}
+
+.pdf-vector-container svg,
+.pdf-vector svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.pdf-table-container,
+.pdf-table {
+    overflow: hidden;
+    user-select: text;
+    color: #000000 !important;
+}
+
+.pdf-table-container table,
+.pdf-table table,
+.reconstructed-table {
+    width: 100%;
+    height: 100%;
+    border-collapse: collapse;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    color: #000000 !important;
+    background-color: #ffffff;
+}
+
+.pdf-table-container th,
+.pdf-table-container td,
+.reconstructed-table th,
+.reconstructed-table td {
+    outline: none;
+    color: #000000 !important;
+    box-sizing: border-box;
+}
+
+.reconstructed-table th,
+.pdf-table-container th {
+    background-color: #e5e7eb !important;
+    color: #000000 !important;
+    font-weight: 700 !important;
+    border: 1px solid #333333 !important;
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: middle;
+}
+
+.reconstructed-table td,
+.pdf-table-container td {
+    color: #000000 !important;
+    border: 1px solid #475569 !important;
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: middle;
+}
+
+.pdf-table-container th[contenteditable="true"]:focus,
+.pdf-table-container td[contenteditable="true"]:focus {
+    outline: 2px solid var(--border-focus);
+    background-color: rgba(59, 130, 246, 0.08);
+}
+
+/* Interactive Selection Box / Gizmo */
+.selection-box {
+    position: absolute;
+    border: 1.5px solid var(--accent-blue);
+    background-color: rgba(37, 99, 235, 0.05);
+    pointer-events: none;
+    z-index: 999;
+}
+
+.selection-label {
+    position: absolute;
+    top: -22px;
+    left: -1px;
+    background-color: var(--accent-blue);
+    color: #ffffff;
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 3px 3px 0 0;
+    pointer-events: none;
+    white-space: nowrap;
+    letter-spacing: 0.04em;
+}
+
+.resize-handle {
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    background-color: #ffffff;
+    border: 1.5px solid var(--accent-blue);
+    pointer-events: auto;
+    border-radius: 1px;
+}
+
+.resize-handle.nw { top: -4px; left: -4px; cursor: nwse-resize; }
+.resize-handle.ne { top: -4px; right: -4px; cursor: nesw-resize; }
+.resize-handle.sw { bottom: -4px; left: -4px; cursor: nesw-resize; }
+.resize-handle.se { bottom: -4px; right: -4px; cursor: nwse-resize; }
+.resize-handle.n  { top: -4px; left: calc(50% - 3.5px); cursor: ns-resize; }
+.resize-handle.s  { bottom: -4px; left: calc(50% - 3.5px); cursor: ns-resize; }
+.resize-handle.w  { top: calc(50% - 3.5px); left: -4px; cursor: ew-resize; }
+.resize-handle.e  { top: calc(50% - 3.5px); right: -4px; cursor: ew-resize; }
+
+/* Right Sidebar: Contextual Properties Panel */
+.sidebar-properties {
+    width: 300px;
+    background-color: var(--bg-chrome);
+    border-left: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    user-select: none;
+    flex-shrink: 0;
+    overflow-y: auto;
+    z-index: 50;
+}
+
+.panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.panel-type-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+}
+
+.panel-body {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.prop-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.prop-group label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.prop-row {
+    display: flex;
+    gap: 8px;
+}
+
+.prop-field {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 4px 8px;
+    gap: 6px;
+}
+
+.prop-field span {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.prop-input {
+    width: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: var(--font-mono);
+}
+
+.prop-select {
+    width: 100%;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 6px 8px;
+    color: var(--text-primary);
+    font-size: 12px;
+    outline: none;
+}
+
+.prop-textarea {
+    width: 100%;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    padding: 8px;
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.4;
+    resize: vertical;
+    outline: none;
+    min-height: 80px;
+    font-family: inherit;
+}
+
+.prop-btn-group {
+    display: flex;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+.prop-btn-toggle {
+    flex: 1;
+    background: transparent;
+    border: none;
+    padding: 6px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    cursor: pointer;
+    border-right: 1px solid var(--border-strong);
+}
+
+.prop-btn-toggle:last-child {
+    border-right: none;
+}
+
+.prop-btn-toggle.active {
+    background-color: var(--bg-surface);
+    color: var(--accent-blue);
+    font-weight: 600;
+}
+
+/* ==========================================================================
+   Bottom Navigation & Status Bar
+   ========================================================================== */
+.bottom-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 40px;
+    padding: 0 16px;
+    background-color: var(--bg-chrome);
+    border-top: 1px solid var(--border-subtle);
+    font-size: 12px;
+    z-index: 100;
+}
+
+.bottom-bar-left, .bottom-bar-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.zoom-controls, .page-navigation {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.btn-control {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    color: var(--text-primary);
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.btn-control:hover {
+    background-color: var(--bg-surface-hover);
+}
+
+.btn-control-subtle {
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--text-secondary);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.btn-control-subtle:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-surface);
+}
+
+.zoom-display, .page-display {
+    font-size: 11px;
+    font-weight: 600;
+    min-width: 45px;
+    text-align: center;
+    color: var(--text-secondary);
+}
+
+.divider-v {
+    width: 1px;
+    height: 16px;
+    background-color: var(--border-strong);
+}
+
+.status-msg {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* ==========================================================================
+   Modals
+   ========================================================================== */
+.modal-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background-color: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-card {
+    background-color: var(--bg-chrome);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    width: 440px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+}
+
+.modal-card-fullscreen {
+    width: 92vw;
+    height: 90vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.modal-header h3 {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.modal-body {
+    padding: 20px;
+}
+
+/* Stages Progress List */
+.stages-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.stage-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.stage-item.active {
+    color: #60a5fa;
+    font-weight: 600;
+}
+
+.stage-item.completed {
+    color: #34d399;
+}
+
+.stage-status-icon {
+    font-family: var(--font-mono);
+    width: 16px;
+    text-align: center;
+}
+
+.progress-bar-container {
+    width: 100%;
+    height: 6px;
+    background-color: var(--bg-surface);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 10px;
+}
+
+.progress-bar-fill {
+    width: 5%;
+    height: 100%;
+    background-color: var(--accent-blue);
+    border-radius: 3px;
+    transition: width 0.25s ease;
+}
+
+.processing-detail {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* Visual Fidelity Modal Specifics */
+.fidelity-header-title h3 {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.fidelity-header-title .subtitle {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.fidelity-metrics {
+    display: flex;
+    gap: 12px;
+}
+
+.metric-pill {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4px 12px;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+}
+
+.metric-lbl {
+    font-size: 9px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 700;
+}
+
+.metric-val {
+    font-size: 14px;
+    font-weight: 700;
+    color: #34d399;
+}
+
+.fidelity-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.view-mode-toggle {
+    display: flex;
+    background-color: var(--bg-surface);
+    border-radius: 6px;
+    padding: 2px;
+}
+
+.btn-toggle {
+    background: transparent;
+    border: none;
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.btn-toggle.active {
+    background-color: var(--bg-chrome);
+    color: var(--text-primary);
+}
+
+.fidelity-modal-body {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    padding: 16px;
+    background-color: #1e293b;
+}
+
+.fidelity-split-container {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    gap: 16px;
+}
+
+.diff-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background-color: #0f172a;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.diff-pane-title {
+    padding: 10px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    background-color: var(--bg-chrome);
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+}
+
+.diff-pane-canvas {
+    flex: 1;
+    overflow: auto;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 20px;
+    background-color: #334155;
+    position: relative;
+}
+
+#fidelity-orig-pane > img,
+#fidelity-orig-img {
+    display: block;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    background-color: #ffffff;
+    flex-shrink: 0;
+    border-radius: 2px;
+}
+
+.diff-html-page-wrapper {
+    position: relative;
+    overflow: hidden;
+    background-color: #ffffff;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    flex-shrink: 0;
+    border-radius: 2px;
+}
+
+.diff-pane-canvas .pdf-page img {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    max-width: none !important;
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: fill !important;
+}
+
+/* Slider Wipe Mode */
+.fidelity-slider-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: auto;
+}
+
+.slider-wrapper {
+    position: relative;
+    display: inline-block;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    user-select: none;
+}
+
+.slider-orig {
+    display: block;
+    max-height: 75vh;
+}
+
+.slider-html-clipper {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 50%;
+    overflow: hidden;
+    border-right: 2px solid #3b82f6;
+}
+
+.slider-recon {
+    display: block;
+    height: 100%;
+    max-height: 75vh;
+}
+
+.slider-divider-line {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    height: 100%;
+    width: 4px;
+    background-color: #3b82f6;
+    cursor: ew-resize;
+    transform: translateX(-50%);
+}
+
+.slider-divider-line::after {
+    content: "◀ ▶";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background-color: #2563eb;
+    color: #ffffff;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 3px 6px;
+    border-radius: 10px;
+    white-space: nowrap;
+}
+
+/* Heatmap View */
+.fidelity-heatmap-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Local Models Modal */
+.model-desc-p {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-bottom: 16px;
+}
+
+.model-components-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.model-card-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+}
+
+.model-item-info strong {
+    font-size: 12px;
+    display: block;
+}
+
+.model-item-info small {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.model-tag {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 12px;
+}
+
+.model-tag.installed {
+    background-color: rgba(16, 185, 129, 0.2);
+    color: #34d399;
+}
+
+.model-tag.pending {
+    background-color: rgba(234, 179, 8, 0.2);
+    color: #facc15;
+}
+
+.model-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+</style>
+    <!-- html2canvas for client-side visual fidelity comparison -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+</head>
+<body class="app-container">
+
+    <!-- Top Application Bar -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <div class="app-branding">
+                <svg class="app-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                    <polyline points="10 9 9 9 8 9"></polyline>
+                </svg>
+                <span class="app-title">RAMEN</span>
+                <span class="app-badge">PDF &rarr; HTML</span>
+            </div>
+            <div class="document-meta">
+                <span id="doc-name-display" class="doc-title-text">No document loaded</span>
+                <span id="doc-type-badge" class="doc-type-tag" style="display: none;">Digital PDF</span>
+            </div>
+        </div>
+
+        <div class="top-bar-actions">
+            <input type="file" id="pdf-file-input" accept="application/pdf" style="display: none;">
+            <button id="btn-open-pdf" class="btn btn-secondary">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                Open PDF
+            </button>
+
+            <button id="btn-compare-mode" class="btn btn-secondary" title="Compare Reconstructed HTML vs Original PDF">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="2" y="3" width="20" height="18" rx="2"></rect>
+                    <line x1="12" y1="3" x2="12" y2="21"></line>
+                </svg>
+                Fidelity Diff
+            </button>
+
+            <div class="dropdown-container">
+                <button id="btn-export-dropdown" class="btn btn-primary">
+                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    Export
+                    <span class="caret-down">&blacktriangledown;</span>
+                </button>
+                <div id="export-menu" class="dropdown-menu">
+                    <button class="dropdown-item" data-export="zip">
+                        <strong>HTML + Assets ZIP</strong>
+                        <small>index.html, styles.css, images, document.json</small>
+                    </button>
+                    <button class="dropdown-item" data-export="html">
+                        <strong>Standalone HTML</strong>
+                        <small>Single self-contained HTML page</small>
+                    </button>
+                    <button class="dropdown-item" data-export="json">
+                        <strong>Intermediate JSON</strong>
+                        <small>Source of truth 2D coordinates & styles</small>
+                    </button>
+                </div>
+            </div>
+
+            <button id="btn-model-settings" class="btn btn-icon-only" title="Local Model Status & Settings">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Workspace Body -->
+    <div class="workspace">
+        
+        <!-- Left Sidebar: Page Thumbnails Only -->
+        <aside class="sidebar-thumbnails">
+            <div class="sidebar-header">
+                <span>PAGES</span>
+                <span id="thumb-page-count" class="badge-count">0</span>
+            </div>
+            <div id="thumbnails-list" class="thumbnails-scrollable">
+                <div class="empty-thumbnails-hint">No pages loaded</div>
+            </div>
+        </aside>
+
+        <!-- Center Workspace Canvas -->
+        <main class="canvas-viewport" id="canvas-viewport">
+            <div class="canvas-wrapper" id="canvas-wrapper">
+                
+                <!-- Initial Dropzone / Welcome state -->
+                <div id="empty-state" class="empty-state">
+                    <div class="empty-icon-circle">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                        </svg>
+                    </div>
+                    <h3>Open a PDF to Reconstruct</h3>
+                    <p>Converts native digital objects or scanned pages into pixel-perfect, editable HTML without LLMs/VLMs.</p>
+                    <div class="empty-actions">
+                        <button id="btn-welcome-open" class="btn btn-primary">Select PDF File</button>
+                        <button id="btn-load-sample-digital" class="btn btn-outline">Load Sample Report</button>
+                    </div>
+                </div>
+
+                <!-- Page Container (Rendered PDF Pages) -->
+                <div id="document-stage" class="document-stage" style="display: none;">
+                    <!-- Pages will be rendered here dynamically -->
+                </div>
+
+                <!-- Interactive Selection & Transform Gizmo -->
+                <div id="selection-box" class="selection-box" style="display: none;">
+                    <div class="resize-handle n" data-handle="n"></div>
+                    <div class="resize-handle s" data-handle="s"></div>
+                    <div class="resize-handle e" data-handle="e"></div>
+                    <div class="resize-handle w" data-handle="w"></div>
+                    <div class="resize-handle nw" data-handle="nw"></div>
+                    <div class="resize-handle ne" data-handle="ne"></div>
+                    <div class="resize-handle sw" data-handle="sw"></div>
+                    <div class="resize-handle se" data-handle="se"></div>
+                    <div class="selection-label" id="selection-label">Text</div>
+                </div>
+
+            </div>
+        </main>
+
+        <!-- Right Contextual Properties Panel (Only visible when an element is selected) -->
+        <aside id="properties-panel" class="sidebar-properties" style="display: none;">
+            <div class="panel-header">
+                <span id="panel-elem-type" class="panel-type-title">ELEMENT PROPERTIES</span>
+                <button id="btn-close-properties" class="btn-icon-subtle" title="Close Panel">&times;</button>
+            </div>
+
+            <div class="panel-body" id="properties-content">
+                <!-- Dynamically populated based on selected element type -->
+            </div>
+        </aside>
+
+    </div>
+
+    <!-- Bottom Status & Zoom Navigation Bar -->
+    <footer class="bottom-bar">
+        <div class="bottom-bar-left">
+            <div class="zoom-controls">
+                <button id="btn-zoom-out" class="btn-control" title="Zoom Out">&minus;</button>
+                <span id="zoom-level-text" class="zoom-display">100%</span>
+                <button id="btn-zoom-in" class="btn-control" title="Zoom In">&plus;</button>
+                <button id="btn-zoom-fit" class="btn-control-subtle" title="Fit to Window">Fit Width</button>
+            </div>
+            <div class="divider-v"></div>
+            <span id="status-info-text" class="status-msg">Ready</span>
+        </div>
+
+        <div class="bottom-bar-right">
+            <div class="page-navigation">
+                <button id="btn-prev-page" class="btn-control" title="Previous Page">&lt;</button>
+                <span id="page-nav-text" class="page-display">Page 1 / 1</span>
+                <button id="btn-next-page" class="btn-control" title="Next Page">&gt;</button>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Real Multi-Stage Processing Modal -->
+    <div id="processing-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Processing Document</h3>
+            </div>
+            <div class="modal-body">
+                <div class="stages-list">
+                    <div class="stage-item" id="stage-read">
+                        <span class="stage-status-icon">○</span>
+                        <span class="stage-label">Reading PDF</span>
+                    </div>
+                    <div class="stage-item" id="stage-analyze">
+                        <span class="stage-status-icon">○</span>
+                        <span class="stage-label">Detecting page layout</span>
+                    </div>
+                    <div class="stage-item" id="stage-text">
+                        <span class="stage-status-icon">○</span>
+                        <span class="stage-label">Extracting text & typography</span>
+                    </div>
+                    <div class="stage-item" id="stage-tables">
+                        <span class="stage-status-icon">○</span>
+                        <span class="stage-label">Detecting tables & vector shapes</span>
+                    </div>
+                    <div class="stage-item" id="stage-reconstruct">
+                        <span class="stage-status-icon">○</span>
+                        <span class="stage-label" id="stage-reconstruct-label">Reconstructing pages</span>
+                    </div>
+                    <div class="stage-item" id="stage-finalize">
+                        <span class="stage-status-icon">○</span>
+                        <span class="stage-label">Finalizing HTML</span>
+                    </div>
+                </div>
+
+                <div class="progress-bar-container">
+                    <div id="real-progress-bar" class="progress-bar-fill"></div>
+                </div>
+                <div id="processing-detail-text" class="processing-detail">Initializing document pipeline...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Visual Fidelity Diff Modal -->
+    <div id="fidelity-modal" class="modal-backdrop modal-large" style="display: none;">
+        <div class="modal-card modal-card-fullscreen">
+            <div class="modal-header">
+                <div class="fidelity-header-title">
+                    <h3>Visual Fidelity Comparison</h3>
+                    <span class="subtitle">Pixel diff and structural similarity between Original PDF and Generated HTML</span>
+                </div>
+                <div class="fidelity-metrics">
+                    <div class="metric-pill">
+                        <span class="metric-lbl">SSIM Similarity</span>
+                        <span class="metric-val" id="metric-ssim">--%</span>
+                    </div>
+                    <div class="metric-pill">
+                        <span class="metric-lbl">Pixel Diff</span>
+                        <span class="metric-val" id="metric-pixdiff">--%</span>
+                    </div>
+                </div>
+                <div class="fidelity-header-actions">
+                    <div class="view-mode-toggle">
+                        <button id="btn-view-split" class="btn-toggle active">Side-by-Side</button>
+                        <button id="btn-view-slider" class="btn-toggle">Split Slider</button>
+                        <button id="btn-view-heatmap" class="btn-toggle">Diff Heatmap</button>
+                    </div>
+                    <button id="btn-close-fidelity" class="btn-icon-subtle">&times;</button>
+                </div>
+            </div>
+
+            <div class="modal-body fidelity-modal-body">
+                <!-- Side by side view -->
+                <div id="fidelity-split-container" class="fidelity-split-container">
+                    <div class="diff-pane">
+                        <div class="diff-pane-title">Original PDF Render</div>
+                        <div class="diff-pane-canvas" id="fidelity-orig-pane">
+                            <img id="fidelity-orig-img" src="" alt="Original PDF Render">
+                        </div>
+                    </div>
+                    <div class="diff-pane">
+                        <div class="diff-pane-title">Generated HTML Page</div>
+                        <div class="diff-pane-canvas" id="fidelity-html-pane">
+                            <!-- Cloned page rendered here -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Slider wipe view -->
+                <div id="fidelity-slider-container" class="fidelity-slider-container" style="display: none;">
+                    <div class="slider-wrapper" id="slider-wrapper">
+                        <img id="slider-orig-img" class="slider-orig" src="" alt="Original">
+                        <div class="slider-html-clipper" id="slider-clipper">
+                            <img id="slider-recon-img" class="slider-recon" src="" alt="Reconstructed">
+                        </div>
+                        <div class="slider-divider-line" id="slider-handle"></div>
+                    </div>
+                </div>
+
+                <!-- Heatmap view -->
+                <div id="fidelity-heatmap-container" class="fidelity-heatmap-container" style="display: none;">
+                    <div class="diff-pane-title">Pixel Discrepancy Heatmap (Discrepancies highlighted)</div>
+                    <div class="diff-pane-canvas">
+                        <img id="fidelity-heatmap-img" src="" alt="Heatmap Diff">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Local Models Status Modal -->
+    <div id="models-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Local Model Components</h3>
+                <button id="btn-close-models" class="btn-icon-subtle">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="model-desc-p">All models operate completely offline with no LLM or cloud API dependency.</p>
+                <div id="model-components-list" class="model-components-list">
+                    <!-- Populated dynamically -->
+                </div>
+                <div class="model-actions">
+                    <button id="btn-verify-models" class="btn btn-outline">Verify / Download Local Models</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+/**
+ * RAMEN: Precision PDF-to-HTML Reconstruction & Editor
+ * Desktop-first, deterministic 2D-coordinate document editor.
+ */
+
+// Application State
+const state = {
+    doc: null,                 // Intermediate DocumentData JSON
+    currentPageIndex: 0,       // 0-indexed active page
+    selectedElementId: null,   // ID of currently selected element
+    zoom: 1.0,                 // Current zoom factor
+    isDragging: false,
+    isResizing: false,
+    resizeHandle: null,
+    dragStart: { x: 0, y: 0 },
+    elemStart: { x: 0, y: 0, w: 0, h: 0 },
+    diffViewMode: 'split',     // 'split', 'slider', 'heatmap'
+    sliderPos: 50,             // percent for split slider
+    history: [],               // Undo history
+};
+
+// DOM References
+const elements = {
+    docNameDisplay: document.getElementById('doc-name-display'),
+    docTypeBadge: document.getElementById('doc-type-badge'),
+    btnOpenPdf: document.getElementById('btn-open-pdf'),
+    pdfFileInput: document.getElementById('pdf-file-input'),
+    btnCompareMode: document.getElementById('btn-compare-mode'),
+    btnExportDropdown: document.getElementById('btn-export-dropdown'),
+    exportMenu: document.getElementById('export-menu'),
+    btnModelSettings: document.getElementById('btn-model-settings'),
+    
+    // Thumbnails
+    thumbPageCount: document.getElementById('thumb-page-count'),
+    thumbnailsList: document.getElementById('thumbnails-list'),
+    
+    // Canvas Viewport
+    canvasViewport: document.getElementById('canvas-viewport'),
+    canvasWrapper: document.getElementById('canvas-wrapper'),
+    emptyState: document.getElementById('empty-state'),
+    documentStage: document.getElementById('document-stage'),
+    btnWelcomeOpen: document.getElementById('btn-welcome-open'),
+    btnLoadSample: document.getElementById('btn-load-sample-digital'),
+    
+    // Gizmo / Selection
+    selectionBox: document.getElementById('selection-box'),
+    selectionLabel: document.getElementById('selection-label'),
+    
+    // Properties Panel
+    propertiesPanel: document.getElementById('properties-panel'),
+    panelElemType: document.getElementById('panel-elem-type'),
+    propertiesContent: document.getElementById('properties-content'),
+    btnCloseProperties: document.getElementById('btn-close-properties'),
+    
+    // Bottom Bar
+    btnZoomOut: document.getElementById('btn-zoom-out'),
+    btnZoomIn: document.getElementById('btn-zoom-in'),
+    btnZoomFit: document.getElementById('btn-zoom-fit'),
+    zoomLevelText: document.getElementById('zoom-level-text'),
+    statusInfoText: document.getElementById('status-info-text'),
+    btnPrevPage: document.getElementById('btn-prev-page'),
+    btnNextPage: document.getElementById('btn-next-page'),
+    pageNavText: document.getElementById('page-nav-text'),
+    
+    // Processing Modal
+    processingModal: document.getElementById('processing-modal'),
+    realProgressBar: document.getElementById('real-progress-bar'),
+    processingDetailText: document.getElementById('processing-detail-text'),
+    stageItems: {
+        read: document.getElementById('stage-read'),
+        analyze: document.getElementById('stage-analyze'),
+        text: document.getElementById('stage-text'),
+        tables: document.getElementById('stage-tables'),
+        reconstruct: document.getElementById('stage-reconstruct'),
+        finalize: document.getElementById('stage-finalize'),
+    },
+    
+    // Fidelity Modal
+    fidelityModal: document.getElementById('fidelity-modal'),
+    btnCloseFidelity: document.getElementById('btn-close-fidelity'),
+    metricSsim: document.getElementById('metric-ssim'),
+    metricPixdiff: document.getElementById('metric-pixdiff'),
+    btnViewSplit: document.getElementById('btn-view-split'),
+    btnViewSlider: document.getElementById('btn-view-slider'),
+    btnViewHeatmap: document.getElementById('btn-view-heatmap'),
+    fidelitySplitContainer: document.getElementById('fidelity-split-container'),
+    fidelitySliderContainer: document.getElementById('fidelity-slider-container'),
+    fidelityHeatmapContainer: document.getElementById('fidelity-heatmap-container'),
+    fidelityOrigPane: document.getElementById('fidelity-orig-pane'),
+    fidelityOrigImg: document.getElementById('fidelity-orig-img'),
+    fidelityHtmlPane: document.getElementById('fidelity-html-pane'),
+    sliderWrapper: document.getElementById('slider-wrapper'),
+    sliderOrigImg: document.getElementById('slider-orig-img'),
+    sliderReconImg: document.getElementById('slider-recon-img'),
+    sliderClipper: document.getElementById('slider-clipper'),
+    sliderHandle: document.getElementById('slider-handle'),
+    fidelityHeatmapImg: document.getElementById('fidelity-heatmap-img'),
+    
+    // Models Modal
+    modelsModal: document.getElementById('models-modal'),
+    btnCloseModels: document.getElementById('btn-close-models'),
+    modelComponentsList: document.getElementById('model-components-list'),
+    btnVerifyModels: document.getElementById('btn-verify-models'),
+};
+
+// ==========================================================================
+// Initialization & Event Listeners
+// ==========================================================================
+function init() {
+    setupEventListeners();
+    setupTransformGizmo();
+    updateZoom();
+}
+
+function setupEventListeners() {
+    // Open PDF
+    elements.btnOpenPdf.addEventListener('click', () => elements.pdfFileInput.click());
+    elements.btnWelcomeOpen.addEventListener('click', () => elements.pdfFileInput.click());
+    elements.pdfFileInput.addEventListener('change', handleFileSelected);
+    
+    // Load sample
+    elements.btnLoadSample.addEventListener('click', loadSampleReport);
+    
+    // Export Dropdown
+    elements.btnExportDropdown.addEventListener('click', (e) => {
+        e.stopPropagation();
+        elements.exportMenu.classList.toggle('show');
+    });
+    
+    document.addEventListener('click', () => {
+        elements.exportMenu.classList.remove('show');
+    });
+    
+    document.querySelectorAll('.dropdown-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            const format = e.currentTarget.getAttribute('data-export');
+            exportDocument(format);
+            elements.exportMenu.classList.remove('show');
+        });
+    });
+    
+    // Properties Close
+    elements.btnCloseProperties.addEventListener('click', deselectElement);
+    
+    // Zoom Controls
+    elements.btnZoomIn.addEventListener('click', () => setZoom(state.zoom + 0.15));
+    elements.btnZoomOut.addEventListener('click', () => setZoom(state.zoom - 0.15));
+    elements.btnZoomFit.addEventListener('click', zoomToFit);
+    
+    // Page Navigation
+    elements.btnPrevPage.addEventListener('click', () => goToPage(state.currentPageIndex - 1));
+    elements.btnNextPage.addEventListener('click', () => goToPage(state.currentPageIndex + 1));
+    
+    // Keyboard navigation
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    
+    // Fidelity Diff Modal
+    elements.btnCompareMode.addEventListener('click', openFidelityModal);
+    elements.btnCloseFidelity.addEventListener('click', () => elements.fidelityModal.style.display = 'none');
+    elements.btnViewSplit.addEventListener('click', () => setDiffViewMode('split'));
+    elements.btnViewSlider.addEventListener('click', () => setDiffViewMode('slider'));
+    elements.btnViewHeatmap.addEventListener('click', () => setDiffViewMode('heatmap'));
+    setupSliderInteraction();
+    
+    // Models Modal
+    elements.btnModelSettings.addEventListener('click', openModelsModal);
+    elements.btnCloseModels.addEventListener('click', () => elements.modelsModal.style.display = 'none');
+    elements.btnVerifyModels.addEventListener('click', triggerModelVerification);
+    
+    // Click outside deselect
+    elements.canvasViewport.addEventListener('mousedown', (e) => {
+        if (!e.target.closest('.pdf-element') && !e.target.closest('.selection-box') && !e.target.closest('#properties-panel')) {
+            deselectElement();
+        }
+    });
+}
+
+// ==========================================================================
+// Document Loading & Processing Stages
+// ==========================================================================
+async function handleFileSelected(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    await uploadAndConvert(file);
+}
+
+async function loadSampleReport() {
+    showProcessingModal();
+    updateStage('read', 'Loading bundled sample PDF...', 15);
+    try {
+        const resp = await fetch('/api/convert', {
+            method: 'POST',
+            body: createSampleFormData()
+        });
+        // If direct post with sample file isn't multipart from browser, fetch sample from server
+        // Let's fetch sample pdf blob and convert
+        const sampleResp = await fetch('/sample.pdf');
+        if (sampleResp.ok) {
+            const blob = await sampleResp.blob();
+            const file = new File([blob], 'sample_digital_report.pdf', { type: 'application/pdf' });
+            await uploadAndConvert(file);
+        } else {
+            // Direct convert request
+            uploadSampleDirectly();
+        }
+    } catch (err) {
+        uploadSampleDirectly();
+    }
+}
+
+async function uploadSampleDirectly() {
+    const formData = new FormData();
+    // Fetch blob
+    try {
+        const r = await fetch('/sample.pdf');
+        const b = await r.blob();
+        const f = new File([b], 'sample_digital_report.pdf', { type: 'application/pdf' });
+        await uploadAndConvert(f);
+    } catch (err) {
+        hideProcessingModal();
+        alert('Could not load sample: ' + err.message);
+    }
+}
+
+async function uploadAndConvert(file) {
+    showProcessingModal();
+    resetStages();
+    updateStage('read', `Reading PDF: ${file.name}...`, 10);
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        updateStage('analyze', 'Detecting digital geometry & page boundaries...', 25);
+        
+        const response = await fetch('/api/convert', {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            let errorMsg = 'Conversion failed';
+            try {
+                const errData = await response.json();
+                errorMsg = errData.detail || errorMsg;
+            } catch (e) {
+                errorMsg = `Server error (${response.status} ${response.statusText})`;
+            }
+            throw new Error(errorMsg);
+        }
+        
+        updateStage('text', 'Extracting native text, fonts, character coordinates...', 50);
+        updateStage('tables', 'Recognizing tables & vector paths...', 75);
+        updateStage('reconstruct', 'Constructing 2D coordinate canvas...', 90);
+        updateStage('finalize', 'Rendering high-fidelity editable HTML...', 100);
+        
+        const data = await response.json();
+        
+        setTimeout(() => {
+            hideProcessingModal();
+            loadDocument(data.document, data.analysis);
+        }, 400);
+        
+    } catch (error) {
+        hideProcessingModal();
+        alert('Error converting PDF: ' + error.message);
+    }
+}
+
+function showProcessingModal() {
+    elements.processingModal.style.display = 'flex';
+}
+
+function hideProcessingModal() {
+    elements.processingModal.style.display = 'none';
+}
+
+function resetStages() {
+    Object.values(elements.stageItems).forEach(el => {
+        el.className = 'stage-item';
+        el.querySelector('.stage-status-icon').textContent = '○';
+    });
+    elements.realProgressBar.style.width = '5%';
+    elements.processingDetailText.textContent = 'Initializing...';
+}
+
+function updateStage(stageKey, detailText, percent) {
+    const stageEl = elements.stageItems[stageKey];
+    if (stageEl) {
+        // Mark previous as completed
+        const keys = Object.keys(elements.stageItems);
+        const currentIndex = keys.indexOf(stageKey);
+        for (let i = 0; i < currentIndex; i++) {
+            const prev = elements.stageItems[keys[i]];
+            prev.className = 'stage-item completed';
+            prev.querySelector('.stage-status-icon').textContent = '✓';
+        }
+        stageEl.className = 'stage-item active';
+        stageEl.querySelector('.stage-status-icon').textContent = '●';
+    }
+    elements.processingDetailText.textContent = detailText;
+    elements.realProgressBar.style.width = `${percent}%`;
+}
+
+// ==========================================================================
+// Document Management & Canvas Rendering
+// ==========================================================================
+function loadDocument(docData, analysis) {
+    state.doc = docData;
+    state.currentPageIndex = 0;
+    state.selectedElementId = null;
+    
+    // UI Metadata
+    elements.emptyState.style.display = 'none';
+    elements.documentStage.style.display = 'flex';
+    elements.docNameDisplay.textContent = docData.title || 'Untitled Document';
+    
+    const isScanned = docData.pages[0]?.isScanned || false;
+    elements.docTypeBadge.style.display = 'inline-block';
+    elements.docTypeBadge.textContent = isScanned ? 'Scanned PDF (OCR/Layout)' : 'Digital PDF (Native)';
+    elements.docTypeBadge.style.borderColor = isScanned ? '#eab308' : 'rgba(16, 185, 129, 0.3)';
+    elements.docTypeBadge.style.color = isScanned ? '#facc15' : '#34d399';
+    
+    renderThumbnails();
+    renderCurrentPage();
+    updatePageNavigation();
+    zoomToFit();
+    setStatus(`Loaded ${docData.pages.length} page(s) successfully.`);
+}
+
+function renderThumbnails() {
+    elements.thumbnailsList.innerHTML = '';
+    elements.thumbPageCount.textContent = state.doc.pages.length;
+    
+    state.doc.pages.forEach((page, idx) => {
+        const card = document.createElement('div');
+        card.className = `thumbnail-card ${idx === state.currentPageIndex ? 'active' : ''}`;
+        card.setAttribute('data-page-index', idx);
+        
+        const preview = document.createElement('div');
+        preview.className = 'thumbnail-preview';
+        
+        if (page.originalImageSrc) {
+            const img = document.createElement('img');
+            img.src = page.originalImageSrc;
+            img.alt = `Page ${idx + 1}`;
+            preview.appendChild(img);
+        } else {
+            preview.textContent = `Page ${idx + 1}`;
+        }
+        
+        const label = document.createElement('div');
+        label.className = 'thumbnail-label';
+        label.textContent = `Page ${idx + 1}`;
+        
+        card.appendChild(preview);
+        card.appendChild(label);
+        
+        card.addEventListener('click', () => goToPage(idx));
+        elements.thumbnailsList.appendChild(card);
+    });
+}
+
+function renderCurrentPage() {
+    if (!state.doc || !state.doc.pages[state.currentPageIndex]) return;
+    
+    deselectElement();
+    const page = state.doc.pages[state.currentPageIndex];
+    elements.documentStage.innerHTML = '';
+    
+    const pageContainer = document.createElement('div');
+    pageContainer.className = 'pdf-page';
+    pageContainer.id = `pdf-page-${page.pageNumber}`;
+    pageContainer.style.width = `${page.width}px`;
+    pageContainer.style.height = `${page.height}px`;
+    
+    page.elements.forEach(elem => {
+        const domElem = renderElementToDOM(elem);
+        if (domElem) {
+            pageContainer.appendChild(domElem);
+        }
+    });
+    
+    elements.documentStage.appendChild(pageContainer);
+    updateThumbnailActiveState();
+    updatePageNavigation();
+}
+
+function renderElementToDOM(elem) {
+    const x0 = elem.bbox[0];
+    const y0 = elem.bbox[1];
+    const w = Math.max(elem.bbox[2] - elem.bbox[0], 1);
+    const h = Math.max(elem.bbox[3] - elem.bbox[1], 1);
+    
+    const div = document.createElement('div');
+    div.className = `pdf-element pdf-${elem.type}`;
+    div.id = elem.id;
+    div.setAttribute('data-id', elem.id);
+    div.setAttribute('data-type', elem.type);
+    
+    div.style.position = 'absolute';
+    div.style.left = `${x0}px`;
+    div.style.top = `${y0}px`;
+    div.style.width = `${w}px`;
+    div.style.height = `${h}px`;
+    div.style.zIndex = elem.zIndex || 1;
+    if (elem.opacity !== undefined && elem.opacity !== null && elem.opacity < 0.999) {
+        div.style.opacity = elem.opacity;
+    }
+    if (elem.rotation) div.style.transform = `rotate(${elem.rotation}deg)`;
+    
+    if (elem.type === 'text') {
+        const s = elem.style || {};
+        div.style.fontFamily = s.fontFamily || 'sans-serif';
+        div.style.fontSize = `${s.fontSize || 12}px`;
+        div.style.fontWeight = s.fontWeight || 'normal';
+        div.style.fontStyle = s.fontStyle || 'normal';
+        div.style.color = s.color || '#000000';
+        div.style.textAlign = s.textAlign || 'left';
+        div.style.lineHeight = `${s.lineHeight || 1.0}`;
+        div.style.whiteSpace = 'pre';
+        if (s.backgroundColor) div.style.backgroundColor = s.backgroundColor;
+        
+        div.contentEditable = "true";
+        div.spellcheck = false;
+
+        if (elem.spans && elem.spans.length > 1) {
+            div.innerHTML = '';
+            elem.spans.forEach(sp => {
+                const spEl = document.createElement('span');
+                const st = sp.style || {};
+                if (st.fontFamily && st.fontFamily !== s.fontFamily) spEl.style.fontFamily = st.fontFamily;
+                if (st.fontSize && Math.abs(st.fontSize - (s.fontSize || 12)) > 0.5) spEl.style.fontSize = `${st.fontSize}px`;
+                if (st.fontWeight && st.fontWeight !== s.fontWeight) spEl.style.fontWeight = st.fontWeight;
+                if (st.fontStyle && st.fontStyle !== s.fontStyle) spEl.style.fontStyle = st.fontStyle;
+                if (st.color && st.color !== s.color) spEl.style.color = st.color;
+                spEl.textContent = sp.text || '';
+                div.appendChild(spEl);
+            });
+        } else {
+            div.innerText = elem.text || '';
+        }
+        
+        // Inline text sync
+        div.addEventListener('input', () => {
+            elem.text = div.innerText;
+            syncPropertiesPanelText(div.innerText);
+        });
+        
+    } else if (elem.type === 'image') {
+        const img = document.createElement('img');
+        img.src = elem.src || '';
+        img.alt = 'Embedded Image';
+        div.appendChild(img);
+        
+    } else if (elem.type === 'table') {
+        div.innerHTML = elem.html || '<table><tr><td>Table</td></tr></table>';
+        // Make table cells contenteditable
+        div.querySelectorAll('td, th').forEach(cell => {
+            cell.contentEditable = "true";
+            cell.spellcheck = false;
+            cell.addEventListener('input', () => {
+                elem.html = div.innerHTML;
+            });
+        });
+        
+    } else if (elem.type === 'vector') {
+        div.innerHTML = elem.svg || '<svg></svg>';
+        
+    } else if (elem.type === 'formula') {
+        div.innerHTML = elem.renderedHtml || elem.text || '';
+    }
+    
+    // Element selection listener
+    div.addEventListener('mousedown', (e) => {
+        // If clicking to edit text, select element without interfering
+        selectElement(elem.id);
+    });
+    
+    return div;
+}
+
+// ==========================================================================
+// Interactive Selection & Transform Gizmo
+// ==========================================================================
+function selectElement(elemId) {
+    const page = state.doc?.pages[state.currentPageIndex];
+    if (!page) return;
+    
+    const elem = page.elements.find(e => e.id === elemId);
+    if (!elem) return;
+    
+    state.selectedElementId = elemId;
+    updateSelectionBox(elem);
+    renderPropertiesPanel(elem);
+    elements.propertiesPanel.style.display = 'flex';
+}
+
+function deselectElement() {
+    state.selectedElementId = null;
+    elements.selectionBox.style.display = 'none';
+    elements.propertiesPanel.style.display = 'none';
+}
+
+function updateSelectionBox(elem) {
+    const x0 = elem.bbox[0];
+    const y0 = elem.bbox[1];
+    const w = elem.bbox[2] - elem.bbox[0];
+    const h = elem.bbox[3] - elem.bbox[1];
+    
+    elements.selectionBox.style.display = 'block';
+    elements.selectionBox.style.left = `${x0}px`;
+    elements.selectionBox.style.top = `${y0}px`;
+    elements.selectionBox.style.width = `${w}px`;
+    elements.selectionBox.style.height = `${h}px`;
+    
+    elements.selectionLabel.textContent = `${elem.type.toUpperCase()} [${Math.round(x0)}, ${Math.round(y0)}]`;
+}
+
+function setupTransformGizmo() {
+    // 1. Move element by dragging inside selection box or element
+    elements.selectionBox.addEventListener('mousedown', (e) => {
+        if (e.target.classList.contains('resize-handle')) return;
+        startDrag(e);
+    });
+    
+    // 2. Resize handles
+    document.querySelectorAll('.resize-handle').forEach(handle => {
+        handle.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+            startResize(e, handle.getAttribute('data-handle'));
+        });
+    });
+    
+    window.addEventListener('mousemove', onGizmoMouseMove);
+    window.addEventListener('mouseup', onGizmoMouseUp);
+}
+
+function startDrag(e) {
+    if (!state.selectedElementId) return;
+    const page = state.doc.pages[state.currentPageIndex];
+    const elem = page.elements.find(e => e.id === state.selectedElementId);
+    if (!elem) return;
+    
+    state.isDragging = true;
+    state.dragStart = { x: e.clientX, y: e.clientY };
+    state.elemStart = {
+        x: elem.bbox[0],
+        y: elem.bbox[1],
+        w: elem.bbox[2] - elem.bbox[0],
+        h: elem.bbox[3] - elem.bbox[1]
+    };
+    e.preventDefault();
+}
+
+function startResize(e, handle) {
+    if (!state.selectedElementId) return;
+    const page = state.doc.pages[state.currentPageIndex];
+    const elem = page.elements.find(e => e.id === state.selectedElementId);
+    if (!elem) return;
+    
+    state.isResizing = true;
+    state.resizeHandle = handle;
+    state.dragStart = { x: e.clientX, y: e.clientY };
+    state.elemStart = {
+        x: elem.bbox[0],
+        y: elem.bbox[1],
+        w: elem.bbox[2] - elem.bbox[0],
+        h: elem.bbox[3] - elem.bbox[1]
+    };
+    e.preventDefault();
+}
+
+function onGizmoMouseMove(e) {
+    if (!state.isDragging && !state.isResizing) return;
+    const page = state.doc?.pages[state.currentPageIndex];
+    const elem = page?.elements.find(e => e.id === state.selectedElementId);
+    if (!elem) return;
+    
+    const dx = (e.clientX - state.dragStart.x) / state.zoom;
+    const dy = (e.clientY - state.dragStart.y) / state.zoom;
+    
+    if (state.isDragging) {
+        const newX0 = Math.round(state.elemStart.x + dx);
+        const newY0 = Math.round(state.elemStart.y + dy);
+        const w = state.elemStart.w;
+        const h = state.elemStart.h;
+        
+        elem.bbox = [newX0, newY0, newX0 + w, newY0 + h];
+        updateDOMElementGeometry(elem);
+        updateSelectionBox(elem);
+        updatePropertiesPositionInputs(elem);
+    } else if (state.isResizing) {
+        let x = state.elemStart.x;
+        let y = state.elemStart.y;
+        let w = state.elemStart.w;
+        let h = state.elemStart.h;
+        const handle = state.resizeHandle;
+        
+        if (handle.includes('e')) w = Math.max(15, state.elemStart.w + dx);
+        if (handle.includes('s')) h = Math.max(15, state.elemStart.h + dy);
+        if (handle.includes('w')) {
+            const potentialW = state.elemStart.w - dx;
+            if (potentialW > 15) {
+                x = state.elemStart.x + dx;
+                w = potentialW;
+            }
+        }
+        if (handle.includes('n')) {
+            const potentialH = state.elemStart.h - dy;
+            if (potentialH > 15) {
+                y = state.elemStart.y + dy;
+                h = potentialH;
+            }
+        }
+        
+        elem.bbox = [Math.round(x), Math.round(y), Math.round(x + w), Math.round(y + h)];
+        updateDOMElementGeometry(elem);
+        updateSelectionBox(elem);
+        updatePropertiesPositionInputs(elem);
+    }
+}
+
+function onGizmoMouseUp() {
+    state.isDragging = false;
+    state.isResizing = false;
+    state.resizeHandle = null;
+}
+
+function updateDOMElementGeometry(elem) {
+    const domElem = document.getElementById(elem.id);
+    if (!domElem) return;
+    const x0 = elem.bbox[0];
+    const y0 = elem.bbox[1];
+    const w = elem.bbox[2] - elem.bbox[0];
+    const h = elem.bbox[3] - elem.bbox[1];
+    
+    domElem.style.left = `${x0}px`;
+    domElem.style.top = `${y0}px`;
+    domElem.style.width = `${w}px`;
+    domElem.style.height = `${h}px`;
+}
+
+function handleGlobalKeyDown(e) {
+    // If typing inside an input, textarea, or contenteditable, don't trigger hotkeys
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
+        return;
+    }
+    
+    if (state.selectedElementId) {
+        const page = state.doc?.pages[state.currentPageIndex];
+        const elem = page?.elements.find(el => el.id === state.selectedElementId);
+        if (!elem) return;
+        
+        const step = e.shiftKey ? 10 : 1;
+        
+        if (e.key === 'ArrowLeft') {
+            elem.bbox[0] -= step; elem.bbox[2] -= step;
+            updateDOMElementGeometry(elem); updateSelectionBox(elem); updatePropertiesPositionInputs(elem);
+            e.preventDefault();
+        } else if (e.key === 'ArrowRight') {
+            elem.bbox[0] += step; elem.bbox[2] += step;
+            updateDOMElementGeometry(elem); updateSelectionBox(elem); updatePropertiesPositionInputs(elem);
+            e.preventDefault();
+        } else if (e.key === 'ArrowUp') {
+            elem.bbox[1] -= step; elem.bbox[3] -= step;
+            updateDOMElementGeometry(elem); updateSelectionBox(elem); updatePropertiesPositionInputs(elem);
+            e.preventDefault();
+        } else if (e.key === 'ArrowDown') {
+            elem.bbox[1] += step; elem.bbox[3] += step;
+            updateDOMElementGeometry(elem); updateSelectionBox(elem); updatePropertiesPositionInputs(elem);
+            e.preventDefault();
+        } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            // Delete element
+            const idx = page.elements.findIndex(el => el.id === state.selectedElementId);
+            if (idx !== -1) {
+                page.elements.splice(idx, 1);
+                const domEl = document.getElementById(state.selectedElementId);
+                if (domEl) domEl.remove();
+                deselectElement();
+            }
+            e.preventDefault();
+        } else if (e.key === 'Escape') {
+            deselectElement();
+        }
+    }
+}
+
+// ==========================================================================
+// Right Contextual Properties Panel
+// ==========================================================================
+function renderPropertiesPanel(elem) {
+    elements.panelElemType.textContent = `${elem.type.toUpperCase()} PROPERTIES`;
+    const container = elements.propertiesContent;
+    container.innerHTML = '';
+    
+    const x0 = Math.round(elem.bbox[0]);
+    const y0 = Math.round(elem.bbox[1]);
+    const w = Math.round(elem.bbox[2] - elem.bbox[0]);
+    const h = Math.round(elem.bbox[3] - elem.bbox[1]);
+    
+    // Position & Size Group (Common to all elements)
+    const posGroup = document.createElement('div');
+    posGroup.className = 'prop-group';
+    posGroup.innerHTML = `
+        <label>Geometry</label>
+        <div class="prop-row">
+            <div class="prop-field"><span>X</span><input type="number" id="prop-pos-x" class="prop-input" value="${x0}"></div>
+            <div class="prop-field"><span>Y</span><input type="number" id="prop-pos-y" class="prop-input" value="${y0}"></div>
+        </div>
+        <div class="prop-row" style="margin-top: 6px;">
+            <div class="prop-field"><span>W</span><input type="number" id="prop-size-w" class="prop-input" value="${w}"></div>
+            <div class="prop-field"><span>H</span><input type="number" id="prop-size-h" class="prop-input" value="${h}"></div>
+        </div>
+    `;
+    container.appendChild(posGroup);
+    
+    // Attach geometry listeners
+    posGroup.querySelector('#prop-pos-x').addEventListener('change', (e) => {
+        const val = parseFloat(e.target.value) || 0;
+        const width = elem.bbox[2] - elem.bbox[0];
+        elem.bbox[0] = val; elem.bbox[2] = val + width;
+        updateDOMElementGeometry(elem); updateSelectionBox(elem);
+    });
+    posGroup.querySelector('#prop-pos-y').addEventListener('change', (e) => {
+        const val = parseFloat(e.target.value) || 0;
+        const height = elem.bbox[3] - elem.bbox[1];
+        elem.bbox[1] = val; elem.bbox[3] = val + height;
+        updateDOMElementGeometry(elem); updateSelectionBox(elem);
+    });
+    posGroup.querySelector('#prop-size-w').addEventListener('change', (e) => {
+        const val = Math.max(15, parseFloat(e.target.value) || 15);
+        elem.bbox[2] = elem.bbox[0] + val;
+        updateDOMElementGeometry(elem); updateSelectionBox(elem);
+    });
+    posGroup.querySelector('#prop-size-h').addEventListener('change', (e) => {
+        const val = Math.max(15, parseFloat(e.target.value) || 15);
+        elem.bbox[3] = elem.bbox[1] + val;
+        updateDOMElementGeometry(elem); updateSelectionBox(elem);
+    });
+    
+    // Type-specific controls
+    if (elem.type === 'text') {
+        const s = elem.style || {};
+        const textGroup = document.createElement('div');
+        textGroup.className = 'prop-group';
+        textGroup.innerHTML = `
+            <label>Text Content</label>
+            <textarea id="prop-text-content" class="prop-textarea">${elem.text || ''}</textarea>
+            
+            <label style="margin-top: 8px;">Font Family</label>
+            <select id="prop-font-family" class="prop-select">
+                <option value="'Segoe UI', Arial, sans-serif">Segoe UI / Sans-serif</option>
+                <option value="'Times New Roman', Times, serif">Times New Roman / Serif</option>
+                <option value="Georgia, serif">Georgia</option>
+                <option value="'Courier New', Courier, monospace">Courier New / Mono</option>
+                <option value="Arial, Helvetica, sans-serif">Arial</option>
+                <option value="Calibri, Candara, sans-serif">Calibri</option>
+            </select>
+            
+            <div class="prop-row" style="margin-top: 8px;">
+                <div class="prop-field"><span>Size</span><input type="number" id="prop-font-size" class="prop-input" value="${s.fontSize || 12}"></div>
+                <div class="prop-field"><span>Color</span><input type="color" id="prop-font-color" style="border:none;background:transparent;width:24px;height:24px;cursor:pointer;" value="${s.color || '#000000'}"></div>
+            </div>
+            
+            <div class="prop-row" style="margin-top: 8px;">
+                <div class="prop-btn-group" style="width: 100%;">
+                    <button id="prop-btn-bold" class="prop-btn-toggle ${s.fontWeight === 'bold' ? 'active' : ''}">Bold</button>
+                    <button id="prop-btn-italic" class="prop-btn-toggle ${s.fontStyle === 'italic' ? 'active' : ''}">Italic</button>
+                </div>
+            </div>
+            
+            <div class="prop-row" style="margin-top: 8px;">
+                <div class="prop-btn-group" style="width: 100%;">
+                    <button id="prop-align-left" class="prop-btn-toggle ${s.textAlign === 'left' ? 'active' : ''}">Left</button>
+                    <button id="prop-align-center" class="prop-btn-toggle ${s.textAlign === 'center' ? 'active' : ''}">Center</button>
+                    <button id="prop-align-right" class="prop-btn-toggle ${s.textAlign === 'right' ? 'active' : ''}">Right</button>
+                </div>
+            </div>
+        `;
+        container.appendChild(textGroup);
+        
+        // Populate select
+        const fontSelect = textGroup.querySelector('#prop-font-family');
+        if (s.fontFamily) fontSelect.value = s.fontFamily;
+        
+        textGroup.querySelector('#prop-text-content').addEventListener('input', (e) => {
+            elem.text = e.target.value;
+            const domEl = document.getElementById(elem.id);
+            if (domEl) domEl.innerText = e.target.value;
+        });
+        fontSelect.addEventListener('change', (e) => {
+            if (!elem.style) elem.style = {};
+            elem.style.fontFamily = e.target.value;
+            const domEl = document.getElementById(elem.id);
+            if (domEl) domEl.style.fontFamily = e.target.value;
+        });
+        textGroup.querySelector('#prop-font-size').addEventListener('change', (e) => {
+            if (!elem.style) elem.style = {};
+            const sz = parseFloat(e.target.value) || 12;
+            elem.style.fontSize = sz;
+            const domEl = document.getElementById(elem.id);
+            if (domEl) domEl.style.fontSize = `${sz}px`;
+        });
+        textGroup.querySelector('#prop-font-color').addEventListener('input', (e) => {
+            if (!elem.style) elem.style = {};
+            elem.style.color = e.target.value;
+            const domEl = document.getElementById(elem.id);
+            if (domEl) domEl.style.color = e.target.value;
+        });
+        textGroup.querySelector('#prop-btn-bold').addEventListener('click', (e) => {
+            if (!elem.style) elem.style = {};
+            elem.style.fontWeight = elem.style.fontWeight === 'bold' ? 'normal' : 'bold';
+            e.target.classList.toggle('active', elem.style.fontWeight === 'bold');
+            const domEl = document.getElementById(elem.id);
+            if (domEl) domEl.style.fontWeight = elem.style.fontWeight;
+        });
+        textGroup.querySelector('#prop-btn-italic').addEventListener('click', (e) => {
+            if (!elem.style) elem.style = {};
+            elem.style.fontStyle = elem.style.fontStyle === 'italic' ? 'normal' : 'italic';
+            e.target.classList.toggle('active', elem.style.fontStyle === 'italic');
+            const domEl = document.getElementById(elem.id);
+            if (domEl) domEl.style.fontStyle = elem.style.fontStyle;
+        });
+        
+        ['left', 'center', 'right'].forEach(align => {
+            textGroup.querySelector(`#prop-align-${align}`).addEventListener('click', () => {
+                if (!elem.style) elem.style = {};
+                elem.style.textAlign = align;
+                textGroup.querySelectorAll('[id^="prop-align-"]').forEach(b => b.classList.remove('active'));
+                textGroup.querySelector(`#prop-align-${align}`).classList.add('active');
+                const domEl = document.getElementById(elem.id);
+                if (domEl) domEl.style.textAlign = align;
+            });
+        });
+        
+    } else if (elem.type === 'image') {
+        const imgGroup = document.createElement('div');
+        imgGroup.className = 'prop-group';
+        imgGroup.innerHTML = `
+            <label>Image Controls</label>
+            <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">
+                Asset: ${elem.assetName || 'Embedded Image'}
+            </div>
+            <label>
+                <input type="checkbox" id="prop-lock-aspect" checked> Lock aspect ratio
+            </label>
+        `;
+        container.appendChild(imgGroup);
+        
+    } else if (elem.type === 'table') {
+        const tableGroup = document.createElement('div');
+        tableGroup.className = 'prop-group';
+        tableGroup.innerHTML = `
+            <label>Table Actions</label>
+            <p style="font-size: 11px; color: var(--text-muted); margin-bottom: 8px;">Click directly inside any table cell to edit text.</p>
+            <div class="prop-row">
+                <button id="btn-add-row" class="btn btn-outline" style="flex:1;font-size:11px;">+ Add Row</button>
+                <button id="btn-add-col" class="btn btn-outline" style="flex:1;font-size:11px;">+ Add Col</button>
+            </div>
+        `;
+        container.appendChild(tableGroup);
+        
+        tableGroup.querySelector('#btn-add-row').addEventListener('click', () => {
+            const domEl = document.getElementById(elem.id);
+            const table = domEl?.querySelector('table');
+            if (table) {
+                const tbody = table.querySelector('tbody') || table;
+                const lastRow = tbody.querySelector('tr:last-child');
+                const colCount = lastRow ? lastRow.querySelectorAll('td, th').length : 2;
+                const newTr = document.createElement('tr');
+                for (let i = 0; i < colCount; i++) {
+                    const td = document.createElement('td');
+                    td.style.border = '1px solid #cbd5e1';
+                    td.style.padding = '4px 8px';
+                    td.contentEditable = "true";
+                    td.textContent = 'New Data';
+                    newTr.appendChild(td);
+                }
+                tbody.appendChild(newTr);
+                elem.html = domEl.innerHTML;
+            }
+        });
+        
+    } else if (elem.type === 'formula') {
+        const formulaGroup = document.createElement('div');
+        formulaGroup.className = 'prop-group';
+        formulaGroup.innerHTML = `
+            <label>LaTeX Expression</label>
+            <textarea id="prop-latex-expr" class="prop-textarea">${elem.latex || elem.text || ''}</textarea>
+        `;
+        container.appendChild(formulaGroup);
+    }
+}
+
+function syncPropertiesPanelText(text) {
+    const textarea = document.getElementById('prop-text-content');
+    if (textarea && textarea !== document.activeElement) {
+        textarea.value = text;
+    }
+}
+
+function updatePropertiesPositionInputs(elem) {
+    const x0 = Math.round(elem.bbox[0]);
+    const y0 = Math.round(elem.bbox[1]);
+    const w = Math.round(elem.bbox[2] - elem.bbox[0]);
+    const h = Math.round(elem.bbox[3] - elem.bbox[1]);
+    
+    const posX = document.getElementById('prop-pos-x');
+    const posY = document.getElementById('prop-pos-y');
+    const sizeW = document.getElementById('prop-size-w');
+    const sizeH = document.getElementById('prop-size-h');
+    
+    if (posX) posX.value = x0;
+    if (posY) posY.value = y0;
+    if (sizeW) sizeW.value = w;
+    if (sizeH) sizeH.value = h;
+}
+
+// ==========================================================================
+// Zoom & Page Navigation
+// ==========================================================================
+function setZoom(newZoom) {
+    state.zoom = Math.max(0.3, Math.min(3.0, newZoom));
+    updateZoom();
+}
+
+function updateZoom() {
+    elements.canvasWrapper.style.transform = `scale(${state.zoom})`;
+    elements.zoomLevelText.textContent = `${Math.round(state.zoom * 100)}%`;
+}
+
+function zoomToFit() {
+    if (!state.doc || !state.doc.pages[state.currentPageIndex]) return;
+    const page = state.doc.pages[state.currentPageIndex];
+    const availWidth = elements.canvasViewport.clientWidth - 80;
+    const fitZoom = Math.min(availWidth / page.width, 1.2);
+    setZoom(fitZoom);
+}
+
+function goToPage(pageIndex) {
+    if (!state.doc || pageIndex < 0 || pageIndex >= state.doc.pages.length) return;
+    state.currentPageIndex = pageIndex;
+    renderCurrentPage();
+}
+
+function updatePageNavigation() {
+    const total = state.doc?.pages.length || 1;
+    const current = state.currentPageIndex + 1;
+    elements.pageNavText.textContent = `Page ${current} / ${total}`;
+    elements.btnPrevPage.disabled = state.currentPageIndex === 0;
+    elements.btnNextPage.disabled = state.currentPageIndex >= total - 1;
+}
+
+function updateThumbnailActiveState() {
+    document.querySelectorAll('.thumbnail-card').forEach((card, idx) => {
+        card.classList.toggle('active', idx === state.currentPageIndex);
+    });
+}
+
+function setStatus(msg) {
+    elements.statusInfoText.textContent = msg;
+}
+
+// ==========================================================================
+// Export Functionality
+// ==========================================================================
+async function exportDocument(format) {
+    if (!state.doc) {
+        alert('Please open a PDF document first.');
+        return;
+    }
+    
+    setStatus(`Exporting document as ${format.toUpperCase()}...`);
+    try {
+        const response = await fetch('/api/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                document: state.doc,
+                format: format
+            })
+        });
+        
+        if (!response.ok) throw new Error('Export failed');
+        
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        
+        const title = (state.doc.title || 'reconstructed_document').toLowerCase().replace(/\s+/g, '_');
+        if (format === 'zip') a.download = `${title}_bundle.zip`;
+        else if (format === 'html') a.download = `${title}.html`;
+        else a.download = `${title}.json`;
+        
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        a.remove();
+        
+        setStatus(`Exported ${format.toUpperCase()} successfully.`);
+    } catch (err) {
+        alert('Export error: ' + err.message);
+        setStatus('Export failed.');
+    }
+}
+
+// ==========================================================================
+// Visual Fidelity Diff Mode
+// ==========================================================================
+let fidelityResizeObserver = null;
+
+async function openFidelityModal() {
+    if (!state.doc || !state.doc.pages[state.currentPageIndex]) {
+        alert('Please load a document first.');
+        return;
+    }
+    
+    const page = state.doc.pages[state.currentPageIndex];
+    elements.fidelityModal.style.display = 'flex';
+    
+    // Set Original image src
+    elements.fidelityOrigImg.src = page.originalImageSrc || '';
+    elements.sliderOrigImg.src = page.originalImageSrc || '';
+    
+    // Render and size both panes synchronously to match 1:1
+    layoutFidelityPanes(page);
+    
+    // Auto-recalculate on window resize while modal is open
+    if (!fidelityResizeObserver) {
+        fidelityResizeObserver = new ResizeObserver(() => {
+            if (elements.fidelityModal.style.display !== 'none' && state.doc && state.doc.pages[state.currentPageIndex]) {
+                layoutFidelityPanes(state.doc.pages[state.currentPageIndex]);
+            }
+        });
+        if (elements.fidelityOrigPane) {
+            fidelityResizeObserver.observe(elements.fidelityOrigPane);
+        }
+    }
+    
+    // Rasterize HTML page using html2canvas matched to the original render DPI (150 DPI = 150/72 scale)
+    setStatus('Computing visual fidelity metrics...');
+    try {
+        const domPage = document.getElementById(`pdf-page-${page.pageNumber}`);
+        if (window.html2canvas && domPage) {
+            const renderScale = 150.0 / 72.0;
+            const canvas = await html2canvas(domPage, { scale: renderScale, useCORS: true, logging: false });
+            const reconBase64 = canvas.toDataURL('image/png');
+            elements.sliderReconImg.src = reconBase64;
+            
+            elements.sliderOrigImg.onload = () => {
+                syncSliderDimensions();
+            };
+            syncSliderDimensions();
+            
+            // Send to backend for SSIM and Heatmap computation
+            if (page.originalImageSrc) {
+                const compResp = await fetch('/api/compare', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        origImageSrc: page.originalImageSrc,
+                        reconImageSrc: reconBase64
+                    })
+                });
+                
+                if (compResp.ok) {
+                    const compData = await compResp.json();
+                    elements.metricSsim.textContent = `${compData.similarityPercent}%`;
+                    elements.metricPixdiff.textContent = `${compData.diffPixelPercent}%`;
+                    if (compData.diffHeatmapSrc) {
+                        elements.fidelityHeatmapImg.src = compData.diffHeatmapSrc;
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.warn('Fidelity calculation error:', err);
+    }
+    setStatus('Ready');
+}
+
+function layoutFidelityPanes(page) {
+    const origPane = elements.fidelityOrigPane || document.getElementById('fidelity-orig-pane');
+    const htmlPane = elements.fidelityHtmlPane;
+    if (!origPane || !htmlPane) return;
+    
+    const availableW = Math.max((origPane.clientWidth || htmlPane.clientWidth || 500) - 40, 200);
+    const availableH = Math.max((origPane.clientHeight || htmlPane.clientHeight || 600) - 40, 200);
+    
+    const pageW = page.width || 595.0;
+    const pageH = page.height || 842.0;
+    
+    // Compute exact fit scale so both sides match 1:1 down to the pixel
+    const fitScale = Math.min(availableW / pageW, availableH / pageH, 1.0);
+    const targetW = Math.round(pageW * fitScale);
+    const targetH = Math.round(pageH * fitScale);
+    
+    // Explicitly size Original Reference Image
+    elements.fidelityOrigImg.style.width = `${targetW}px`;
+    elements.fidelityOrigImg.style.height = `${targetH}px`;
+    elements.fidelityOrigImg.style.maxWidth = 'none';
+    elements.fidelityOrigImg.style.maxHeight = 'none';
+    elements.fidelityOrigImg.style.objectFit = 'contain';
+    
+    // Render current reconstructed HTML into the preview pane
+    htmlPane.innerHTML = '';
+    const domPage = document.getElementById(`pdf-page-${page.pageNumber}`);
+    if (domPage) {
+        const clonedPage = domPage.cloneNode(true);
+        clonedPage.style.boxShadow = 'none';
+        clonedPage.style.margin = '0';
+        clonedPage.style.position = 'absolute';
+        clonedPage.style.top = '0';
+        clonedPage.style.left = '0';
+        clonedPage.style.width = `${pageW}px`;
+        clonedPage.style.height = `${pageH}px`;
+        clonedPage.style.transformOrigin = '0 0';
+        clonedPage.style.transform = `scale(${fitScale})`;
+        clonedPage.style.pointerEvents = 'none';
+        clonedPage.style.color = '#000000';
+        
+        // Remove contenteditable attributes in clone
+        clonedPage.querySelectorAll('[contenteditable]').forEach(el => el.removeAttribute('contenteditable'));
+        
+        // Equal-sized page wrapper matching the exact dimensions of the original image
+        const pageWrapper = document.createElement('div');
+        pageWrapper.className = 'diff-html-page-wrapper';
+        pageWrapper.style.width = `${targetW}px`;
+        pageWrapper.style.height = `${targetH}px`;
+        pageWrapper.appendChild(clonedPage);
+        htmlPane.appendChild(pageWrapper);
+    }
+    
+    // Synchronize scrolling between left and right comparison panes
+    let isSyncingOrig = false;
+    let isSyncingHtml = false;
+    origPane.onscroll = () => {
+        if (!isSyncingOrig) {
+            isSyncingHtml = true;
+            htmlPane.scrollTop = origPane.scrollTop;
+            htmlPane.scrollLeft = origPane.scrollLeft;
+        }
+        isSyncingOrig = false;
+    };
+    htmlPane.onscroll = () => {
+        if (!isSyncingHtml) {
+            isSyncingOrig = true;
+            origPane.scrollTop = htmlPane.scrollTop;
+            origPane.scrollLeft = htmlPane.scrollLeft;
+        }
+        isSyncingHtml = false;
+    };
+}
+
+function syncSliderDimensions() {
+    const origW = elements.sliderOrigImg.offsetWidth;
+    const origH = elements.sliderOrigImg.offsetHeight;
+    if (origW > 0 && origH > 0) {
+        elements.sliderReconImg.style.width = `${origW}px`;
+        elements.sliderReconImg.style.height = `${origH}px`;
+        elements.sliderReconImg.style.maxWidth = 'none';
+        elements.sliderReconImg.style.minWidth = `${origW}px`;
+    }
+}
+
+function setDiffViewMode(mode) {
+    state.diffViewMode = mode;
+    elements.btnViewSplit.classList.toggle('active', mode === 'split');
+    elements.btnViewSlider.classList.toggle('active', mode === 'slider');
+    elements.btnViewHeatmap.classList.toggle('active', mode === 'heatmap');
+    
+    elements.fidelitySplitContainer.style.display = mode === 'split' ? 'flex' : 'none';
+    elements.fidelitySliderContainer.style.display = mode === 'slider' ? 'flex' : 'none';
+    elements.fidelityHeatmapContainer.style.display = mode === 'heatmap' ? 'flex' : 'none';
+    
+    if (mode === 'slider') {
+        syncSliderDimensions();
+    }
+}
+
+function setupSliderInteraction() {
+    let isSliding = false;
+    
+    elements.sliderHandle.addEventListener('mousedown', (e) => {
+        isSliding = true;
+        e.preventDefault();
+    });
+    
+    window.addEventListener('mousemove', (e) => {
+        if (!isSliding) return;
+        const rect = elements.sliderWrapper.getBoundingClientRect();
+        let offsetX = e.clientX - rect.left;
+        offsetX = Math.max(0, Math.min(rect.width, offsetX));
+        const pct = (offsetX / rect.width) * 100;
+        
+        elements.sliderClipper.style.width = `${pct}%`;
+        elements.sliderHandle.style.left = `${pct}%`;
+    });
+    
+    window.addEventListener('mouseup', () => {
+        isSliding = false;
+    });
+}
+
+// ==========================================================================
+// Local Model Manager Modal
+// ==========================================================================
+async function openModelsModal() {
+    elements.modelsModal.style.display = 'flex';
+    elements.modelComponentsList.innerHTML = '<div style="color:var(--text-muted);font-size:12px;">Checking components...</div>';
+    
+    try {
+        const resp = await fetch('/api/models/status');
+        if (resp.ok) {
+            const data = await resp.json();
+            renderModelComponents(data);
+        }
+    } catch (err) {
+        elements.modelComponentsList.innerHTML = `<div style="color:#ef4444;font-size:12px;">Error checking status: ${err.message}</div>`;
+    }
+}
+
+function renderModelComponents(data) {
+    elements.modelComponentsList.innerHTML = '';
+    data.components.forEach(comp => {
+        const item = document.createElement('div');
+        item.className = 'model-card-item';
+        
+        const isReady = comp.installed;
+        item.innerHTML = `
+            <div class="model-item-info">
+                <strong>${comp.name}</strong>
+                <small>${comp.description}</small>
+            </div>
+            <span class="model-tag ${isReady ? 'installed' : 'pending'}">
+                ${isReady ? '✓ Installed' : '○ Pending'}
+            </span>
+        `;
+        elements.modelComponentsList.appendChild(item);
+    });
+}
+
+async function triggerModelVerification() {
+    try {
+        await fetch('/api/models/download', { method: 'POST' });
+        alert('Model initialization initiated in the background. Refresh in a few moments to view status.');
+        openModelsModal();
+    } catch (err) {
+        alert('Error: ' + err.message);
+    }
+}
+
+// Bootstrap on window load
+window.addEventListener('DOMContentLoaded', init);
+
+</script>
+</body>
+</html>
