@@ -475,30 +475,54 @@ class VectorExtractor:
 
 class TableExtractor:
     @staticmethod
-    def is_valid_digital_table(tab, data: List[List[Any]], page_w: float, page_h: float) -> bool:
+    def is_valid_digital_table(tab, data: List[List[Any]], page_w: float, page_h: float, all_tabs: List[Any] = None) -> bool:
         if not data:
             return False
         tb = tab.bbox
         t_w, t_h = max(tb[2] - tb[0], 1.0), max(tb[3] - tb[1], 1.0)
         area_ratio = (t_w * t_h) / max(page_w * page_h, 1.0)
 
-        if tb[0] <= 10.0 and tb[1] <= 10.0 and tb[2] >= page_w - 10.0 and tb[3] >= page_h - 10.0:
-            if tab.row_count < 4 or tab.col_count < 2:
-                return False
+        # 1. Reject 1-row tables: they are layout containers, column headers, or cards
+        if tab.row_count <= 1:
+            return False
 
+        # 2. Reject outer layout containers enclosing an inner table
+        if all_tabs:
+            for other in all_tabs:
+                if other is tab or other.row_count <= 1:
+                    continue
+                ob = other.bbox
+                if (ob[0] >= tb[0] - 2 and ob[1] >= tb[1] - 2 and
+                    ob[2] <= tb[2] + 2 and ob[3] <= tb[3] + 2):
+                    if (t_w * t_h) > (ob[2] - ob[0]) * (ob[3] - ob[1]) * 1.3:
+                        if tab.row_count <= 3:
+                            return False
+
+        # 3. Minimum non-empty cells
         non_empty = sum(1 for row in data for cell in row if cell and str(cell).strip() != '')
         if non_empty < 2:
             return False
 
-        if tab.row_count <= 1 and (t_h > page_h * 0.35 or area_ratio > 0.35 or non_empty < 2):
-            return False
+        # 4. Multi-column article check (2 rows with large text blocks)
+        if tab.row_count == 2 and tab.col_count <= 2:
+            cell_texts = [str(c).strip() for row in data for c in row if c and str(c).strip()]
+            long_cells = sum(1 for t in cell_texts if len(t) > 180 or t.count('\n') >= 4)
+            if long_cells >= 2:
+                return False
 
+        # 5. Full page false positive
+        if tb[0] <= 10.0 and tb[1] <= 10.0 and tb[2] >= page_w - 10.0 and tb[3] >= page_h - 10.0:
+            if tab.row_count < 4 or tab.col_count < 2:
+                return False
+
+        # 6. Area ratio >= 0.50 with sparse cells
         if area_ratio >= 0.50:
             if tab.row_count < 3 or tab.col_count < 2:
                 return False
             total_cells = tab.row_count * tab.col_count
             if total_cells > 0 and (non_empty / total_cells) < 0.35:
                 return False
+
         return True
 
     @staticmethod
@@ -538,7 +562,7 @@ class TableExtractor:
                     cleaned_rows.append({'is_merged': True, 'text': str(other_vals[0]).strip()})
             else:
                 non_empty_in_row = [v for v in row_vals if v is not None and str(v).strip() != '']
-                if len(non_empty_in_row) == 1 and ('\n' in str(non_empty_in_row[0]) or len(str(non_empty_in_row[0])) > 60):
+                if len(non_empty_in_row) == 1 and ('\n' in str(non_empty_in_row[0]) or len(str(non_empty_in_row[0])) > 40):
                     cleaned_rows.append({'is_merged': True, 'text': str(non_empty_in_row[0]).strip()})
                 else:
                     cleaned_rows.append({'is_merged': False, 'cells': row_vals})
@@ -554,70 +578,251 @@ class TableExtractor:
             if not tabs or not hasattr(tabs, 'tables'):
                 return results
 
-            for idx, tab in enumerate(tabs.tables):
+            all_tabs = list(tabs.tables)
+            drawings = page.get_drawings()
+
+            # First filter valid tables
+            valid_tabs = [tab for tab in all_tabs if TableExtractor.is_valid_digital_table(tab, tab.extract(), page_w, page_h, all_tabs)]
+
+            for idx, tab in enumerate(valid_tabs):
                 raw_data = tab.extract()
-                if not TableExtractor.is_valid_digital_table(tab, raw_data, page_w, page_h):
+
+                # Step 1: Detect and trim callout note rows (e.g. EXPECTED APPLICATION BEHAVIOUR)
+                valid_row_indices = []
+                for r_idx in range(tab.row_count):
+                    row_vals = raw_data[r_idx] if r_idx < len(raw_data) else []
+                    row_text = ' '.join(str(c) for c in row_vals if c and str(c).strip() != '').strip()
+                    if 'EXPECTED APPLICATION BEHAVIOUR' in row_text or row_text.startswith('NOTE:') or row_text.startswith('SOURCE:'):
+                        continue
+                    valid_row_indices.append(r_idx)
+
+                if len(valid_row_indices) < 2:
                     continue
 
-                cleaned_rows, num_cols = TableExtractor.clean_table_data(raw_data)
-                if not cleaned_rows or num_cols == 0:
+                # Step 2: Determine active columns across valid rows (eliminate ghost columns)
+                active_cols = []
+                for c_idx in range(tab.col_count):
+                    if any(
+                        raw_data[r_idx][c_idx] is not None and str(raw_data[r_idx][c_idx]).strip() != ''
+                        for r_idx in valid_row_indices
+                        if c_idx < len(raw_data[r_idx])
+                    ):
+                        active_cols.append(c_idx)
+
+                if not active_cols:
                     continue
 
-                html_parts = [
-                    f'<table class="reconstructed-table" style="width: 100%; height: 100%; border-collapse: collapse; '
-                    f'box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Arial, sans-serif; '
-                    f'font-size: 11px; line-height: 1.35; color: #000000;">'
-                ]
+                # Step 3: Compute exact table bbox from active cells
+                cell_boxes = []
+                for r_idx in valid_row_indices:
+                    r_cells = tab.rows[r_idx].cells
+                    for c_idx in active_cols:
+                        if c_idx < len(r_cells) and r_cells[c_idx] is not None:
+                            cell_boxes.append(r_cells[c_idx])
 
-                has_header = False
-                first_row = cleaned_rows[0]
-                if not first_row.get('is_merged') and any(c and str(c).strip() != '' for c in first_row.get('cells', [])):
-                    has_header = True
+                if not cell_boxes:
+                    continue
 
-                start_row = 0
-                if has_header:
-                    html_parts.append('  <thead><tr style="background-color: #e5e7eb; font-weight: 700; color: #000000;">')
-                    for c in first_row['cells']:
-                        safe_val = html.escape(str(c or '').strip())
-                        html_parts.append(
-                            f'    <th style="border: 1px solid #333333; padding: 6px 10px; text-align: left; '
-                            f'vertical-align: middle; color: #000000; font-weight: 700; font-size: 11px;">{safe_val}</th>'
-                        )
-                    html_parts.append('  </tr></thead>')
-                    start_row = 1
+                t_x0 = min(b[0] for b in cell_boxes)
+                t_y0 = min(b[1] for b in cell_boxes)
+                t_x1 = max(b[2] for b in cell_boxes)
+                t_y1 = max(b[3] for b in cell_boxes)
+                table_w = max(t_x1 - t_x0, 1.0)
+                table_h = max(t_y1 - t_y0, 1.0)
 
-                html_parts.append('  <tbody>')
-                for r_idx in range(start_row, len(cleaned_rows)):
-                    r_item = cleaned_rows[r_idx]
-                    if r_item.get('is_merged'):
-                        safe_val = html.escape(r_item['text']).replace('\n', '<br>')
-                        html_parts.append(
-                            f'    <tr style="background-color: #f1f5f9;">'
-                            f'      <td colspan="{num_cols}" style="border: 1px solid #475569; padding: 8px 12px; '
-                            f'text-align: left; vertical-align: middle; color: #000000; font-size: 10px; line-height: 1.4; '
-                            f'white-space: pre-wrap;">{safe_val}</td>'
-                            f'    </tr>'
-                        )
+                # Step 4: Compute active column widths & percentages
+                col_widths = []
+                for c_idx in active_cols:
+                    col_x0_list = [
+                        tab.rows[r_idx].cells[c_idx][0]
+                        for r_idx in valid_row_indices
+                        if c_idx < len(tab.rows[r_idx].cells) and tab.rows[r_idx].cells[c_idx] is not None
+                    ]
+                    col_x1_list = [
+                        tab.rows[r_idx].cells[c_idx][2]
+                        for r_idx in valid_row_indices
+                        if c_idx < len(tab.rows[r_idx].cells) and tab.rows[r_idx].cells[c_idx] is not None
+                    ]
+                    cw = (max(col_x1_list) - min(col_x0_list)) if col_x0_list and col_x1_list else (table_w / len(active_cols))
+                    col_widths.append(cw)
+
+                total_cw = sum(col_widths) or table_w
+                col_pcts = [(cw / total_cw) * 100.0 for cw in col_widths]
+
+                # Step 5: Compute row heights from active cells
+                row_heights = []
+                for r_idx in valid_row_indices:
+                    cell_heights = [
+                        tab.rows[r_idx].cells[c][3] - tab.rows[r_idx].cells[c][1]
+                        for c in active_cols
+                        if c < len(tab.rows[r_idx].cells) and tab.rows[r_idx].cells[c] is not None
+                    ]
+                    if cell_heights:
+                        rh = min(cell_heights)
                     else:
-                        bg = '#ffffff' if r_idx % 2 == 0 else '#f8fafc'
-                        html_parts.append(f'    <tr style="background-color: {bg};">')
-                        for c in r_item.get('cells', []):
-                            safe_val = html.escape(str(c or '').strip())
-                            html_parts.append(
-                                f'      <td style="border: 1px solid #475569; padding: 6px 10px; text-align: left; '
-                                f'vertical-align: middle; color: #000000; font-size: 11px;">{safe_val}</td>'
-                            )
-                        html_parts.append('    </tr>')
+                        rh = tab.rows[r_idx].bbox[3] - tab.rows[r_idx].bbox[1]
+                    row_heights.append(max(rh, 12.0))
+
+                # Step 6: Helper for cell background fills from drawings
+                def get_cell_fill(c_rect):
+                    for d in drawings:
+                        if d.get('fill') and d['rect'].intersects(c_rect):
+                            inter = d['rect'] & c_rect
+                            if (inter.width * inter.height) >= (c_rect.width * c_rect.height) * 0.40:
+                                return color_to_hex(d['fill'])
+                    return None
+
+                # Step 7: Helper to check if any other valid table is nested inside this cell
+                def cell_contains_other_table(c_rect):
+                    for other in valid_tabs:
+                        if other is tab:
+                            continue
+                        ob = pymupdf.Rect(other.bbox)
+                        if c_rect.contains(ob) or (c_rect.intersects(ob) and (c_rect & ob).get_area() >= ob.get_area() * 0.85):
+                            return True
+                    return False
+
+                # Step 8: Extract cell content with high fidelity
+                def extract_cell_content(c_rect, raw_val):
+                    if cell_contains_other_table(c_rect):
+                        return '&nbsp;', 7.5, 'left', False
+
+                    td = page.get_text('dict', clip=c_rect, flags=pymupdf.TEXT_PRESERVE_WHITESPACE | pymupdf.TEXT_PRESERVE_LIGATURES)
+                    lines_data = []
+                    all_sizes = []
+                    for b in td.get('blocks', []):
+                        if b.get('type') == 0:
+                            for l in b.get('lines', []):
+                                spans = []
+                                for s in l.get('spans', []):
+                                    stext = s.get('text', '')
+                                    if not stext:
+                                        continue
+                                    sz = float(round(s.get('size', 8.0), 1))
+                                    all_sizes.append(sz)
+                                    sfont = s.get('font', '')
+                                    sflags = s.get('flags', 0)
+                                    is_bold = bool(sflags & 16) or any(k in sfont.lower() for k in ['bold', 'black', 'heavy'])
+                                    is_italic = bool(sflags & 2) or any(k in sfont.lower() for k in ['italic', 'oblique'])
+                                    scolor = color_to_hex(s.get('color'))
+                                    spans.append({
+                                        'text': stext,
+                                        'size': sz,
+                                        'bold': is_bold,
+                                        'italic': is_italic,
+                                        'color': scolor
+                                    })
+                                if spans:
+                                    lines_data.append((l.get('bbox', [0, 0, 0, 0]), spans))
+
+                    if not lines_data:
+                        if raw_val is not None and str(raw_val).strip() != '':
+                            return html.escape(str(raw_val).strip()), 7.5, 'left', False
+                        return '&nbsp;', 7.5, 'left', False
+
+                    dom_size = (sum(all_sizes) / len(all_sizes)) if all_sizes else 7.5
+
+                    # Alignment
+                    l_bbox = lines_data[0][0]
+                    mid_diff = abs((l_bbox[0] + l_bbox[2]) / 2.0 - (c_rect.x0 + c_rect.x1) / 2.0)
+                    r_diff = abs(l_bbox[2] - c_rect.x1)
+                    l_diff = abs(l_bbox[0] - c_rect.x0)
+                    if mid_diff < 8.0:
+                        align = 'center'
+                    elif r_diff < 12.0 and l_diff > 15.0:
+                        align = 'right'
+                    else:
+                        align = 'left'
+
+                    line_htmls = []
+                    has_heading = False
+                    first_line_all_bold = all(s['bold'] for s in lines_data[0][1])
+                    if len(lines_data) > 1 and first_line_all_bold:
+                        has_heading = True
+
+                    for l_idx, (l_bbox, spans) in enumerate(lines_data):
+                        line_str = ''
+                        for s in spans:
+                            esc = html.escape(s['text'])
+                            if has_heading and l_idx == 0:
+                                line_str += esc
+                            else:
+                                inner = esc
+                                if s['bold']:
+                                    inner = f'<b>{inner}</b>'
+                                if s['italic']:
+                                    inner = f'<i>{inner}</i>'
+                                if s['color'] and s['color'] not in ['#000000', '#111827', '#000']:
+                                    inner = f'<span style="color: {s["color"]};">{inner}</span>'
+                                line_str += inner
+                        line_htmls.append(line_str)
+
+                    if has_heading:
+                        heading_html = f'<div style="font-weight: 700; margin-bottom: 2px;">{line_htmls[0]}</div>'
+                        body_html = f'<div>{"<br>".join(line_htmls[1:])}</div>'
+                        return heading_html + body_html, dom_size, align, True
+                    else:
+                        is_all_bold = all(s['bold'] for _, spans in lines_data for s in spans)
+                        full_text = '<br>'.join(line_htmls)
+                        return full_text, dom_size, align, is_all_bold
+
+                # Step 9: Build HTML
+                html_parts = [
+                    f'<table class="reconstructed-table" style="width: 100%; height: 100%; '
+                    f'table-layout: fixed; border-collapse: collapse; box-sizing: border-box; '
+                    f'font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Arial, sans-serif; '
+                    f'color: #000000;">'
+                ]
+                html_parts.append('  <colgroup>')
+                for pct in col_pcts:
+                    html_parts.append(f'    <col style="width: {pct:.2f}%;">')
+                html_parts.append('  </colgroup>')
+                html_parts.append('  <tbody>')
+
+                for row_pos, r_idx in enumerate(valid_row_indices):
+                    r_height = row_heights[row_pos]
+                    r_cells = tab.rows[r_idx].cells
+                    r_vals = raw_data[r_idx]
+                    html_parts.append(f'    <tr style="height: {r_height:.2f}px;">')
+
+                    for col_pos, c_idx in enumerate(active_cols):
+                        cell_box = r_cells[c_idx] if c_idx < len(r_cells) else None
+                        raw_val = r_vals[c_idx] if c_idx < len(r_vals) else None
+
+                        if cell_box:
+                            c_rect = pymupdf.Rect(cell_box)
+                            cell_bg = get_cell_fill(c_rect)
+                            content_html, font_sz, align, is_bold = extract_cell_content(c_rect, raw_val)
+                        else:
+                            cell_bg = None
+                            content_html, font_sz, align, is_bold = html.escape(str(raw_val or '')), 7.5, 'left', False
+
+                        bg_style = f'background-color: {cell_bg}; ' if cell_bg else 'background-color: #ffffff; '
+                        bold_style = 'font-weight: 700; ' if is_bold else 'font-weight: normal; '
+                        valign = 'middle' if ('<br>' not in content_html and '<div' not in content_html) else 'top'
+
+                        html_parts.append(
+                            f'      <td style="border: 1px solid #333333; padding: 2px 6px; '
+                            f'text-align: {align}; vertical-align: {valign}; font-size: {font_sz:.1f}pt; '
+                            f'line-height: 1.25; {bold_style}{bg_style}color: #000000; '
+                            f'box-sizing: border-box; overflow: hidden; word-break: break-word;">{content_html}</td>'
+                        )
+                    html_parts.append('    </tr>')
                 html_parts.append('  </tbody></table>')
+
+                # Determine zIndex: if nested inside another table, zIndex=9, else 8
+                is_nested = any(other is not tab and pymupdf.Rect(other.bbox).contains(pymupdf.Rect(t_x0, t_y0, t_x1, t_y1)) for other in valid_tabs)
+                t_z_index = 9 if is_nested else 8
 
                 results.append({
                     'id': f'table-{idx+1}',
                     'type': 'table',
-                    'bbox': [float(round(v, 2)) for v in tab.bbox],
-                    'rows': len(cleaned_rows),
-                    'cols': num_cols,
+                    'bbox': [float(round(t_x0, 2)), float(round(t_y0, 2)), float(round(t_x1, 2)), float(round(t_y1, 2))],
+                    'rows': len(valid_row_indices),
+                    'cols': len(active_cols),
                     'html': '\n'.join(html_parts),
-                    'data': raw_data
+                    'data': raw_data,
+                    'zIndex': t_z_index
                 })
         except Exception as e:
             logger.warning(f"Table extraction error: {e}")
@@ -664,7 +869,7 @@ class DigitalExtractor:
                 cols=t['cols'],
                 html=t['html'],
                 tableData={'rows': t.get('data', [])},
-                zIndex=8
+                zIndex=t.get('zIndex', 8)
             ))
 
         # 2. Extract line-level text with exact 2D positioning and typography
@@ -1197,19 +1402,18 @@ body.reconstructed-doc {
 .reconstructed-table {
     width: 100%; height: 100%; border-collapse: collapse;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-    font-size: 11px; line-height: 1.35; color: #000000 !important; background-color: #ffffff;
+    color: #000000; background-color: transparent;
+    table-layout: fixed;
+}
+.reconstructed-table th, .reconstructed-table td {
+    color: inherit; border: 1px solid #333333;
+    padding: 2px 6px; box-sizing: border-box;
 }
 .reconstructed-table th {
-    background-color: #e5e7eb !important; color: #000000 !important;
-    border: 1px solid #333333 !important; font-weight: 700 !important;
-    padding: 6px 10px; text-align: left; vertical-align: middle;
+    background-color: #f1f5f9; font-weight: 700;
 }
-.reconstructed-table td {
-    color: #000000 !important; border: 1px solid #475569 !important;
-    padding: 6px 10px; text-align: left; vertical-align: middle;
-}
-.pdf-table-container table { width: 100%; height: 100%; border-collapse: collapse; }
-.pdf-table-container th, .pdf-table-container td { outline: none; color: #000000 !important; }
+.pdf-table-container table { width: 100%; height: 100%; border-collapse: collapse; table-layout: fixed; }
+.pdf-table-container th, .pdf-table-container td { outline: none; }
 .pdf-table-container th[contenteditable="true"]:focus, .pdf-table-container td[contenteditable="true"]:focus {
     outline: 2px solid #3b82f6; background-color: rgba(59, 130, 246, 0.08);
 }

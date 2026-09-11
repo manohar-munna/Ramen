@@ -516,8 +516,8 @@ html, body {
     height: 100%;
     border-collapse: collapse;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-    color: #000000 !important;
-    background-color: #ffffff;
+    color: #000000;
+    table-layout: fixed;
 }
 
 .pdf-table-container th,
@@ -525,26 +525,22 @@ html, body {
 .reconstructed-table th,
 .reconstructed-table td {
     outline: none;
-    color: #000000 !important;
     box-sizing: border-box;
+    padding: 2px 6px;
+    border: 1px solid #333333;
+    color: inherit;
 }
 
 .reconstructed-table th,
 .pdf-table-container th {
-    background-color: #e5e7eb !important;
-    color: #000000 !important;
-    font-weight: 700 !important;
-    border: 1px solid #333333 !important;
-    padding: 6px 10px;
+    background-color: #f1f5f9;
+    font-weight: 700;
     text-align: left;
     vertical-align: middle;
 }
 
 .reconstructed-table td,
 .pdf-table-container td {
-    color: #000000 !important;
-    border: 1px solid #475569 !important;
-    padding: 6px 10px;
     text-align: left;
     vertical-align: middle;
 }
@@ -2851,19 +2847,18 @@ body.reconstructed-doc {
 .reconstructed-table {
     width: 100%; height: 100%; border-collapse: collapse;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-    font-size: 11px; line-height: 1.35; color: #000000 !important; background-color: #ffffff;
+    color: #000000; background-color: transparent;
+    table-layout: fixed;
+}
+.reconstructed-table th, .reconstructed-table td {
+    color: inherit; border: 1px solid #333333;
+    padding: 2px 6px; box-sizing: border-box;
 }
 .reconstructed-table th {
-    background-color: #e5e7eb !important; color: #000000 !important;
-    border: 1px solid #333333 !important; font-weight: 700 !important;
-    padding: 6px 10px; text-align: left; vertical-align: middle;
+    background-color: #f1f5f9; font-weight: 700;
 }
-.reconstructed-table td {
-    color: #000000 !important; border: 1px solid #475569 !important;
-    padding: 6px 10px; text-align: left; vertical-align: middle;
-}
-.pdf-table-container table { width: 100%; height: 100%; border-collapse: collapse; }
-.pdf-table-container th, .pdf-table-container td { outline: none; color: #000000 !important; }
+.pdf-table-container table { width: 100%; height: 100%; border-collapse: collapse; table-layout: fixed; }
+.pdf-table-container th, .pdf-table-container td { outline: none; }
 .pdf-table-container th[contenteditable="true"]:focus, .pdf-table-container td[contenteditable="true"]:focus {
     outline: 2px solid #3b82f6; background-color: rgba(59, 130, 246, 0.08);
 }
