@@ -60,6 +60,8 @@ class TextStyle(BaseModel):
     textAlign: str = 'left'
     lineHeight: float = 1.0
     letterSpacing: Optional[float] = 0.0
+    wordSpacing: Optional[float] = 0.0
+    scaleX: Optional[float] = 1.0
     backgroundColor: Optional[str] = None
     opacity: float = 1.0
     # Left inset, used when an element's box was widened to take in a leading icon so
@@ -328,12 +330,14 @@ def cluster_font_sizes(runs: List[Dict[str, Any]], tol: float = 0.07) -> None:
             # Re-solve spacing and line-height against the snapped size so the run still
             # lands on the ink box it was measured from.
             b = r['bbox']
-            _, ls, lh = fit_text_to_box(r['text'], b[2] - b[0], b[3] - b[1],
-                                        r['fontWeight'] == 'bold', force_size=centre)
+            _, ls, lh, ws, sx = fit_text_to_box(r['text'], b[2] - b[0], b[3] - b[1],
+                                                r['fontWeight'] == 'bold', force_size=centre)
             r['fontSize'] = centre
             r['style'].fontSize = centre
             r['style'].letterSpacing = ls
             r['style'].lineHeight = lh
+            r['style'].wordSpacing = ws
+            r['style'].scaleX = sx
 
 def cluster_text_colors(runs: List[Dict[str, Any]], tol: float = 26.0) -> None:
     """Snaps per-run sampled colours onto shared values.
@@ -363,7 +367,7 @@ def cluster_text_colors(runs: List[Dict[str, Any]], tol: float = 26.0) -> None:
             r['style'].color = hexed
 
 def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
-                    force_size: Optional[float] = None) -> Tuple[float, float, float]:
+                    force_size: Optional[float] = None) -> Tuple[float, float, float, float, float]:
     """Fits a text run to an OCR ink box, returning (fontSize, letterSpacing, lineHeight).
 
     The OCR box bounds *ink*, not the em square, so its height depends on which glyphs
@@ -381,18 +385,18 @@ def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
     clean = (text or '').strip()
     font = _get_measure_font(bold) if clean else None
     if font is None:
-        return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2
+        return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2, 0.0, 1.0
 
     try:
         ink = font.getbbox(clean)
         ascent, descent = font.getmetrics()
     except Exception:
-        return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2
+        return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2, 0.0, 1.0
 
     ink_h = float(ink[3] - ink[1])
     ink_w = float(ink[2] - ink[0])
     if ink_h <= 0:
-        return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2
+        return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2, 0.0, 1.0
 
     if force_size is not None and force_size > 0:
         font_size = float(force_size)
@@ -404,11 +408,20 @@ def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
     # Spread (or pull in) the residual width across the gaps between glyphs. CSS adds
     # letter-spacing after every character, but the ink of the run ends before the last
     # one, so the gaps that matter number len-1.
-    # Both boxes are ink bounds now, so the residual is genuine face-width mismatch and
-    # should be small. Clamp hard: a wrong measurement font must not be allowed to shred
-    # the run into spaced-out characters.
+    # Display type is often set with wide gaps between words rather than wide tracking.
+    # Pushing that slack into letter-spacing pulls the words together into one string --
+    # a headline reading "THE ART" came back as "THEART" -- so when a run has spaces the
+    # residual goes into word-spacing first, where the original put it, and only what is
+    # left over is spread between letters.
+    residual = float(box_w) - ink_w * scale
+    words = clean.count(' ')
+    word_spacing = 0.0
+    if words and residual > font_size * 0.06:
+        word_spacing = round(min(residual / words, font_size * 2.2), 2)
+        residual -= word_spacing * words
+
     gaps = max(len(clean) - 1, 1)
-    letter_spacing = (float(box_w) - ink_w * scale) / gaps
+    letter_spacing = residual / gaps
     limit = font_size * 0.06
     letter_spacing = max(-limit, min(limit, letter_spacing))
 
@@ -418,7 +431,20 @@ def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
     line_px = (ascent + descent - 2.0 * ink[1]) * scale
     line_height = max(0.1, line_px / font_size)
 
-    return round(font_size, 2), round(letter_spacing, 2), round(line_height, 3)
+    # Whatever spacing could not absorb, take out of the glyph width. A display face
+    # is often far narrower than the stand-in measured against it -- a headline fitted
+    # by cap height came out 110px wider than its own box and ran into the next word --
+    # and the spacing clamp exists precisely so it cannot paper over that. Condensing
+    # keeps the run inside the box it was measured from, which is the geometry that
+    # matters; the glyph proportions are already approximate without the real font.
+    achieved = ink_w * scale + word_spacing * words + letter_spacing * gaps
+    scale_x = (float(box_w) / achieved) if achieved > 1.0 else 1.0
+    scale_x = float(min(max(scale_x, 0.45), 1.8))
+    if abs(scale_x - 1.0) < 0.02:
+        scale_x = 1.0
+
+    return (round(font_size, 2), round(letter_spacing, 2), round(line_height, 3),
+            word_spacing, round(scale_x, 4))
 
 def keep_core_ink(ink: np.ndarray) -> np.ndarray:
     """Drops ink blobs that never reach this line's own body band.
@@ -1489,7 +1515,7 @@ Z_SURFACE = 2      # a surface sits at its own depth
 Z_STEP = 10        # each nesting level gets its own band
 Z_ART = 3          # artwork rides just above the surface that contains it
 Z_CONTROL = 4      # a promoted control outranks decoration that merely overlaps it
-Z_BACKDROP = 1     # photographic ground sits beneath every component drawn on it
+Z_BACKDROP = 1     # photographic ground sits just above whatever surface holds it
 Z_TABLE = 5
 Z_TEXT = 6         # text is the top layer within its band
 
@@ -1754,7 +1780,8 @@ def _corners_symmetric(filled: np.ndarray, tol: float = 0.34) -> bool:
     return (max(missing) - min(missing)) <= tol
 
 def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray] = None,
-                    max_colors: int = 90, photo_mask: Optional[np.ndarray] = None) -> List[Surface]:
+                    max_colors: int = 90, photo_mask: Optional[np.ndarray] = None,
+                    photo_region: Optional[np.ndarray] = None) -> List[Surface]:
     """Segments the image into flat-filled regions by quantised colour.
 
     UI is built from flat fills, so connected regions of one colour recover the real
@@ -1796,12 +1823,47 @@ def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray
             # filled hull happens to look. The test is on the region's interior: tiles
             # straddling the edge of a flat control pick up the texture around it, and
             # judging on those vetoes real controls that merely sit on a photograph.
+            core = cv2.erode(comp, _K3, iterations=2)
+            probe = core if np.any(core) else comp
+            probe_area = float(max(np.count_nonzero(probe), 1))
+
             if photo_mask is not None:
-                core = cv2.erode(comp, _K3, iterations=2)
-                probe = core if np.any(core) else comp
                 inside = float(np.count_nonzero(probe & (photo_mask[y:y+ch, x:x+cw] > 0)))
-                if inside / float(max(np.count_nonzero(probe), 1)) > 0.6:
+                if inside / probe_area > 0.6:
                     continue
+
+            # Textures alone do not catch a photograph of a man-made object: a shipping
+            # container is flat-sided, straight-edged and smoothly lit, so its panels
+            # pass every test a real component passes and come back as green slabs.
+            # Within a region already judged photographic the bar goes up -- only
+            # control-sized shapes that stand out sharply from their surroundings
+            # survive, which is what a button on a photo does and a facet of the subject
+            # does not.
+            if photo_region is not None:
+                ih, iw = h, w
+                within = float(np.count_nonzero(probe & (photo_region[y:y+ch, x:x+cw] > 0)))
+                if within / probe_area > 0.6:
+                    if (cw * ch) > page_area * 0.03:
+                        continue
+                    # Sample the ring from the surrounding image, not from inside the
+                    # crop: a component fills its own bounding box, so dilating within
+                    # those bounds is clipped away and leaves no ring at all -- which
+                    # silently vetoed every high-contrast control on a photograph.
+                    pad = 5
+                    ex0, ey0 = max(0, x - pad), max(0, y - pad)
+                    ex1, ey1 = min(iw, x + cw + pad), min(ih, y + ch + pad)
+                    padded = np.zeros((ey1 - ey0, ex1 - ex0), np.uint8)
+                    padded[y - ey0:y - ey0 + ch, x - ex0:x - ex0 + cw] = comp
+                    ring = cv2.subtract(cv2.dilate(padded, _K3, iterations=3), padded)
+                    outer = img[ey0:ey1, ex0:ex1][ring > 0]
+                    inner = img[y:y+ch, x:x+cw][probe > 0]
+                    if outer.size < 12 or inner.size < 12:
+                        continue
+                    contrast = float(np.linalg.norm(
+                        np.median(outer.reshape(-1, 3), axis=0)
+                        - np.median(inner.reshape(-1, 3), axis=0)))
+                    if contrast < 55.0:
+                        continue
 
             surf = _classify_region(img, x, y, cw, ch, comp, area, text_ink)
             if surf is None:
@@ -2652,7 +2714,7 @@ class ImageReconstructor:
             if ink_box:
                 x0, y0, x1, y1 = ink_box
 
-            font_size, letter_spacing, line_height = fit_text_to_box(
+            font_size, letter_spacing, line_height, word_spacing, scale_x = fit_text_to_box(
                 label, x1 - x0, y1 - y0, font_weight == "bold"
             )
             runs.append({
@@ -2668,6 +2730,8 @@ class ImageReconstructor:
                     color=text_color,
                     lineHeight=line_height,
                     letterSpacing=letter_spacing,
+                    wordSpacing=word_spacing,
+                    scaleX=scale_x,
                 ),
             })
         return runs, text_mask
@@ -2910,7 +2974,7 @@ class ImageReconstructor:
 
         # 5. Flat fills -> candidate CSS surfaces
         surfaces = detect_surfaces(img, page_bg_hex, text_ink=dilated_ink,
-                                   photo_mask=photo_raw)
+                                   photo_mask=photo_raw, photo_region=photo_joined)
         paintable = [s for s in surfaces if s.shape in ('rect', 'ellipse')]
 
         # A bordered control arrives as two regions: a ring and the fill inside it.
@@ -3124,15 +3188,28 @@ class ImageReconstructor:
             if asset_dir:
                 os.makedirs(asset_dir, exist_ok=True)
                 cv2.imwrite(os.path.join(asset_dir, asset_name), crop)
+            # A backdrop belongs in the containment hierarchy like anything else.
+            # Pinning every photograph beneath every surface hid the hero image behind
+            # the plain white card it was sitting on.
+            art_bbox = [float(px), float(py), float(px + pw), float(py + ph)]
+            parent_id, depth = None, 0
+            for host in sorted((s for s in paintable if s.color is not None),
+                               key=lambda s: s.width * s.height):
+                if _contains(host.bbox, art_bbox, pad=3.0):
+                    parent_id = surface_ids.get(id(host))
+                    depth = depths.get(id(host), 0)
+                    break
+
             eid = f"backdrop-{p_idx}"
             photo_ids.append(eid)
             elements.append(DocumentElement(
                 id=eid, type='image',
-                bbox=[float(px), float(py), float(px + pw), float(py + ph)],
+                bbox=art_bbox,
                 src=f"data:image/png;base64,{base64.b64encode(enc.tobytes()).decode('utf-8')}",
                 assetName=asset_name,
                 naturalWidth=float(pw), naturalHeight=float(ph),
-                tag='img', role='backdrop', zIndex=Z_BACKDROP,
+                tag='img', role='backdrop', parentId=parent_id,
+                zIndex=Z_SURFACE + depth * Z_STEP + Z_BACKDROP,
             ))
 
         # 8. Residual artwork: everything no surface or text explained stays as pixels
@@ -3409,11 +3486,13 @@ class HTMLRenderer:
         lh = float(s.lineHeight if (s and s.lineHeight is not None) else 1.0)
         raw_ls = float(s.letterSpacing) if (s and s.letterSpacing) else 0.0
         ls = f"letter-spacing: {raw_ls:.2f}px; " if abs(raw_ls) > 0.01 else ""
+        raw_ws = float(s.wordSpacing) if (s and s.wordSpacing) else 0.0
+        ws = f"word-spacing: {raw_ws:.2f}px; " if abs(raw_ws) > 0.01 else ""
         bg = f"background-color: {s.backgroundColor};" if (s and s.backgroundColor) else ""
         pl = float(s.paddingLeft) if (s and s.paddingLeft) else 0.0
         return (f"font-family: {ff}; font-size: {fs:.2f}px; font-weight: {fw}; "
                 f"font-style: {fst}; color: {col}; text-align: {ta}; "
-                f"line-height: {lh:.3f}; {ls}margin: 0; padding: 0 0 0 {pl:.2f}px; {bg}")
+                f"line-height: {lh:.3f}; {ls}{ws}margin: 0; padding: 0 0 0 {pl:.2f}px; {bg}")
 
     @staticmethod
     def render_element(elem: DocumentElement, editable: bool = True,
@@ -3475,8 +3554,11 @@ class HTMLRenderer:
             # Paragraphs are allowed to wrap; single runs are positioned by their ink box
             # and must not reflow, or they would drift off the coordinates they were fitted to.
             wrap = "white-space: normal; overflow-wrap: break-word;" if tag == 'p' else "white-space: nowrap;"
+            sx = float(elem.style.scaleX) if (elem.style and elem.style.scaleX) else 1.0
+            squeeze = (f"transform: scaleX({sx:.4f}); transform-origin: left top; "
+                       if abs(sx - 1.0) > 0.001 else "")
             text_style = (f"{common_style} {HTMLRenderer._text_css(elem.style)} "
-                          f"{wrap} overflow: visible;")
+                          f"{squeeze}{wrap} overflow: visible;")
 
             if elem.spans and len(elem.spans) > 1:
                 base = elem.style

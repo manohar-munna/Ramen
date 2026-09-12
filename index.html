@@ -2229,6 +2229,13 @@ function renderElementToDOM(elem, origin) {
         div.style.textAlign = s.textAlign || 'left';
         div.style.lineHeight = `${s.lineHeight || 1.0}`;
         if (s.letterSpacing) div.style.letterSpacing = `${s.letterSpacing}px`;
+        if (s.wordSpacing) div.style.wordSpacing = `${s.wordSpacing}px`;
+        // Condensed to the width it was measured at, when the substitute face is wider
+        // than the original. Without this a display headline overruns its own box.
+        if (s.scaleX && Math.abs(s.scaleX - 1) > 0.001) {
+            div.style.transform = `scaleX(${s.scaleX})`;
+            div.style.transformOrigin = 'left top';
+        }
         div.style.margin = '0';
         // The box may have been widened to take in a leading icon; keep the glyphs
         // where they were measured rather than letting them slide onto the icon.
