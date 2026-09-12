@@ -2179,7 +2179,10 @@ function renderElementToDOM(elem, origin) {
     } else if (elem.type === 'image') {
         const img = document.createElement('img');
         img.src = elem.src || '';
-        img.alt = 'Embedded Image';
+        img.alt = elem.role || 'Embedded Image';
+        // Decorative artwork must not intercept clicks meant for the control beneath:
+        // its container is a full rectangle even when the pixels are mostly transparent.
+        if (elem.role === 'artwork') div.style.pointerEvents = 'none';
         div.appendChild(img);
         
     } else if (elem.type === 'table') {

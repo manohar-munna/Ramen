@@ -1382,6 +1382,15 @@ class DigitalExtractor:
 MIN_SURFACE_AREA = 140
 _K3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
+# Stacking is derived from containment depth, never assigned globally. A flat z for
+# artwork floats every raster above every reconstructed component, which is what put
+# decorative pixels on top of real buttons and swallowed their clicks.
+Z_SURFACE = 2      # a surface sits at its own depth
+Z_STEP = 10        # each nesting level gets its own band
+Z_ART = 3          # artwork rides just above the surface that contains it
+Z_TABLE = 5
+Z_TEXT = 6         # text is the top layer within its band
+
 def _fill_holes(mask: np.ndarray) -> np.ndarray:
     """Returns `mask` with interior holes closed (border-connected background removed)."""
     h, w = mask.shape
@@ -2156,7 +2165,7 @@ class ImageReconstructor:
 
     @staticmethod
     def _extract_residual_art(img, w, h, mean_bg, text_mask, paintable,
-                              asset_dir) -> List[DocumentElement]:
+                              asset_dir, surface_ids=None, depths=None) -> List[DocumentElement]:
         """Rasterises whatever no surface or text run explained.
 
         This is the deliberate fallback for complex artwork -- gradients, mascots,
@@ -2208,10 +2217,35 @@ class ImageReconstructor:
             residual, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)))
         contours, _ = cv2.findContours(grouped, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        out: List[DocumentElement] = []
-        idx = 1
+        # Closing welds a control's arrow glyph, its drop shadow and its antialiased rim
+        # into one contour whose box spans the whole control while being almost entirely
+        # transparent. Emitted as a rectangle that lands on top of the real button and
+        # eats its clicks. A sparse group is therefore split back into its parts.
+        boxes: List[Tuple[int, int, int, int]] = []
         for c in contours:
             x, y, cw, ch = cv2.boundingRect(c)
+            if cw < 3 or ch < 3:
+                continue
+            ink = int(np.count_nonzero(residual[y:y+ch, x:x+cw]))
+            if ink and (ink / float(cw * ch)) < 0.35 and (cw * ch) > 2500:
+                n, lab, stats, _ = cv2.connectedComponentsWithStats(
+                    residual[y:y+ch, x:x+cw], 8)
+                for i in range(1, n):
+                    sx, sy = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
+                    sw, sh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+                    if stats[i, cv2.CC_STAT_AREA] >= 12:
+                        boxes.append((x + sx, y + sy, sw, sh))
+            else:
+                boxes.append((x, y, cw, ch))
+
+        # Innermost surface containing a piece of artwork becomes its parent, so the
+        # artwork renders inside that component instead of covering it.
+        nest = sorted((s for s in paintable if s.color is not None),
+                      key=lambda s: (s.width * s.height))
+
+        out: List[DocumentElement] = []
+        idx = 1
+        for (x, y, cw, ch) in boxes:
             if cw < 3 or ch < 3:
                 continue
             ink = int(np.count_nonzero(residual[y:y+ch, x:x+cw]))
@@ -2237,12 +2271,22 @@ class ImageReconstructor:
                 os.makedirs(asset_dir, exist_ok=True)
                 cv2.imwrite(os.path.join(asset_dir, asset_name), bgra)
 
+            art_bbox = [float(x), float(y), float(x + cw), float(y + ch)]
+            parent_id, depth = None, 0
+            for s in nest:
+                if _contains(s.bbox, art_bbox, pad=2.0):
+                    parent_id = (surface_ids or {}).get(id(s))
+                    depth = (depths or {}).get(id(s), 0)
+                    break
+
             out.append(DocumentElement(
                 id=f"art-{idx}", type='image',
-                bbox=[float(x), float(y), float(x + cw), float(y + ch)],
+                bbox=art_bbox,
                 src=src, assetName=asset_name,
                 naturalWidth=float(cw), naturalHeight=float(ch),
-                tag='img', role='artwork', zIndex=9,
+                tag='img', role='artwork',
+                parentId=parent_id,
+                zIndex=Z_SURFACE + depth * Z_STEP + Z_ART,
             ))
             idx += 1
         return out
@@ -2300,6 +2344,7 @@ class ImageReconstructor:
 
         # 6. Emit surfaces as real boxes, absorbing a button's label into the button
         surface_ids: Dict[int, str] = {}
+        depths: Dict[int, int] = {}
         for s in sorted(paintable, key=lambda s: -(s.width * s.height)):
             role, tag, conf = roles[id(s)]
             depth = 0
@@ -2307,6 +2352,7 @@ class ImageReconstructor:
             while p is not None:
                 depth += 1
                 p = p.parent
+            depths[id(s)] = depth
 
             eid = next_id(role if role in ('button', 'badge', 'card', 'input') else 'surface')
             surface_ids[id(s)] = eid
@@ -2329,7 +2375,7 @@ class ImageReconstructor:
                 box=box,
                 confidence=conf,
                 parentId=surface_ids.get(id(s.parent)) if s.parent is not None else None,
-                zIndex=2 + depth * 2,
+                zIndex=Z_SURFACE + depth * Z_STEP,
             )
 
             # An <input> is void, so its label has to become the placeholder attribute.
@@ -2379,7 +2425,7 @@ class ImageReconstructor:
                 id=next_id('table'), type='table',
                 bbox=[float(tx0), float(ty0), float(tx1), float(ty1)],
                 tag='table', role='table', rows=len(table_rows), cols=n_cols,
-                html=''.join(parts), confidence=0.7, zIndex=11,
+                html=''.join(parts), confidence=0.7, zIndex=Z_SURFACE + Z_TABLE,
             ))
 
         for group in group_paragraphs(text_runs):
@@ -2404,7 +2450,7 @@ class ImageReconstructor:
                 text=' '.join(r['text'] for r in group),
                 tag='p', role='paragraph', style=style, confidence=0.75,
                 parentId=surface_ids.get(id(lead.get('host'))) if lead.get('host') is not None else None,
-                zIndex=12,
+                zIndex=Z_SURFACE + depths.get(id(lead.get('host')), 0) * Z_STEP + Z_TEXT,
             ))
 
         for run in text_runs:
@@ -2419,12 +2465,12 @@ class ImageReconstructor:
                 role=run.get('role') or 'text',
                 style=run['style'],
                 parentId=surface_ids.get(id(host)) if host is not None else None,
-                zIndex=12,
+                zIndex=Z_SURFACE + depths.get(id(host), 0) * Z_STEP + Z_TEXT,
             ))
 
         # 8. Residual artwork: everything no surface or text explained stays as pixels
         elements.extend(ImageReconstructor._extract_residual_art(
-            img, w, h, mean_bg, text_mask, paintable, asset_dir
+            img, w, h, mean_bg, text_mask, paintable, asset_dir, surface_ids, depths
         ))
 
         elements.sort(key=lambda e: e.zIndex or 1)
@@ -2491,6 +2537,7 @@ body.reconstructed-doc {
 .pdf-text { cursor: text; outline: none; white-space: nowrap; overflow: visible; user-select: text; }
 .pdf-text[contenteditable="true"]:focus { outline: 1px dashed #3b82f6; background-color: rgba(59, 130, 246, 0.05); }
 .pdf-image-container { user-select: none; }
+.pdf-image-container[data-role="artwork"] { pointer-events: none; }
 .pdf-image-container img { display: block; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
 .pdf-table-container { overflow: hidden; user-select: text; color: #000000 !important; }
 .reconstructed-table {
@@ -2527,6 +2574,53 @@ p.pdf-text { margin: 0; padding: 0; font-weight: inherit; font-size: inherit; }
     body.reconstructed-doc { padding: 0; background: transparent; gap: 0; }
     .pdf-page { box-shadow: none; page-break-after: always; break-after: page; margin: 0; }
 }"""
+
+INTERACTIVE_DEMO_SNIPPET = """
+<div id="ramen-snackbar" role="status" aria-live="polite"></div>
+<style>
+#ramen-snackbar {
+    position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px);
+    background: #101828; color: #fff; padding: 12px 18px; border-radius: 10px;
+    font: 500 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    box-shadow: 0 10px 30px rgba(0,0,0,.28); opacity: 0; pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease; z-index: 2147483647; max-width: 78vw;
+}
+#ramen-snackbar.show { opacity: 1; transform: translate(-50%, 0); }
+#ramen-snackbar b { color: #7cc4ff; }
+</style>
+<script>
+(function () {
+    var bar = document.getElementById('ramen-snackbar'), timer = null;
+    function toast(msg) {
+        bar.innerHTML = msg;
+        bar.classList.add('show');
+        clearTimeout(timer);
+        timer = setTimeout(function () { bar.classList.remove('show'); }, 2400);
+    }
+    // Evidence, not assertion: this reports the tag the browser actually dispatched a
+    // real click to. If a reconstructed control were a picture, nothing would fire.
+    document.addEventListener('click', function (ev) {
+        // Resolve the control, not the label inside it: a button's text is its own
+        // element with its own data-role, so the nearest [data-role] is the span.
+        var el = ev.target.closest('button, input, select, textarea, a')
+              || ev.target.closest('[data-role]');
+        if (!el) { return; }
+        var role = el.getAttribute('data-role') || el.tagName.toLowerCase();
+        if (role === 'artwork' || role === 'surface') { return; }
+        var label = (el.innerText || el.placeholder || '').trim().slice(0, 40);
+        toast('clicked &lt;' + el.tagName.toLowerCase() + '&gt; role=<b>' + role + '</b>'
+              + (label ? ' \u2014 \u201c' + label + '\u201d' : ''));
+    });
+    window.addEventListener('load', function () {
+        var n = document.querySelectorAll('button').length;
+        var h = document.querySelectorAll('h1,h2,h3,h4,h5,h6').length;
+        toast('Reconstructed page ready \u2014 <b>' + n + '</b> real &lt;button&gt; and <b>'
+              + h + '</b> heading elements. Click a button.');
+    });
+})();
+</script>
+"""
+
 
 class HTMLRenderer:
     VOID_TAGS = {'input', 'img', 'br', 'hr'}
@@ -2657,8 +2751,12 @@ class HTMLRenderer:
 
         if elem.type == 'image':
             src = elem.src or ''
+            # Recovered artwork is decoration. Its container is a full rectangle even
+            # when the pixels inside are mostly transparent, so leaving it clickable
+            # lets a stray rim or drop shadow swallow the clicks of the control beneath.
+            inert = ' pointer-events: none;' if elem.role == 'artwork' else ''
             return (f'<div class="pdf-element pdf-image-container" {data_attrs} '
-                    f'style="{common_style}"><img src="{src}" alt="{elem.role or "Embedded Asset"}" '
+                    f'style="{common_style}{inert}"><img src="{src}" alt="{elem.role or "Embedded Asset"}" '
                     f'loading="lazy" /></div>')
 
         if elem.type == 'table':
@@ -2709,9 +2807,11 @@ class HTMLRenderer:
         )
 
     @staticmethod
-    def render_document(doc: DocumentData, editable: bool = False, title: Optional[str] = None) -> str:
+    def render_document(doc: DocumentData, editable: bool = False, title: Optional[str] = None,
+                        interactive: bool = False) -> str:
         doc_title = title or doc.title or "Reconstructed PDF Document"
         pages_html = "\n\n".join([HTMLRenderer.render_page(p, editable=editable) for p in doc.pages])
+        demo = INTERACTIVE_DEMO_SNIPPET if interactive else ""
 
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -2725,13 +2825,14 @@ class HTMLRenderer:
 </head>
 <body class="reconstructed-doc">
 {pages_html}
+{demo}
 </body>
 </html>"""
 
 class Exporter:
     @staticmethod
-    def export_standalone_html(doc_data: DocumentData) -> str:
-        return HTMLRenderer.render_document(doc_data, editable=False)
+    def export_standalone_html(doc_data: DocumentData, interactive: bool = False) -> str:
+        return HTMLRenderer.render_document(doc_data, editable=False, interactive=interactive)
 
     @staticmethod
     def export_json(doc_data: DocumentData) -> str:

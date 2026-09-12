@@ -29,3 +29,7 @@ Thumbs.db
 
 # Scratch artifacts
 scratch/
+
+# Generated reconstructions
+reddit_ads_reconstructed.html
+reddit_ads_interactive_test.html
