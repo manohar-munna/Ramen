@@ -1071,6 +1071,35 @@ html, body {
     object-fit: fill !important;
 }
 
+/* Comparison status banner. The rasterise-and-compare step is asynchronous, and
+   without this the modal simply showed the previous document's numbers until it
+   finished -- or forever, if it failed. */
+.fidelity-status {
+    position: absolute;
+    top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 9px;
+    background-color: var(--bg-chrome);
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    padding: 7px 16px;
+    font-size: 12px; font-weight: 500; color: var(--text-secondary);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+    z-index: 40;
+}
+.fidelity-status.is-error {
+    border-color: var(--accent-red);
+    color: #fca5a5;
+}
+.fidelity-status.is-error .fidelity-spinner { display: none; }
+.fidelity-spinner {
+    width: 12px; height: 12px; flex: none;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent-blue);
+    border-radius: 50%;
+    animation: fidelity-spin 0.7s linear infinite;
+}
+@keyframes fidelity-spin { to { transform: rotate(360deg); } }
+
 /* Slider Wipe Mode */
 .fidelity-slider-container {
     width: 100%;
@@ -1574,6 +1603,12 @@ html, body {
             </div>
 
             <div class="modal-body fidelity-modal-body">
+                <!-- Comparison status: which stage is running, or why it failed -->
+                <div id="fidelity-status" class="fidelity-status" style="display: none;">
+                    <span class="fidelity-spinner" aria-hidden="true"></span>
+                    <span id="fidelity-status-text">Rendering reconstruction&hellip;</span>
+                </div>
+
                 <!-- Side by side view -->
                 <div id="fidelity-split-container" class="fidelity-split-container">
                     <div class="diff-pane">
@@ -1772,6 +1807,8 @@ const elements = {
     sliderClipper: document.getElementById('slider-clipper'),
     sliderHandle: document.getElementById('slider-handle'),
     fidelityHeatmapImg: document.getElementById('fidelity-heatmap-img'),
+    fidelityStatus: document.getElementById('fidelity-status'),
+    fidelityStatusText: document.getElementById('fidelity-status-text'),
     btnCodeTabHtml: document.getElementById('btn-code-tab-html'),
     btnCodeTabCss: document.getElementById('btn-code-tab-css'),
     btnCodeTabFull: document.getElementById('btn-code-tab-full'),
@@ -2882,22 +2919,46 @@ async function exportDocument(format) {
 // ==========================================================================
 let fidelityResizeObserver = null;
 
+function setFidelityStatus(message, isError) {
+    if (!elements.fidelityStatus) return;
+    if (!message) {
+        elements.fidelityStatus.style.display = 'none';
+        return;
+    }
+    elements.fidelityStatus.style.display = 'flex';
+    elements.fidelityStatus.classList.toggle('is-error', !!isError);
+    elements.fidelityStatusText.textContent = message;
+}
+
+function resetFidelityResults() {
+    // Every result shown in this modal belongs to one specific page render. Carrying
+    // any of it over means the next document silently displays the previous one's
+    // comparison, which is indistinguishable from the feature being broken.
+    elements.sliderReconImg.removeAttribute('src');
+    elements.fidelityHeatmapImg.removeAttribute('src');
+    elements.metricSsim.textContent = '--%';
+    elements.metricPixdiff.textContent = '--%';
+}
+
 async function openFidelityModal() {
     if (!state.doc || !state.doc.pages[state.currentPageIndex]) {
         alert('Please load a document first.');
         return;
     }
-    
+
     const page = state.doc.pages[state.currentPageIndex];
     elements.fidelityModal.style.display = 'flex';
-    
+
+    resetFidelityResults();
+    setFidelityStatus('Rendering reconstruction\u2026', false);
+
     // Set Original image src
     elements.fidelityOrigImg.src = page.originalImageSrc || '';
     elements.sliderOrigImg.src = page.originalImageSrc || '';
-    
+
     // Render and size both panes synchronously to match 1:1
     layoutFidelityPanes(page);
-    
+
     // Auto-recalculate on window resize while modal is open
     if (!fidelityResizeObserver) {
         fidelityResizeObserver = new ResizeObserver(() => {
@@ -2909,45 +2970,53 @@ async function openFidelityModal() {
             fidelityResizeObserver.observe(elements.fidelityOrigPane);
         }
     }
-    
-    // Rasterize HTML page using html2canvas matched to the original render DPI (150 DPI = 150/72 scale)
+
     setStatus('Computing visual fidelity metrics...');
     try {
         const domPage = document.getElementById(`pdf-page-${page.pageNumber}`);
-        if (window.html2canvas && domPage) {
-            const renderScale = 150.0 / 72.0;
-            const canvas = await html2canvas(domPage, { scale: renderScale, useCORS: true, logging: false });
-            const reconBase64 = canvas.toDataURL('image/png');
-            elements.sliderReconImg.src = reconBase64;
-            
-            elements.sliderOrigImg.onload = () => {
-                syncSliderDimensions();
-            };
-            syncSliderDimensions();
-            
-            // Send to backend for SSIM and Heatmap computation
-            if (page.originalImageSrc) {
-                const compResp = await fetch('/api/compare', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        origImageSrc: page.originalImageSrc,
-                        reconImageSrc: reconBase64
-                    })
-                });
-                
-                if (compResp.ok) {
-                    const compData = await compResp.json();
-                    elements.metricSsim.textContent = `${compData.similarityPercent}%`;
-                    elements.metricPixdiff.textContent = `${compData.diffPixelPercent}%`;
-                    if (compData.diffHeatmapSrc) {
-                        elements.fidelityHeatmapImg.src = compData.diffHeatmapSrc;
-                    }
-                }
-            }
+        if (!domPage) {
+            throw new Error('Reconstructed page is not on the canvas.');
         }
+        if (!window.html2canvas) {
+            throw new Error('html2canvas failed to load \u2014 the comparison needs it to rasterise the page.');
+        }
+
+        // Rasterise the live DOM at the DPI the original was rendered at (150/72).
+        const canvas = await html2canvas(domPage, { scale: 150.0 / 72.0, useCORS: true, logging: false });
+        const reconBase64 = canvas.toDataURL('image/png');
+        elements.sliderReconImg.src = reconBase64;
+        elements.sliderOrigImg.onload = () => syncSliderDimensions();
+        syncSliderDimensions();
+
+        if (!page.originalImageSrc) {
+            throw new Error('This page has no original render to compare against.');
+        }
+
+        setFidelityStatus('Comparing against the original\u2026', false);
+        const compResp = await fetch('/api/compare', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ origImageSrc: page.originalImageSrc, reconImageSrc: reconBase64 })
+        });
+        if (!compResp.ok) {
+            let detail = `${compResp.status} ${compResp.statusText}`;
+            try { detail = (await compResp.json()).detail || detail; } catch (e) { /* keep status text */ }
+            throw new Error(`Comparison failed: ${detail}`);
+        }
+
+        const compData = await compResp.json();
+        if (compData.error) throw new Error(compData.error);
+        elements.metricSsim.textContent = `${compData.similarityPercent}%`;
+        elements.metricPixdiff.textContent = `${compData.diffPixelPercent}%`;
+        if (compData.diffHeatmapSrc) {
+            elements.fidelityHeatmapImg.src = compData.diffHeatmapSrc;
+        }
+        setFidelityStatus('', false);
     } catch (err) {
+        // Surfaced rather than swallowed: a silent failure here is indistinguishable
+        // from a working comparison that happens to look identical.
         console.warn('Fidelity calculation error:', err);
+        setFidelityStatus(err && err.message ? err.message : 'Fidelity comparison failed.', true);
     }
     setStatus('Ready');
 }
