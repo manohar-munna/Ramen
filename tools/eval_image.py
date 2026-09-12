@@ -48,7 +48,9 @@ def evaluate(image_path, chrome):
         counts[el.type] = counts.get(el.type, 0) + 1
 
     # 2. Render HTML with zero page chrome so the page starts at (0,0)
-    html = HTMLRenderer.render_document(doc, editable=False, title=name)
+    # interactive=False: the demo snackbar and Inspect button are chrome for verifying
+    # the reconstruction, not part of it, and would be scored as differences.
+    html = HTMLRenderer.render_document(doc, editable=False, title=name, interactive=False)
     html = html.replace("padding: 24px;", "padding: 0;").replace("gap: 24px;", "gap: 0;")
     html_path = os.path.abspath(os.path.join(OUT_DIR, name + ".html"))
     with open(html_path, "w", encoding="utf-8") as f:

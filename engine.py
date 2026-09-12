@@ -1388,6 +1388,7 @@ _K3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 Z_SURFACE = 2      # a surface sits at its own depth
 Z_STEP = 10        # each nesting level gets its own band
 Z_ART = 3          # artwork rides just above the surface that contains it
+Z_CONTROL = 4      # a promoted control outranks decoration that merely overlaps it
 Z_TABLE = 5
 Z_TEXT = 6         # text is the top layer within its band
 
@@ -1406,7 +1407,7 @@ class Surface:
     (paintable as an SVG ellipse) or 'complex' (must stay pixels).
     """
     __slots__ = ('bbox', 'vis_bbox', 'mask', 'color', 'shape', 'radius', 'border_color',
-                 'border_width', 'area', 'fill_ratio', 'children', 'parent', 'texts')
+                 'border_width', 'area', 'fill_ratio', 'children', 'parent', 'texts', 'shadow')
 
     def __init__(self, bbox, mask, color, shape, radius, area, fill_ratio,
                  border_color=None, border_width=0.0, vis_bbox=None):
@@ -1425,6 +1426,7 @@ class Surface:
         self.children: List['Surface'] = []
         self.parent: Optional['Surface'] = None
         self.texts: List[Dict[str, Any]] = []
+        self.shadow: Optional[Tuple[float, float, float, float]] = None  # dx, dy, blur, alpha
 
     @property
     def width(self):
@@ -1650,6 +1652,110 @@ def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray
 def _contains(outer, inner, pad: float = 1.5) -> bool:
     return (inner[0] >= outer[0] - pad and inner[1] >= outer[1] - pad and
             inner[2] <= outer[2] + pad and inner[3] <= outer[3] + pad)
+
+def _hex_to_bgr(hex_color: str) -> np.ndarray:
+    c = (hex_color or "#000000").lstrip("#")
+    return np.array([int(c[4:6], 16), int(c[2:4], 16), int(c[0:2], 16)], dtype=np.float32)
+
+def _lum_bgr(bgr) -> float:
+    return float(0.114 * bgr[0] + 0.587 * bgr[1] + 0.299 * bgr[2])
+
+SHADOW_REACH = 30
+
+def detect_box_shadow(img: np.ndarray, surf: 'Surface', parent_bg: str):
+    """Recovers a CSS drop shadow from the darkening in the ring around a surface.
+
+    A shadow is a soft, monotonically decaying darkening of the background just outside
+    a box -- not reproducible by a flat fill, so without this it lands in the residual
+    pass as a raster the width of the whole control. Reading it back as box-shadow keeps
+    it as CSS and stops that overlay existing at all.
+
+    Returns (dx, dy, blur, alpha) or None. Conservative by design: content that merely
+    happens to sit near the box (text, an icon, another panel) must not be mistaken for
+    one, so the darkening has to decay with distance the way a blur does.
+    """
+    ih, iw = img.shape[:2]
+    x0, y0, x1, y1 = [int(round(v)) for v in surf.vis_bbox]
+    if (x1 - x0) < 12 or (y1 - y0) < 12:
+        return None
+
+    ex0, ey0 = max(0, x0 - SHADOW_REACH), max(0, y0 - SHADOW_REACH)
+    ex1, ey1 = min(iw, x1 + SHADOW_REACH), min(ih, y1 + SHADOW_REACH)
+    if (ex1 - ex0) < 16 or (ey1 - ey0) < 16:
+        return None
+
+    box = np.zeros((ey1 - ey0, ex1 - ex0), np.uint8)
+    m = surf.mask
+    mh, mw = min(m.shape[0], y1 - y0), min(m.shape[1], x1 - x0)
+    if mh <= 0 or mw <= 0:
+        return None
+    box[y0 - ey0:y0 - ey0 + mh, x0 - ex0:x0 - ex0 + mw] = (m[:mh, :mw] > 0).astype(np.uint8)
+    if not box.any():
+        return None
+
+    patch = img[ey0:ey1, ex0:ex1].astype(np.float32)
+    bg = _hex_to_bgr(parent_bg)
+    lum = 0.114 * patch[:, :, 0] + 0.587 * patch[:, :, 1] + 0.299 * patch[:, :, 2]
+    darker = np.clip(_lum_bgr(bg) - lum, 0.0, None)
+
+    # A shadow tints the ground without changing its hue; anything with a different
+    # colour out here is other content, not shade.
+    ratio = patch / np.maximum(bg.reshape(1, 1, 3), 1.0)
+    neutral = (ratio.max(axis=2) - ratio.min(axis=2)) < 0.18
+    outside = (box == 0)
+    valid = outside & neutral
+
+    dist = cv2.distanceTransform((box == 0).astype(np.uint8), cv2.DIST_L2, 3)
+    profile = []
+    for r in range(1, SHADOW_REACH):
+        band = valid & (dist >= r) & (dist < r + 1)
+        profile.append(float(darker[band].mean()) if band.sum() >= 12 else 0.0)
+    if len(profile) < 8 or profile[0] < 3.0:
+        return None
+
+    peak = max(profile[:4])
+    if peak < 3.0 or peak > 90.0:
+        return None
+    # Must actually fade out; a neighbouring dark panel would not.
+    tail = sum(profile[-4:]) / 4.0
+    if tail > peak * 0.35:
+        return None
+    blur = float(next((r for r, v in enumerate(profile, 1) if v <= peak * 0.15), SHADOW_REACH))
+    alpha = float(min(peak / 255.0 * 2.6, 0.40))
+    if alpha < 0.04:
+        return None                     # too faint to be worth a rule
+
+    # Offset from the imbalance between opposite sides, not from the centroid of all
+    # darkening: a centroid is dragged around by whatever content happens to sit nearby,
+    # which produced offsets pinned to the clamp in both directions.
+    reach = max(int(blur) + 2, 4)
+    near = valid & (dist <= reach)
+    ys, xs = np.mgrid[0:box.shape[0], 0:box.shape[1]]
+    by, bx = np.nonzero(box)
+    top_e, bot_e = by.min(), by.max()
+    lef_e, rig_e = bx.min(), bx.max()
+
+    def side(sel):
+        sel = sel & near
+        return float(darker[sel].mean()) if sel.sum() >= 12 else 0.0
+
+    top, bottom = side(ys < top_e), side(ys > bot_e)
+    left, right = side(xs < lef_e), side(xs > rig_e)
+
+    # Drop shadows fall downward. Darkening that is stronger above the box is something
+    # else sitting behind it.
+    if top > bottom * 1.6 and top > 4.0:
+        return None
+
+    v_asym = (bottom - top) / max(bottom + top, 1e-3)
+    h_asym = (right - left) / max(right + left, 1e-3)
+    limit = blur * 0.8
+    dy = float(np.clip(round(v_asym * blur, 1), -limit, limit))
+    dx = float(np.clip(round(h_asym * blur, 1), -limit, limit))
+    # Horizontal drift beyond the blur radius is not a shadow shape any UI produces.
+    if abs(dx) > blur * 0.6:
+        dx = float(np.sign(dx) * round(blur * 0.6, 1))
+    return dx, dy, round(blur, 1), round(alpha, 3)
 
 def build_containment(surfaces: List[Surface]) -> List[Surface]:
     """Nests surfaces by area so each one's parent is the smallest box that holds it."""
@@ -2191,6 +2297,25 @@ class ImageReconstructor:
             m = s.mask
             if m.shape != (y1 - y0, x1 - x0):
                 m = cv2.resize(m, (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST)
+            if s.shadow:
+                # Approximate the CSS shadow into the prediction, so the darkening it
+                # accounts for is no longer treated as unexplained artwork.
+                sdx, sdy, sblur, salpha = s.shadow
+                pad = int(min(sblur * 2 + abs(sdx) + abs(sdy) + 4, 60))
+                sx0, sy0 = max(0, x0 - pad), max(0, y0 - pad)
+                sx1, sy1 = min(w, x1 + pad), min(h, y1 + pad)
+                layer = np.zeros((sy1 - sy0, sx1 - sx0), np.float32)
+                ty0, tx0 = int(y0 - sy0 + sdy), int(x0 - sx0 + sdx)
+                mh2 = min(m.shape[0], layer.shape[0] - max(ty0, 0))
+                mw2 = min(m.shape[1], layer.shape[1] - max(tx0, 0))
+                if mh2 > 0 and mw2 > 0 and ty0 >= 0 and tx0 >= 0:
+                    layer[ty0:ty0 + mh2, tx0:tx0 + mw2] = (m[:mh2, :mw2] > 0).astype(np.float32)
+                    k = max(int(sblur) | 1, 3)
+                    layer = cv2.GaussianBlur(layer, (k, k), sblur / 2.0 + 0.5)
+                    a = (layer * salpha)[:, :, None]
+                    reg = predicted[sy0:sy1, sx0:sx1].astype(np.float32)
+                    predicted[sy0:sy1, sx0:sx1] = np.clip(reg * (1.0 - a), 0, 255).astype(np.uint8)
+
             c = s.color.lstrip('#')
             bgr = np.array([int(c[4:6], 16), int(c[2:4], 16), int(c[0:2], 16)], dtype=np.uint8)
             region = predicted[y0:y1, x0:x1]
@@ -2323,6 +2448,10 @@ class ImageReconstructor:
         build_containment(paintable)
         assign_texts(paintable, text_runs)
 
+        for s in paintable:
+            ground = s.parent.color if (s.parent and s.parent.color) else page_bg_hex
+            s.shadow = detect_box_shadow(img, s, ground)
+
         # 5. Decide what each surface is, then let those roles inform the text roles
         ctx = {'img': img, 'text_ink': (text_mask > 0).astype(np.uint8), 'page_bg': page_bg_hex}
         roles: Dict[int, Tuple[str, str, float]] = {}
@@ -2365,6 +2494,10 @@ class ImageReconstructor:
             )
             if s.shape == 'ellipse':
                 box.borderRadius = "50%"
+            if s.shadow:
+                sdx, sdy, sblur, salpha = s.shadow
+                box.boxShadow = (f"{sdx:.1f}px {sdy:.1f}px {sblur:.1f}px "
+                                 f"rgba(0, 0, 0, {salpha:.3f})")
 
             elem = DocumentElement(
                 id=eid,
@@ -2375,7 +2508,8 @@ class ImageReconstructor:
                 box=box,
                 confidence=conf,
                 parentId=surface_ids.get(id(s.parent)) if s.parent is not None else None,
-                zIndex=Z_SURFACE + depth * Z_STEP,
+                zIndex=(Z_SURFACE + depth * Z_STEP +
+                        (Z_CONTROL if role in ('button', 'badge', 'input') else 0)),
             )
 
             # An <input> is void, so its label has to become the placeholder attribute.
@@ -2577,6 +2711,8 @@ p.pdf-text { margin: 0; padding: 0; font-weight: inherit; font-size: inherit; }
 
 INTERACTIVE_DEMO_SNIPPET = """
 <div id="ramen-snackbar" role="status" aria-live="polite"></div>
+<div id="ramen-hl" aria-hidden="true"><div id="ramen-hl-box"></div><div id="ramen-hl-tip"></div></div>
+<button id="ramen-inspect-toggle" type="button" title="Toggle element inspector (press i)">Inspect</button>
 <style>
 #ramen-snackbar {
     position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 16px);
@@ -2587,6 +2723,26 @@ INTERACTIVE_DEMO_SNIPPET = """
 }
 #ramen-snackbar.show { opacity: 1; transform: translate(-50%, 0); }
 #ramen-snackbar b { color: #7cc4ff; }
+#ramen-inspect-toggle {
+    position: fixed; right: 18px; bottom: 18px; z-index: 2147483647;
+    background: #101828; color: #cbd5e1; border: 1px solid #334155; border-radius: 8px;
+    padding: 8px 14px; cursor: pointer;
+    font: 600 12px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+}
+#ramen-inspect-toggle.on { background: #2563eb; color: #fff; border-color: #2563eb; }
+#ramen-hl { position: absolute; inset: 0; pointer-events: none; z-index: 2147483646; display: none; }
+#ramen-hl.on { display: block; }
+#ramen-hl-box {
+    position: absolute; border: 1px solid #2563eb; background: rgba(37,99,235,.16);
+    border-radius: 2px; transition: all .05s linear;
+}
+#ramen-hl-tip {
+    position: absolute; background: #101828; color: #e5e7eb; padding: 5px 9px;
+    border-radius: 6px; white-space: nowrap; box-shadow: 0 6px 18px rgba(0,0,0,.35);
+    font: 500 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+#ramen-hl-tip .t { color: #7cc4ff; } #ramen-hl-tip .r { color: #fbbf24; }
+#ramen-hl-tip .d { color: #94a3b8; }
 </style>
 <script>
 (function () {
@@ -2595,10 +2751,12 @@ INTERACTIVE_DEMO_SNIPPET = """
         bar.innerHTML = msg;
         bar.classList.add('show');
         clearTimeout(timer);
-        timer = setTimeout(function () { bar.classList.remove('show'); }, 2400);
+        timer = setTimeout(function () { bar.classList.remove('show'); }, 2600);
     }
-    // Evidence, not assertion: this reports the tag the browser actually dispatched a
-    // real click to. If a reconstructed control were a picture, nothing would fire.
+
+    // ---- Proof a reconstructed control is a control -------------------------------
+    // Reports the tag the browser actually dispatched a real click to. If these were
+    // pictures of buttons, nothing would fire.
     document.addEventListener('click', function (ev) {
         // Resolve the control, not the label inside it: a button's text is its own
         // element with its own data-role, so the nearest [data-role] is the span.
@@ -2611,11 +2769,69 @@ INTERACTIVE_DEMO_SNIPPET = """
         toast('clicked &lt;' + el.tagName.toLowerCase() + '&gt; role=<b>' + role + '</b>'
               + (label ? ' \u2014 \u201c' + label + '\u201d' : ''));
     });
+
+    // ---- Element inspector --------------------------------------------------------
+    var hl = document.getElementById('ramen-hl');
+    var box = document.getElementById('ramen-hl-box');
+    var tip = document.getElementById('ramen-hl-tip');
+    var btn = document.getElementById('ramen-inspect-toggle');
+    var on = false, current = null;
+
+    function setOn(v) {
+        on = v;
+        hl.classList.toggle('on', on);
+        btn.classList.toggle('on', on);
+        if (!on) { current = null; }
+    }
+    btn.addEventListener('click', function (e) { e.stopPropagation(); setOn(!on); });
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'i' && !/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName)) { setOn(!on); }
+        if (e.key === 'Escape') { setOn(false); }
+    });
+
+    function describe(el) {
+        var cs = getComputedStyle(el);
+        var r = el.getBoundingClientRect();
+        var role = el.getAttribute('data-role') || '';
+        var bits = [];
+        bits.push('<span class="t">&lt;' + el.tagName.toLowerCase() + '&gt;</span>');
+        if (role) { bits.push('<span class="r">' + role + '</span>'); }
+        bits.push('<span class="d">' + Math.round(r.width) + '\u00d7' + Math.round(r.height) + '</span>');
+        var bg = cs.backgroundColor;
+        if (bg && bg !== 'rgba(0, 0, 0, 0)') { bits.push(bg.replace(/\\s+/g, '')); }
+        if (parseFloat(cs.borderTopLeftRadius) > 0) { bits.push('r' + cs.borderTopLeftRadius); }
+        if (parseFloat(cs.borderTopWidth) > 0) { bits.push('bd ' + cs.borderTopWidth); }
+        if (cs.boxShadow && cs.boxShadow !== 'none') { bits.push('shadow'); }
+        if (el.classList.contains('pdf-text')) {
+            bits.push(Math.round(parseFloat(cs.fontSize)) + 'px ' + cs.fontWeight);
+        }
+        return bits.join(' \u00b7 ');
+    }
+
+    document.addEventListener('mousemove', function (ev) {
+        if (!on) { return; }
+        var el = document.elementFromPoint(ev.clientX, ev.clientY);
+        el = el && el.closest('.pdf-element');
+        if (!el) { box.style.display = 'none'; tip.style.display = 'none'; current = null; return; }
+        if (el !== current) { current = el; tip.innerHTML = describe(el); }
+        var r = el.getBoundingClientRect();
+        var sx = window.scrollX, sy = window.scrollY;
+        box.style.display = 'block';
+        box.style.left = (r.left + sx) + 'px';
+        box.style.top = (r.top + sy) + 'px';
+        box.style.width = r.width + 'px';
+        box.style.height = r.height + 'px';
+        tip.style.display = 'block';
+        var above = r.top > 26;
+        tip.style.left = (r.left + sx) + 'px';
+        tip.style.top = (above ? (r.top + sy - 24) : (r.bottom + sy + 6)) + 'px';
+    }, true);
+
     window.addEventListener('load', function () {
         var n = document.querySelectorAll('button').length;
         var h = document.querySelectorAll('h1,h2,h3,h4,h5,h6').length;
         toast('Reconstructed page ready \u2014 <b>' + n + '</b> real &lt;button&gt; and <b>'
-              + h + '</b> heading elements. Click a button.');
+              + h + '</b> heading elements. Click one, or press <b>i</b> to inspect.');
     });
 })();
 </script>
@@ -2808,9 +3024,15 @@ class HTMLRenderer:
 
     @staticmethod
     def render_document(doc: DocumentData, editable: bool = False, title: Optional[str] = None,
-                        interactive: bool = False) -> str:
+                        interactive: Optional[bool] = None) -> str:
         doc_title = title or doc.title or "Reconstructed PDF Document"
         pages_html = "\n\n".join([HTMLRenderer.render_page(p, editable=editable) for p in doc.pages])
+        # Default to on when the page actually contains promoted controls, so a
+        # reconstruction that claims to have buttons ships the means to check that
+        # claim. Pass interactive=False for a clean document.
+        if interactive is None:
+            interactive = any(e.role in ('button', 'badge', 'input')
+                              for p in doc.pages for e in p.elements)
         demo = INTERACTIVE_DEMO_SNIPPET if interactive else ""
 
         return f"""<!DOCTYPE html>
@@ -2831,7 +3053,7 @@ class HTMLRenderer:
 
 class Exporter:
     @staticmethod
-    def export_standalone_html(doc_data: DocumentData, interactive: bool = False) -> str:
+    def export_standalone_html(doc_data: DocumentData, interactive: Optional[bool] = None) -> str:
         return HTMLRenderer.render_document(doc_data, editable=False, interactive=interactive)
 
     @staticmethod

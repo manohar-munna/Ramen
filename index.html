@@ -551,6 +551,27 @@ html, body {
     background-color: rgba(59, 130, 246, 0.08);
 }
 
+/* Element inspector: highlights what is under the cursor and reports what it is,
+   so a reconstructed control can be identified at a glance without opening devtools. */
+#inspect-layer {
+    position: absolute; inset: 0; pointer-events: none; z-index: 900; display: none;
+}
+#inspect-layer.on { display: block; }
+#inspect-box {
+    position: absolute; border: 1px solid var(--accent-blue);
+    background-color: rgba(37, 99, 235, 0.16); border-radius: 2px;
+}
+#inspect-tip {
+    position: absolute; background-color: #0b1120; color: #e2e8f0;
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    padding: 5px 9px; white-space: nowrap;
+    font: 500 11.5px/1.45 var(--font-mono);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+}
+#inspect-tip .t { color: #7cc4ff; }
+#inspect-tip .r { color: #fbbf24; }
+#inspect-tip .d { color: var(--text-secondary); }
+
 /* Interactive Selection Box / Gizmo */
 .selection-box {
     position: absolute;
@@ -1333,6 +1354,14 @@ html, body {
                 Fidelity Diff
             </button>
 
+            <button id="btn-inspect" class="btn btn-secondary" title="Inspect elements (I)">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 3h7v7H3z"></path>
+                    <path d="M13 13l8 8"></path>
+                    <path d="M13 13h4v4"></path>
+                </svg>
+                Inspect
+            </button>
             <button id="btn-page-code" class="btn btn-secondary" title="View HTML and CSS of current page">
                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="16 18 22 12 16 6"></polyline>
@@ -1413,6 +1442,12 @@ html, body {
                 <!-- Page Container (Rendered PDF Pages) -->
                 <div id="document-stage" class="document-stage" style="display: none;">
                     <!-- Pages will be rendered here dynamically -->
+                </div>
+
+                <!-- DevTools-style element inspector overlay -->
+                <div id="inspect-layer" aria-hidden="true">
+                    <div id="inspect-box"></div>
+                    <div id="inspect-tip"></div>
                 </div>
 
                 <!-- Interactive Selection & Transform Gizmo -->
@@ -1650,6 +1685,8 @@ const state = {
     diffViewMode: 'split',     // 'split', 'slider', 'heatmap'
     sliderPos: 50,             // percent for split slider
     history: [],               // Undo history
+    inspecting: false,         // Element inspector active
+    inspectTarget: null,       // Element currently highlighted
 };
 
 // DOM References
@@ -1660,6 +1697,10 @@ const elements = {
     pdfFileInput: document.getElementById('pdf-file-input'),
     btnCompareMode: document.getElementById('btn-compare-mode'),
     btnPageCode: document.getElementById('btn-page-code'),
+    btnInspect: document.getElementById('btn-inspect'),
+    inspectLayer: document.getElementById('inspect-layer'),
+    inspectBox: document.getElementById('inspect-box'),
+    inspectTip: document.getElementById('inspect-tip'),
     btnExportDropdown: document.getElementById('btn-export-dropdown'),
     exportMenu: document.getElementById('export-menu'),
     btnModelSettings: document.getElementById('btn-model-settings'),
@@ -1757,6 +1798,14 @@ function init() {
 }
 
 function setupEventListeners() {
+    // Element inspector
+    elements.btnInspect.addEventListener('click', () => setInspectMode(!state.inspecting));
+    elements.canvasViewport.addEventListener('mousemove', onInspectMove);
+    elements.canvasViewport.addEventListener('mouseleave', () => {
+        elements.inspectBox.style.display = 'none';
+        elements.inspectTip.style.display = 'none';
+    });
+
     // Open PDF
     elements.btnOpenPdf.addEventListener('click', () => elements.pdfFileInput.click());
     elements.btnWelcomeOpen.addEventListener('click', () => elements.pdfFileInput.click());
@@ -2381,12 +2430,83 @@ function updateDOMElementGeometry(elem) {
     domElem.style.height = `${h}px`;
 }
 
+// ==========================================================================
+// Element Inspector
+// ==========================================================================
+function setInspectMode(on) {
+    state.inspecting = on;
+    elements.inspectLayer.classList.toggle('on', on);
+    elements.btnInspect.classList.toggle('active', on);
+    if (!on) state.inspectTarget = null;
+    setStatus(on ? 'Inspector on \u2014 hover an element, press I or Esc to exit' : 'Ready');
+}
+
+function describeElement(el) {
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    const role = el.getAttribute('data-role') || '';
+    const z = state.zoom || 1;
+    const bits = [`<span class="t">&lt;${el.tagName.toLowerCase()}&gt;</span>`];
+    if (role) bits.push(`<span class="r">${role}</span>`);
+    // Report the element's own size, not the size the current zoom happens to show.
+    bits.push(`<span class="d">${Math.round(r.width / z)}\u00d7${Math.round(r.height / z)}</span>`);
+    const bg = cs.backgroundColor;
+    if (bg && bg !== 'rgba(0, 0, 0, 0)') bits.push(bg.replace(/\s+/g, ''));
+    if (parseFloat(cs.borderTopLeftRadius) > 0) bits.push('r' + cs.borderTopLeftRadius);
+    if (parseFloat(cs.borderTopWidth) > 0) bits.push('bd ' + cs.borderTopWidth);
+    if (cs.boxShadow && cs.boxShadow !== 'none') bits.push('shadow');
+    if (el.classList.contains('pdf-text')) {
+        // Computed font-size is unaffected by the canvas zoom transform, unlike the
+        // measured rect above, so it must not be divided by it.
+        bits.push(`${Math.round(parseFloat(cs.fontSize))}px ${cs.fontWeight}`);
+    }
+    return bits.join(' \u00b7 ');
+}
+
+function onInspectMove(e) {
+    if (!state.inspecting) return;
+    let el = document.elementFromPoint(e.clientX, e.clientY);
+    el = el && el.closest('.pdf-element');
+    if (!el) {
+        elements.inspectBox.style.display = 'none';
+        elements.inspectTip.style.display = 'none';
+        state.inspectTarget = null;
+        return;
+    }
+    if (el !== state.inspectTarget) {
+        state.inspectTarget = el;
+        elements.inspectTip.innerHTML = describeElement(el);
+    }
+    const host = elements.canvasWrapper.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    const left = r.left - host.left, top = r.top - host.top;
+    elements.inspectBox.style.display = 'block';
+    elements.inspectBox.style.left = `${left}px`;
+    elements.inspectBox.style.top = `${top}px`;
+    elements.inspectBox.style.width = `${r.width}px`;
+    elements.inspectBox.style.height = `${r.height}px`;
+    elements.inspectTip.style.display = 'block';
+    elements.inspectTip.style.left = `${left}px`;
+    elements.inspectTip.style.top = `${top > 26 ? top - 25 : top + r.height + 6}px`;
+}
+
 function handleGlobalKeyDown(e) {
     // If typing inside an input, textarea, or contenteditable, don't trigger hotkeys
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) {
         return;
     }
     
+    if (e.key === 'i' || e.key === 'I') {
+        setInspectMode(!state.inspecting);
+        e.preventDefault();
+        return;
+    }
+    if (e.key === 'Escape' && state.inspecting) {
+        setInspectMode(false);
+        e.preventDefault();
+        return;
+    }
+
     if (state.selectedElementId) {
         const page = state.doc?.pages[state.currentPageIndex];
         const elem = page?.elements.find(el => el.id === state.selectedElementId);
