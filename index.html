@@ -2193,7 +2193,17 @@ function renderElementToDOM(elem, origin) {
         div.style.lineHeight = `${s.lineHeight || 1.0}`;
         if (s.letterSpacing) div.style.letterSpacing = `${s.letterSpacing}px`;
         div.style.margin = '0';
-        div.style.padding = '0';
+        // The box may have been widened to take in a leading icon; keep the glyphs
+        // where they were measured rather than letting them slide onto the icon.
+        div.style.padding = `0 0 0 ${s.paddingLeft || 0}px`;
+        if (elem.tag === 'button' || elem.tag === 'a') {
+            div.style.background = 'none';
+            div.style.border = '0 none';
+            div.style.appearance = 'none';
+            div.style.font = 'inherit';
+            div.style.textDecoration = 'none';
+            div.style.cursor = 'pointer';
+        }
         // Paragraphs reflow; a single fitted run must not, or it drifts off the ink box
         // its size and position were solved against.
         div.style.whiteSpace = (elem.tag === 'p') ? 'normal' : 'pre';

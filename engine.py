@@ -62,6 +62,9 @@ class TextStyle(BaseModel):
     letterSpacing: Optional[float] = 0.0
     backgroundColor: Optional[str] = None
     opacity: float = 1.0
+    # Left inset, used when an element's box was widened to take in a leading icon so
+    # that the text still starts where it was measured rather than on top of the icon.
+    paddingLeft: float = 0.0
 
 class TextSpan(BaseModel):
     text: str
@@ -1469,6 +1472,28 @@ def _edge_straightness(filled: np.ndarray, radius: float) -> float:
     # 0 px deviation -> 1.0; 3 px or worse -> 0.0
     return float(max(0.0, 1.0 - (sum(scores) / len(scores)) / 3.0))
 
+def _boundary_is_real(img, x, y, cw, ch, filled) -> float:
+    """Fraction of a candidate's outline that sits on an actual edge in the source.
+
+    Hole-filling turns any blob into a plausible rectangle, so a band of a gradient
+    comes back with straight sides and symmetric corners just like a card does. The
+    difference is that a card has a visible boundary all the way round, while the
+    band's rectangle is invented -- most of its outline cuts through smooth pixels.
+    """
+    patch = img[y:y+ch, x:x+cw]
+    if patch.size == 0 or min(cw, ch) < 6:
+        return 1.0
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag = cv2.magnitude(gx, gy)
+    strong = cv2.dilate((mag > 22.0).astype(np.uint8), _K3, iterations=1)
+    band = cv2.subtract(filled, cv2.erode(filled, _K3, iterations=1))
+    total = int(band.sum())
+    if total < 12:
+        return 1.0
+    return float((band & strong).sum()) / total
+
 def _rect_evidence(filled, cw, ch, f_area, box_area, region_px) -> Tuple[float, float]:
     """Scores 'is a rounded rectangle' from several independent signals.
 
@@ -1548,7 +1573,27 @@ def _classify_region(img, x, y, cw, ch, comp, area, text_ink=None) -> Optional[S
                            border_color=color, border_width=round(max(ring_thickness, 1.0), 1))
         if hole_is_text:
             return None
-        return Surface(bbox, filled, color, 'complex', 0.0, area, fill_ratio)
+
+        # Not a ring after all. A container is perforated by everything drawn on top of
+        # it, so its own fill covers only part of its box and looks annular by area
+        # alone -- calling that complex is what reduced entire cards to photographs.
+        # But a band of a gradient hole-fills into a plausible rectangle too, and
+        # painting those as solid blocks wrecks the illustration. What separates them is
+        # the perimeter: a container's fill wraps the whole way round its own edge.
+        band = cv2.subtract(filled, cv2.erode(filled, _K3, iterations=2))
+        band_px = int(band.sum())
+        if band_px > 0 and float((band & comp).sum()) / band_px < 0.75:
+            return Surface(bbox, filled, color, 'complex', 0.0, area, fill_ratio)
+
+        # And check what is actually inside. A container's holes are the content drawn
+        # on it -- text, icons, images -- so they vary wildly. A gradient band's holes
+        # are its neighbouring shades, which barely vary at all. Painting one of those
+        # as a solid box replaces a gradient with a flat slab.
+        hole = (filled > 0) & (comp == 0)
+        if hole.sum() >= 40:
+            hole_px = img[y:y+ch, x:x+cw][hole].reshape(-1, 3).astype(np.float32)
+            if float(hole_px.std(axis=0).max()) < 26.0:
+                return Surface(bbox, filled, color, 'complex', 0.0, area, fill_ratio)
 
     # A shape running off the page edge is only partly observed, so its fill ratio is
     # inflated and the plain ellipse test below rejects it -- which is what turned the
@@ -1589,7 +1634,7 @@ def _classify_region(img, x, y, cw, ch, comp, area, text_ink=None) -> Optional[S
             return Surface(bbox, filled, color, 'ellipse', 0.0, area, fill_ratio)
 
     rect_score, radius = _rect_evidence(filled, cw, ch, f_area, box_area, region_px)
-    if rect_score >= 0.62:
+    if rect_score >= 0.62 and _boundary_is_real(img, x, y, cw, ch, filled) >= 0.35:
         return Surface(bbox, filled, color, 'rect', radius, area, fill_ratio)
 
     return Surface(bbox, filled, color, 'complex', 0.0, area, fill_ratio)
@@ -1865,8 +1910,15 @@ def score_button(surf: 'Surface', ctx) -> float:
         score += 0.15
 
     tx0, tx1 = run['bbox'][0], run['bbox'][2]
-    if abs(((tx0 + tx1) / 2.0) - ((surf.bbox[0] + surf.bbox[2]) / 2.0)) <= max(10.0, w * 0.10):
+    centred = abs(((tx0 + tx1) / 2.0) - ((surf.bbox[0] + surf.bbox[2]) / 2.0)) <= max(10.0, w * 0.10)
+    if centred:
         score += 0.20
+    elif aspect > 3.0:
+        # A wide box whose label hugs the left edge is a field, not a button. Centring
+        # is the defining trait of a control's label, so its absence has to disqualify
+        # rather than merely cost points -- generic traits alone were carrying a search
+        # field past the threshold.
+        return min(score, 0.45)
     if len(label) <= 30:
         score += 0.10
     if 60 <= w <= 420 and 24 <= h <= 72 and 1.4 <= aspect <= 12.0:
@@ -1889,18 +1941,95 @@ def score_input(surf: 'Surface', ctx) -> float:
         return 0.0
 
     run = surf.texts[0] if surf.texts else None
-    score = 0.0
-    if _luminance(surf.color) > 200 or surf.border_width > 0:
-        score += 0.15
-    score += 0.15                                        # aspect already gated above
+    # A text field is a light box. Without this as a gate, a saturated CTA scored as an
+    # input because its white label passed the "placeholder grey is bright" test.
+    if _luminance(surf.color) <= 200 and surf.border_width <= 0:
+        return 0.0
+
+    score = 0.30                                         # pale fill + gated aspect
     if surf.radius >= 3.0:
         score += 0.10
     if run is not None and _luminance(run.get('color', '#000000')) > 120:
         score += 0.20                                    # placeholder grey, not body copy
+    if run is not None:
+        inset = run['bbox'][0] - surf.bbox[0]
+        if 4.0 <= inset <= w * 0.25 and (surf.bbox[2] - run['bbox'][2]) > w * 0.25:
+            score += 0.20                                # text starts at a left inset and
+                                                         # leaves the field mostly empty
     if _leading_icon(ctx, surf, run):
         score += 0.25
     if _interior_ink(ctx, surf, [run['bbox']] if run else []) < 0.05:
         score += 0.15
+    return score
+
+def score_icon_button(surf: 'Surface', ctx) -> float:
+    """Evidence that a textless shape is an icon-only control.
+
+    A carousel arrow or a close button carries no label at all, so the label-based
+    button score cannot see it. What it does have is a control-sized shape, a fill that
+    stands off its background, and a small glyph floating in the middle of its own
+    padding -- which is what separates it from a logo or an avatar, where the artwork
+    fills the shape edge to edge.
+    """
+    if surf.texts or surf.color is None:
+        return 0.0
+    w, h = surf.width, surf.height
+    if not (22 <= min(w, h) <= 76 and 0.78 <= w / max(h, 1.0) <= 1.28):
+        return 0.0
+    rounded = surf.shape == 'ellipse' or surf.radius >= min(w, h) * 0.25
+    if not rounded:
+        return 0.0
+
+    ink = _interior_ink(ctx, surf, [])
+    if not (0.04 <= ink <= 0.42):
+        return 0.0                     # empty decoration, or artwork filling the shape
+
+    # The glyph must float in the middle of its own padding. An illustration fragment
+    # has marks running to its edges, and that is what separates a control from a piece
+    # of artwork that merely happens to be round and the right size.
+    img = ctx['img']
+    x0, y0, x1, y1 = [int(v) for v in surf.bbox]
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(img.shape[1], x1), min(img.shape[0], y1)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return 0.0
+    c = surf.color.lstrip('#')
+    fill = np.array([int(c[4:6], 16), int(c[2:4], 16), int(c[0:2], 16)], dtype=np.int32)
+    patch = img[y0:y1, x0:x1].astype(np.int32)
+    ph, pw = patch.shape[:2]
+
+    def probe(scale):
+        """The shape itself, shrunk -- never its bounding box, whose corners sit
+        outside a circle and would always read as marks."""
+        m = np.zeros((ph, pw), np.uint8)
+        if surf.shape == 'ellipse':
+            cv2.ellipse(m, (pw // 2, ph // 2),
+                        (max(int(pw * scale), 1), max(int(ph * scale), 1)), 0, 0, 360, 1, -1)
+        else:
+            iy, ix = int(ph * (0.5 - scale)), int(pw * (0.5 - scale))
+            m[iy:ph - iy, ix:pw - ix] = 1
+        return m.astype(bool)
+
+    interior, core = probe(0.42), probe(0.30)
+    marks = (np.abs(patch - fill).max(axis=2) > 26) & interior
+    if marks.sum() < 12:
+        return 0.0
+    if (marks & ~core).sum() > marks.sum() * 0.45:
+        return 0.0                     # marks run to the edge: artwork, not a glyph
+    ys, xs = np.nonzero(marks)
+    if (abs(ys.mean() - ph / 2.0) > ph * 0.22) or (abs(xs.mean() - pw / 2.0) > pw * 0.22):
+        return 0.0                     # off-centre: not a glyph sitting in its padding
+
+    parent_fill = surf.parent.color if (surf.parent and surf.parent.color) else ctx['page_bg']
+    score = 0.35                       # shape, size and glyph-with-padding all gated above
+    if _contrast(surf.color, parent_fill) > 0.08:
+        score += 0.25
+    if surf.shape == 'ellipse':
+        score += 0.15
+    if 0.08 <= ink <= 0.30:
+        score += 0.15                  # a glyph, comfortably inset
+    if not surf.children:
+        score += 0.10
     return score
 
 def score_card(surf: 'Surface', ctx) -> float:
@@ -1938,10 +2067,14 @@ def classify_surface_role(surf: 'Surface', ctx) -> Tuple[str, str, float]:
     b = score_button(surf, ctx)
     i = score_input(surf, ctx)
     c = score_card(surf, ctx)
-    best = max(b, i, c)
+    k = score_icon_button(surf, ctx)
+    best = max(b, i, c, k)
 
     if best < 0.50:
         return ('shape' if surf.shape == 'ellipse' else 'surface'), 'div', best
+
+    if k == best and k >= 0.75:
+        return 'icon-button', 'button', k
 
     if b == best and b >= 0.75:
         run = surf.texts[0]
@@ -1960,20 +2093,13 @@ def classify_surface_role(surf: 'Surface', ctx) -> Tuple[str, str, float]:
 def _same_run_style(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
     """Whether two runs look like members of one set.
 
-    Weight is deliberately ignored and colour only loosely constrained: a nav marks its
-    active item bold, and an upvote count is tinted when active. Requiring those to
-    match exactly split real groups apart, and the rhythm of the gaps is much stronger
-    evidence of a set than uniform styling is.
+    Only size is compared. Weight and colour both vary legitimately inside a real set --
+    a nav marks its active item bold, an upvote count is tinted when it is active -- and
+    requiring either to match split genuine groups apart. The rhythm of the gaps, which
+    the caller checks, is far stronger evidence of a set than uniform styling is.
     """
     big = max(a['fontSize'], b['fontSize'], 1.0)
-    if abs(a['fontSize'] - b['fontSize']) / big > 0.22:
-        return False
-    try:
-        ca, cb = a['color'].lstrip('#'), b['color'].lstrip('#')
-        d = sum((int(ca[i:i+2], 16) - int(cb[i:i+2], 16)) ** 2 for i in (0, 2, 4)) ** 0.5
-    except Exception:
-        return True
-    return d <= 70.0
+    return abs(a['fontSize'] - b['fontSize']) / big <= 0.20
 
 def _consistent(gaps: List[float], tol: float = 0.45) -> bool:
     """True when a sequence of gaps reads as a deliberate rhythm rather than chance."""
@@ -2023,6 +2149,25 @@ def find_leading_mark(img, text_ink, run, reach: float = 52.0):
     ys, xs = np.nonzero(mark)
     return [float(lx0 + xs.min()), float(ly0 + ys.min()),
             float(lx0 + xs.max() + 1), float(ly0 + ys.max() + 1)]
+
+def _in_wrapped_block(r: Dict[str, Any], pool: List[Dict[str, Any]]) -> bool:
+    """True when a run is one line of a multi-line label rather than a standalone item.
+
+    Three two-line captions side by side produce two rows that look exactly like a row
+    of controls: same count, same rhythm, each with a leading icon. The difference is
+    that each caption continues onto the next line, and a control does not.
+    """
+    for o in pool:
+        if o is r or not _same_run_style(r, o):
+            continue
+        if abs(o['bbox'][0] - r['bbox'][0]) > 8.0:
+            continue
+        below = o['bbox'][1] - r['bbox'][3]
+        above = r['bbox'][1] - o['bbox'][3]
+        limit = max(r['fontSize'] * 0.9, 6.0)
+        if -3.0 <= below <= limit or -3.0 <= above <= limit:
+            return True
+    return False
 
 def detect_sibling_groups(runs: List[Dict[str, Any]], img, text_ink,
                           page_w: float, page_h: float) -> List[Dict[str, Any]]:
@@ -2104,8 +2249,12 @@ def detect_sibling_groups(runs: List[Dict[str, Any]], img, text_ink,
             g['role'], g['tag'] = 'listitem', 'a'
         elif (g['axis'] == 'row' and labels_short
               and with_marks >= max(2, len(members) - 1)
-              and members[0].get('host') is not None
-              and all(r.get('host') is members[0].get('host') for r in members)):
+              and sum(1 for r in members
+                      if r.get('host_role') in ('card', 'panel')) >= len(members) - 1
+              and sum(1 for r in members if _in_wrapped_block(r, free)) <= len(members) // 2):
+            # Inside a card, a row of icon-and-label pairs is a toolbar. The same shape
+            # on the page background is a set of feature callouts, so what separates
+            # them is the container, not the pairs themselves.
             g['role'], g['tag'] = 'action', 'button'
         else:
             # Repetition alone is not evidence of interactivity. Keep the members
@@ -2415,6 +2564,39 @@ class ImageReconstructor:
         return runs, text_mask
 
     @staticmethod
+    def _dedupe_surfaces(surfaces: List['Surface']) -> List['Surface']:
+        """Collapses near-identical surfaces produced by colour quantisation.
+
+        One painted fill can straddle a quantisation boundary and come back as two
+        components a shade apart occupying the same box. Both then compete: the text
+        attaches to whichever is innermost, leaving its twin an unpromoted div sitting
+        over the real control. Keeping the larger of each pair removes the competition.
+        """
+        kept: List['Surface'] = []
+        for s in sorted(surfaces, key=lambda s: -(s.width * s.height)):
+            dup = False
+            for k in kept:
+                if compute_bbox_iou(s.bbox, k.bbox) < 0.75:
+                    continue
+                if s.color is None or k.color is None:
+                    dup = True
+                    break
+                a, b = s.color.lstrip('#'), k.color.lstrip('#')
+                try:
+                    d = sum((int(a[i:i+2], 16) - int(b[i:i+2], 16)) ** 2 for i in (0, 2, 4)) ** 0.5
+                except Exception:
+                    d = 999.0
+                if d <= 24.0:
+                    # Keep whichever carries the stronger corner evidence.
+                    if s.radius > k.radius:
+                        k.radius = s.radius
+                    dup = True
+                    break
+            if not dup:
+                kept.append(s)
+        return kept
+
+    @staticmethod
     def _merge_borders(surfaces: List['Surface']) -> List['Surface']:
         """Folds an outline ring into the fill it encloses, yielding one bordered box."""
         rings = [s for s in surfaces if s.color is None and s.border_color]
@@ -2616,6 +2798,7 @@ class ImageReconstructor:
         # A bordered control arrives as two regions: a ring and the fill inside it.
         # Fold the ring into the fill so it becomes one element with a real border.
         paintable = ImageReconstructor._merge_borders(paintable)
+        paintable = ImageReconstructor._dedupe_surfaces(paintable)
 
         build_containment(paintable)
         assign_texts(paintable, text_runs)
@@ -2642,15 +2825,22 @@ class ImageReconstructor:
         sibling_groups = detect_sibling_groups(text_runs, img, text_ink_mask, w, h)
         for g in sibling_groups:
             if g['role'] == 'group-item':
+                # Repetition alone only buys consistency among members that have no
+                # semantic tag yet. Stacked headlines share a left edge and a rhythm
+                # like any column group, and overwriting them here demoted every
+                # heading on the page back to a span.
                 for r in g['members']:
-                    r['tag'] = 'span'
+                    if not r.get('tag'):
+                        r['tag'] = 'span'
                 continue
             for r, mark in zip(g['members'], g['marks']):
                 r['tag'], r['role'] = g['tag'], g['role']
                 r['grouped'] = True
                 if mark:
                     b = r['bbox']
-                    r['bbox'] = [min(b[0], mark[0]), min(b[1], mark[1]),
+                    new_x0 = min(b[0], mark[0])
+                    r['style'].paddingLeft = max(0.0, b[0] - new_x0)
+                    r['bbox'] = [new_x0, min(b[1], mark[1]),
                                  max(b[2], mark[2]), max(b[3], mark[3])]
 
         elements: List[DocumentElement] = []
@@ -2893,6 +3083,11 @@ button.pdf-rect, .pdf-rect button { cursor: pointer; }
 .pdf-text { margin: 0; padding: 0; }
 h1.pdf-text, h2.pdf-text, h3.pdf-text, h4.pdf-text, h5.pdf-text, h6.pdf-text,
 p.pdf-text { margin: 0; padding: 0; font-weight: inherit; font-size: inherit; }
+button.pdf-text, a.pdf-text, span.pdf-text {
+    background: none; border: 0 none; appearance: none; -webkit-appearance: none;
+    font: inherit; color: inherit; text-decoration: none; text-align: inherit;
+}
+button.pdf-text { cursor: pointer; }
 @media print {
     body.reconstructed-doc { padding: 0; background: transparent; gap: 0; }
     .pdf-page { box-shadow: none; page-break-after: always; break-after: page; margin: 0; }
@@ -3060,9 +3255,10 @@ class HTMLRenderer:
         raw_ls = float(s.letterSpacing) if (s and s.letterSpacing) else 0.0
         ls = f"letter-spacing: {raw_ls:.2f}px; " if abs(raw_ls) > 0.01 else ""
         bg = f"background-color: {s.backgroundColor};" if (s and s.backgroundColor) else ""
+        pl = float(s.paddingLeft) if (s and s.paddingLeft) else 0.0
         return (f"font-family: {ff}; font-size: {fs:.2f}px; font-weight: {fw}; "
                 f"font-style: {fst}; color: {col}; text-align: {ta}; "
-                f"line-height: {lh:.3f}; {ls}{bg}")
+                f"line-height: {lh:.3f}; {ls}margin: 0; padding: 0 0 0 {pl:.2f}px; {bg}")
 
     @staticmethod
     def render_element(elem: DocumentElement, editable: bool = True,
@@ -3125,7 +3321,7 @@ class HTMLRenderer:
             # and must not reflow, or they would drift off the coordinates they were fitted to.
             wrap = "white-space: normal; overflow-wrap: break-word;" if tag == 'p' else "white-space: nowrap;"
             text_style = (f"{common_style} {HTMLRenderer._text_css(elem.style)} "
-                          f"margin: 0; padding: 0; {wrap} overflow: visible;")
+                          f"{wrap} overflow: visible;")
 
             if elem.spans and len(elem.spans) > 1:
                 base = elem.style
