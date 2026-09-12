@@ -71,7 +71,7 @@ def get_index():
 
 @app.get("/sample.pdf")
 def get_sample_pdf():
-    sample_path = os.path.join(BASE_DIR, "sample.pdf")
+    sample_path = os.path.join(BASE_DIR, "benchmarks", "pdfs", "sample.pdf")
     if os.path.exists(sample_path):
         return FileResponse(sample_path, media_type="application/pdf")
     raise HTTPException(status_code=404, detail="sample.pdf not found")

@@ -45,21 +45,43 @@ A desktop-first application that reconstructs PDF documents into **pixel-perfect
 
 ---
 
-## Simplified Directory Structure
+## Directory Structure
 
 ```text
 Ramen/
-├── app.py           # FastAPI backend server & REST API endpoints
-├── engine.py        # Complete deterministic reconstruction engine (schema, extractors, renderer, fidelity, exporter)
-├── index.html       # Unified single-page desktop editor UI (HTML, CSS, JS integrated)
-├── sample.pdf       # Sample test PDF
-├── test_app.py      # Comprehensive test suite for engine & API endpoints
-├── requirements.txt # Python dependencies
-├── .gitignore       # Git ignore configuration
-└── README.md        # Documentation
+├── app.py                  # FastAPI server & REST API endpoints
+├── engine.py               # Reconstruction engine (schema, extractors, renderer, exporter)
+├── index.html              # Single-page desktop editor UI
+├── test_app.py             # Test suite for engine & API
+├── requirements.txt
+├── benchmarks/             # Everything the engine is measured against
+│   ├── images/             # Reference screenshots for the image -> HTML path
+│   ├── pdfs/               # Reference PDFs for the digital path
+│   └── ground_truth/       # Hand-read component lists, one JSON per image
+├── tools/
+│   ├── eval_image.py       # Fidelity (SSIM / pixel diff) for the image path
+│   ├── eval_pdf.py         # Fidelity for the digital PDF path
+│   └── audit_components.py # Component-level accuracy against ground truth
+└── scratch/                # Working area, gitignored: renders, composites, debug
 ```
 
----
+## Measuring
+
+```bash
+python tools/eval_image.py                 # every image in benchmarks/images
+python tools/eval_image.py path/to/one.png # or just one
+python tools/eval_pdf.py                   # the 20-page PDF benchmark
+python tools/audit_components.py           # component accuracy where ground truth exists
+```
+
+**Adding a reference**: drop a screenshot into `benchmarks/images/`. Fidelity tooling
+picks it up with no further setup. To score component accuracy on it as well, add
+`benchmarks/ground_truth/<same-name>.json` listing what the page actually contains —
+see `reddit-ads-hero.json` for the shape.
+
+Fidelity tells you whether the page *looks* right; the component audit tells you
+whether a button is a button. They disagree often, and the audit is the one worth
+optimising — SSIM read 89% on a page where 18 of 25 components carried the wrong tag.
 
 ## Quick Start
 

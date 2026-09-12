@@ -464,20 +464,31 @@ def ink_top_offset(text: str, font_size: float, line_px: float, bold: bool) -> f
     content = (ascent + descent) * scale
     return (line_px - content) / 2.0 + ink[1] * scale
 
-def erase_text_from_crop(crop: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
+def erase_text_from_crop(crop: np.ndarray, text_mask: np.ndarray,
+                         textured: bool = False) -> np.ndarray:
     """Paints out masked text pixels so a raster crop can sit underneath live text.
 
-    UI screenshots are dominated by flat fills, so each masked region is filled with
-    the median colour of the ring of pixels immediately surrounding it — that restores
-    a button's solid fill far more cleanly than inpainting, which smears gradients
-    across the glyphs. Falls back to Telea inpainting when a region has no clean ring
-    (e.g. text running to the crop edge).
+    Which method is right depends on what the text sits on. Over a flat fill, taking
+    the median of the ring immediately around each glyph restores a button's solid
+    colour exactly, where inpainting would smear a gradient across it. Over a
+    photograph that same fill lands as a visible flat patch, because the surroundings
+    are not one colour -- which is what left ghost blocks behind the headline copy on a
+    photo-backed page. There, inpainting is the correct tool: it propagates the
+    surrounding texture into the hole instead of averaging it away.
+
+    The mask is also grown before erasing. A glyph's antialiased rim sits below the
+    threshold that detected its core, and leaving that rim behind outlines every letter
+    that was supposedly removed.
     """
     if crop.size == 0 or not np.any(text_mask):
         return crop
 
     out = crop.copy()
-    mask = (text_mask > 0).astype(np.uint8)
+    mask = cv2.dilate((text_mask > 0).astype(np.uint8), _K3, iterations=2)
+
+    if textured:
+        return cv2.inpaint(out, mask * 255, 4, cv2.INPAINT_NS)
+
     num, labels = cv2.connectedComponents(mask)
 
     ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
@@ -3056,22 +3067,30 @@ class ImageReconstructor:
             px1 = max(r['bbox'][2] for r in group)
             py1 = max(r['bbox'][3] for r in group)
             lead = group[0]
-            pitch = max(group[1]['bbox'][1] - group[0]['bbox'][1], 1.0)
-            fs = max(lead['style'].fontSize, 1.0)
-            style = lead['style'].model_copy(update={'lineHeight': round(pitch / fs, 3)})
-            # Shift the block up by however far the first line's ink now sits below the
-            # element top, so switching to the measured pitch does not move line one.
-            py0 -= ink_top_offset(lead['text'], fs, pitch, lead['fontWeight'] == 'bold')
+            host = lead.get('host')
+
+            # The paragraph is a real <p>, but its lines keep the positions they were
+            # measured at. Joining the text and letting the browser re-wrap it breaks
+            # at different points than the original -- the substitute face is not the
+            # same width -- so the block gained a line and overprinted whatever sat
+            # below it. Each line stays a placed child instead.
+            para_id = next_id('para')
+            elements.append(DocumentElement(
+                id=para_id, type='text',
+                bbox=[float(px0), float(py0), float(px1), float(py1)],
+                tag='p', role='paragraph', confidence=0.75,
+                parentId=surface_ids.get(id(host)) if host is not None else None,
+                zIndex=Z_SURFACE + depths.get(id(host), 0) * Z_STEP + Z_TEXT,
+            ))
             for r in group:
                 r['consumed'] = True
-            elements.append(DocumentElement(
-                id=next_id('para'), type='text',
-                bbox=[float(px0), float(py0), float(px1), float(py1)],
-                text=' '.join(r['text'] for r in group),
-                tag='p', role='paragraph', style=style, confidence=0.75,
-                parentId=surface_ids.get(id(lead.get('host'))) if lead.get('host') is not None else None,
-                zIndex=Z_SURFACE + depths.get(id(lead.get('host')), 0) * Z_STEP + Z_TEXT,
-            ))
+                elements.append(DocumentElement(
+                    id=next_id('text'), type='text',
+                    bbox=[float(v) for v in r['bbox']],
+                    text=r['text'], tag='span', role='paragraph-line',
+                    style=r['style'], parentId=para_id,
+                    zIndex=Z_SURFACE + depths.get(id(host), 0) * Z_STEP + Z_TEXT,
+                ))
 
         for run in text_runs:
             if run.get('consumed'):
@@ -3097,7 +3116,7 @@ class ImageReconstructor:
                 continue
             local_ink = text_mask[py:py+ph, px:px+pw]
             if np.any(local_ink):
-                crop = erase_text_from_crop(crop, local_ink)
+                crop = erase_text_from_crop(crop, local_ink, textured=True)
             ok, enc = cv2.imencode('.png', crop)
             if not ok:
                 continue

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import ImageReconstructor  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TRUTH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ground_truth")
+TRUTH_DIR = os.path.join(REPO_ROOT, "benchmarks", "ground_truth")
 MATCH_IOU = 0.35            # below this, nothing meaningful was produced there
 
 # A ground-truth tag is satisfied by any of these emitted tags.

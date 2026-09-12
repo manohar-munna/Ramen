@@ -6,6 +6,7 @@ original. Writes a [original | reconstruction | heatmap] composite for eyeballin
 
 Usage:  python tools/eval_image.py <image> [<image> ...]
 """
+import glob
 import os
 import subprocess
 import sys
@@ -103,7 +104,8 @@ def evaluate(image_path, chrome):
 
 
 def main():
-    targets = sys.argv[1:] or ["Screenshot 2026-09-11 223916.png"]
+    targets = sys.argv[1:] or sorted(
+        glob.glob(os.path.join(REPO_ROOT, "benchmarks", "images", "*.png")))
     chrome = find_chrome()
     results = []
     for t in targets:
