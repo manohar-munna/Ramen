@@ -1379,6 +1379,92 @@ class DigitalExtractor:
         )
 
 # ==============================================================================
+# 7a. CONTENT-TYPE SEGMENTATION  (what kind of thing is this region?)
+# ==============================================================================
+
+PHOTO_TILE = 24
+PHOTO_MIN_COLOURS = 20      # distinct quantised colours in a tile before it reads as texture
+PHOTO_MIN_STD = 9.0         # luminance spread within a tile
+PHOTO_MIN_REGION = 0.010    # fraction of the page a photographic region must cover
+GRADIENT_MIN_DRIFT = 1.2    # a flat fill does not drift between neighbouring tiles
+GRADIENT_MAX_DRIFT = 16.0   # beyond this it is a boundary, not a ramp
+
+def photographic_mask(img: np.ndarray, text_ink: Optional[np.ndarray] = None,
+                      tile: int = PHOTO_TILE) -> np.ndarray:
+    """Marks the areas of an image that are photographic or heavily textured.
+
+    Everything downstream assumes a page is built from flat fills, and on a flat design
+    that holds. On a photograph it fails catastrophically and silently: colour
+    segmentation returns hundreds of organic blobs, hole-filling squares each one off
+    into a convincing rounded rectangle, and because every slab is painted with its own
+    region's median colour the result matches the source closely enough per pixel that
+    the residual pass finds nothing left to rasterise. A forest comes back as 274 flat
+    slabs and no image at all.
+
+    The missing question is not whether a particular candidate looks like a rectangle --
+    it is whether this part of the page is interface in the first place. Texture answers
+    it: interface is flat and its edges are axis-aligned, photographs are neither.
+
+    Glyphs are excluded before measuring, since text is high-variance everywhere and
+    would otherwise drag whole paragraphs into the photographic class.
+    """
+    h, w = img.shape[:2]
+    quant = (cv2.medianBlur(img, 3).astype(np.int32) // 8 * 8)
+    packed = (quant[:, :, 0] << 16) | (quant[:, :, 1] << 8) | quant[:, :, 2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    th, tw = (h + tile - 1) // tile, (w + tile - 1) // tile
+    flags = np.zeros((th, tw), np.uint8)
+    means = np.zeros((th, tw, 3), np.float32)
+    texty = np.zeros((th, tw), bool)
+    for ty in range(th):
+        y0, y1 = ty * tile, min(h, (ty + 1) * tile)
+        for tx in range(tw):
+            x0, x1 = tx * tile, min(w, (tx + 1) * tile)
+            means[ty, tx] = img[y0:y1, x0:x1].reshape(-1, 3).mean(axis=0)
+            if text_ink is not None and float(np.count_nonzero(text_ink[y0:y1, x0:x1])) \
+                    > 0.22 * (y1 - y0) * (x1 - x0):
+                texty[ty, tx] = True
+                continue                        # a tile of type, not of texture
+            if len(np.unique(packed[y0:y1, x0:x1])) >= PHOTO_MIN_COLOURS \
+                    and float(gray[y0:y1, x0:x1].std()) >= PHOTO_MIN_STD:
+                flags[ty, tx] = 255
+
+    # Smooth photographic areas -- fog, sky, a soft background blur -- carry almost
+    # no local texture and would pass as flat fill. What separates them from a real
+    # fill is that a fill is piecewise constant: neighbouring tiles either match it
+    # exactly or sit across a hard boundary. A gradient drifts, by a little,
+    # everywhere.
+    if th >= 3 and tw >= 3:
+        drift = np.zeros((th, tw), np.float32)
+        for dy, dx in ((0, 1), (1, 0), (0, -1), (-1, 0)):
+            shifted = np.roll(np.roll(means, dy, axis=0), dx, axis=1)
+            drift = np.maximum(drift, np.abs(means - shifted).max(axis=2))
+        ramp = ((drift >= GRADIENT_MIN_DRIFT) & (drift <= GRADIENT_MAX_DRIFT)
+                & (~texty))
+        flags[ramp] = 255
+
+    raw = cv2.resize(flags, (w, h), interpolation=cv2.INTER_NEAREST)
+    # Join neighbouring textured tiles; a photograph is continuous, stray tiles are not.
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (tile * 2 + 1, tile * 2 + 1))
+    joined = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, k)
+    # Two masks with different jobs. `raw` vetoes component detection and must stay
+    # tight, because a flat control sitting on a photograph is still a control and the
+    # joined mask would swallow it. `joined` bounds the area kept as pixels.
+    return raw, joined
+
+def photographic_regions(mask: np.ndarray, page_area: float,
+                         min_frac: float = PHOTO_MIN_REGION) -> List[Tuple[int, int, int, int]]:
+    """Connected photographic areas large enough to be worth keeping as pixels."""
+    n, lab, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    out = []
+    for i in range(1, n):
+        x, y, cw, ch, area = stats[i]
+        if area >= page_area * min_frac and cw >= 24 and ch >= 24:
+            out.append((int(x), int(y), int(cw), int(ch)))
+    return out
+
+# ==============================================================================
 # 7b. SURFACE ANALYSIS  (flat fills -> real CSS boxes)
 # ==============================================================================
 
@@ -1392,6 +1478,7 @@ Z_SURFACE = 2      # a surface sits at its own depth
 Z_STEP = 10        # each nesting level gets its own band
 Z_ART = 3          # artwork rides just above the surface that contains it
 Z_CONTROL = 4      # a promoted control outranks decoration that merely overlaps it
+Z_BACKDROP = 1     # photographic ground sits beneath every component drawn on it
 Z_TABLE = 5
 Z_TEXT = 6         # text is the top layer within its band
 
@@ -1656,7 +1743,7 @@ def _corners_symmetric(filled: np.ndarray, tol: float = 0.34) -> bool:
     return (max(missing) - min(missing)) <= tol
 
 def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray] = None,
-                    max_colors: int = 90) -> List[Surface]:
+                    max_colors: int = 90, photo_mask: Optional[np.ndarray] = None) -> List[Surface]:
     """Segments the image into flat-filled regions by quantised colour.
 
     UI is built from flat fills, so connected regions of one colour recover the real
@@ -1692,6 +1779,17 @@ def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray
             if text_ink is not None:
                 overlap = float(np.count_nonzero(comp & text_ink[y:y+ch, x:x+cw]))
                 if overlap / float(area) > 0.45:
+                    continue
+
+            # A shade of a photograph is not a component, however rectangular its
+            # filled hull happens to look. The test is on the region's interior: tiles
+            # straddling the edge of a flat control pick up the texture around it, and
+            # judging on those vetoes real controls that merely sit on a photograph.
+            if photo_mask is not None:
+                core = cv2.erode(comp, _K3, iterations=2)
+                probe = core if np.any(core) else comp
+                inside = float(np.count_nonzero(probe & (photo_mask[y:y+ch, x:x+cw] > 0)))
+                if inside / float(max(np.count_nonzero(probe), 1)) > 0.6:
                     continue
 
             surf = _classify_region(img, x, y, cw, ch, comp, area, text_ink)
@@ -2623,7 +2721,8 @@ class ImageReconstructor:
 
     @staticmethod
     def _extract_residual_art(img, w, h, mean_bg, text_mask, paintable,
-                              asset_dir, surface_ids=None, depths=None) -> List[DocumentElement]:
+                              asset_dir, surface_ids=None, depths=None,
+                              explained=None) -> List[DocumentElement]:
         """Rasterises whatever no surface or text run explained.
 
         This is the deliberate fallback for complex artwork -- gradients, mascots,
@@ -2687,6 +2786,10 @@ class ImageReconstructor:
         ink = cv2.dilate(text_mask, _K3, iterations=1)
         if rim is not None:
             ink = cv2.bitwise_or(ink, rim)
+        if explained is not None:
+            # Already kept verbatim as a backdrop; re-cropping it would stack a second
+            # copy of the same pixels on top of the first.
+            ink = cv2.bitwise_or(ink, explained)
         residual = cv2.bitwise_and(content, cv2.bitwise_not(ink))
         residual = cv2.morphologyEx(residual, cv2.MORPH_OPEN, _K3)
 
@@ -2789,10 +2892,14 @@ class ImageReconstructor:
         # 3. Text runs, with sizes fitted to real ink bounds
         text_runs, text_mask = ImageReconstructor._extract_text_runs(img)
 
-        # 4. Flat fills -> candidate CSS surfaces
-        surfaces = detect_surfaces(
-            img, page_bg_hex,
-            text_ink=cv2.dilate((text_mask > 0).astype(np.uint8), _K3, iterations=2))
+        # 4. What kind of content is where, before asking what components are in it
+        dilated_ink = cv2.dilate((text_mask > 0).astype(np.uint8), _K3, iterations=2)
+        photo_raw, photo_joined = photographic_mask(img, dilated_ink)
+        photo_boxes = photographic_regions(photo_joined, float(w * h))
+
+        # 5. Flat fills -> candidate CSS surfaces
+        surfaces = detect_surfaces(img, page_bg_hex, text_ink=dilated_ink,
+                                   photo_mask=photo_raw)
         paintable = [s for s in surfaces if s.shape in ('rect', 'ellipse')]
 
         # A bordered control arrives as two regions: a ring and the fill inside it.
@@ -2981,9 +3088,38 @@ class ImageReconstructor:
                 zIndex=Z_SURFACE + depths.get(id(host), 0) * Z_STEP + Z_TEXT,
             ))
 
+        # Photographic and gradient areas are kept whole, underneath the components
+        # drawn on them. Text is erased from the raster because it is re-emitted live.
+        photo_ids = []
+        for p_idx, (px, py, pw, ph) in enumerate(photo_boxes, start=1):
+            crop = img[py:py+ph, px:px+pw]
+            if crop.size == 0:
+                continue
+            local_ink = text_mask[py:py+ph, px:px+pw]
+            if np.any(local_ink):
+                crop = erase_text_from_crop(crop, local_ink)
+            ok, enc = cv2.imencode('.png', crop)
+            if not ok:
+                continue
+            asset_name = f"backdrop_{p_idx}.png"
+            if asset_dir:
+                os.makedirs(asset_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(asset_dir, asset_name), crop)
+            eid = f"backdrop-{p_idx}"
+            photo_ids.append(eid)
+            elements.append(DocumentElement(
+                id=eid, type='image',
+                bbox=[float(px), float(py), float(px + pw), float(py + ph)],
+                src=f"data:image/png;base64,{base64.b64encode(enc.tobytes()).decode('utf-8')}",
+                assetName=asset_name,
+                naturalWidth=float(pw), naturalHeight=float(ph),
+                tag='img', role='backdrop', zIndex=Z_BACKDROP,
+            ))
+
         # 8. Residual artwork: everything no surface or text explained stays as pixels
         elements.extend(ImageReconstructor._extract_residual_art(
-            img, w, h, mean_bg, text_mask, paintable, asset_dir, surface_ids, depths
+            img, w, h, mean_bg, text_mask, paintable, asset_dir, surface_ids, depths,
+            explained=photo_joined if photo_boxes else None
         ))
 
         elements.sort(key=lambda e: e.zIndex or 1)
