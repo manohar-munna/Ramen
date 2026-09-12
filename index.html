@@ -2035,11 +2035,35 @@ function renderCurrentPage() {
         pageContainer.style.backgroundColor = page.backgroundColor;
     }
     
-    page.elements.forEach(elem => {
-        const domElem = renderElementToDOM(elem);
-        if (domElem) {
-            pageContainer.appendChild(domElem);
+    // Nest by parentId so a card really contains its contents, and a button really
+    // contains its label. Elements carry page-absolute coordinates, so a child's
+    // offsets are rebased onto its parent when it is mounted inside one.
+    const byId = new Set(page.elements.map(e => e.id));
+    const kids = new Map();
+    const roots = [];
+    page.elements.forEach(e => {
+        if (e.parentId && e.parentId !== e.id && byId.has(e.parentId)) {
+            if (!kids.has(e.parentId)) kids.set(e.parentId, []);
+            kids.get(e.parentId).push(e);
+        } else {
+            roots.push(e);
         }
+    });
+
+    const mount = (elem, origin) => {
+        const domElem = renderElementToDOM(elem, origin);
+        if (!domElem) return null;
+        const childOrigin = [elem.bbox[0], elem.bbox[1]];
+        (kids.get(elem.id) || []).forEach(child => {
+            const childDom = mount(child, childOrigin);
+            if (childDom) domElem.appendChild(childDom);
+        });
+        return domElem;
+    };
+
+    roots.forEach(elem => {
+        const domElem = mount(elem, [0, 0]);
+        if (domElem) pageContainer.appendChild(domElem);
     });
     
     elements.documentStage.appendChild(pageContainer);
@@ -2047,18 +2071,28 @@ function renderCurrentPage() {
     updatePageNavigation();
 }
 
-function renderElementToDOM(elem) {
-    const x0 = elem.bbox[0];
-    const y0 = elem.bbox[1];
+const VOID_TAGS = new Set(['input', 'img', 'br', 'hr']);
+
+function renderElementToDOM(elem, origin) {
+    const ox = (origin && origin[0]) || 0;
+    const oy = (origin && origin[1]) || 0;
+    const x0 = elem.bbox[0] - ox;
+    const y0 = elem.bbox[1] - oy;
     const w = Math.max(elem.bbox[2] - elem.bbox[0], 1);
     const h = Math.max(elem.bbox[3] - elem.bbox[1], 1);
-    
-    const div = document.createElement('div');
+
+    // A promoted element is emitted as the tag it was classified as, so a button in
+    // the canvas is a real <button> the user can click, focus and restyle.
+    const tag = (elem.tag && !VOID_TAGS.has(elem.tag)) ? elem.tag
+              : (elem.tag === 'input' ? 'input' : 'div');
+    const div = document.createElement(tag);
     div.className = `pdf-element pdf-${elem.type}`;
     div.id = elem.id;
     div.setAttribute('data-id', elem.id);
     div.setAttribute('data-type', elem.type);
-    
+    if (elem.role) div.setAttribute('data-role', elem.role);
+    if (tag === 'button') div.type = 'button';
+
     div.style.position = 'absolute';
     div.style.left = `${x0}px`;
     div.style.top = `${y0}px`;
@@ -2070,7 +2104,36 @@ function renderElementToDOM(elem) {
     }
     if (elem.rotation) div.style.transform = `rotate(${elem.rotation}deg)`;
     
-    if (elem.type === 'text') {
+    if (elem.type === 'rect') {
+        // Reconstructed surface: paint it from the recovered CSS, never from pixels.
+        const b = elem.box || {};
+        div.style.margin = '0';
+        div.style.padding = '0';
+        div.style.border = '0 none';
+        div.style.appearance = 'none';
+        div.style.webkitAppearance = 'none';
+        if (b.backgroundColor) div.style.backgroundColor = b.backgroundColor;
+        if (b.backgroundImage) div.style.backgroundImage = b.backgroundImage;
+        if (b.borderColor && b.borderWidth > 0) {
+            div.style.border = `${b.borderWidth}px ${b.borderStyle || 'solid'} ${b.borderColor}`;
+        }
+        if (b.borderRadius) div.style.borderRadius = b.borderRadius;
+        if (b.boxShadow) div.style.boxShadow = b.boxShadow;
+        if (elem.role === 'button' || elem.role === 'badge') div.style.cursor = 'pointer';
+
+        if (elem.text !== null && elem.text !== undefined && elem.text !== '') {
+            if (tag === 'input') {
+                div.placeholder = elem.text;
+                const st = elem.style || {};
+                div.style.fontSize = `${st.fontSize || 12}px`;
+                div.style.color = st.color || '#000000';
+                div.style.paddingLeft = '10px';
+            } else {
+                div.textContent = elem.text;
+            }
+        }
+
+    } else if (elem.type === 'text') {
         const s = elem.style || {};
         div.style.fontFamily = s.fontFamily || 'sans-serif';
         div.style.fontSize = `${s.fontSize || 12}px`;
@@ -2079,7 +2142,12 @@ function renderElementToDOM(elem) {
         div.style.color = s.color || '#000000';
         div.style.textAlign = s.textAlign || 'left';
         div.style.lineHeight = `${s.lineHeight || 1.0}`;
-        div.style.whiteSpace = 'pre';
+        if (s.letterSpacing) div.style.letterSpacing = `${s.letterSpacing}px`;
+        div.style.margin = '0';
+        div.style.padding = '0';
+        // Paragraphs reflow; a single fitted run must not, or it drifts off the ink box
+        // its size and position were solved against.
+        div.style.whiteSpace = (elem.tag === 'p') ? 'normal' : 'pre';
         if (s.backgroundColor) div.style.backgroundColor = s.backgroundColor;
         
         div.contentEditable = "true";

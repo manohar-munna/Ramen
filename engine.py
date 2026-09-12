@@ -1396,12 +1396,15 @@ class Surface:
     `shape` is one of 'rect' (paintable as a div with border-radius), 'ellipse'
     (paintable as an SVG ellipse) or 'complex' (must stay pixels).
     """
-    __slots__ = ('bbox', 'mask', 'color', 'shape', 'radius', 'border_color',
+    __slots__ = ('bbox', 'vis_bbox', 'mask', 'color', 'shape', 'radius', 'border_color',
                  'border_width', 'area', 'fill_ratio', 'children', 'parent', 'texts')
 
     def __init__(self, bbox, mask, color, shape, radius, area, fill_ratio,
-                 border_color=None, border_width=0.0):
-        self.bbox = bbox                    # (x0, y0, x1, y1) in page pixels
+                 border_color=None, border_width=0.0, vis_bbox=None):
+        self.bbox = bbox                    # (x0, y0, x1, y1); may extend past the page
+        # Where the mask actually lives. For a shape clipped by the page edge the
+        # rendered box is the full shape, but only this part of it was observed.
+        self.vis_bbox = vis_bbox or bbox
         self.mask = mask                    # component mask, crop-local
         self.color = color
         self.shape = shape
@@ -1522,6 +1525,34 @@ def _classify_region(img, x, y, cw, ch, comp, area) -> Optional[Surface]:
             return Surface(bbox, filled, None, 'rect', radius, area, fill_ratio,
                            border_color=color, border_width=round(max(ring_thickness, 1.0), 1))
         return Surface(bbox, filled, color, 'complex', 0.0, area, fill_ratio)
+
+    # A shape running off the page edge is only partly observed, so its fill ratio is
+    # inflated and the plain ellipse test below rejects it -- which is what turned the
+    # carousel buttons into octagons. Fit an ellipse to what is visible and, if it
+    # agrees, emit the whole circle and let the page clip it the way the source did.
+    ih, iw = img.shape[:2]
+    EDGE = 4  # a clipped shape may still leave a hairline of ground at the margin
+    if (x <= EDGE or y <= EDGE or (x + cw) >= iw - EDGE or (y + ch) >= ih - EDGE) and min(cw, ch) >= 8:
+        cnts, _ = cv2.findContours(filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if cnts:
+            c = max(cnts, key=cv2.contourArea)
+            if len(c) >= 5:
+                try:
+                    (ecx, ecy), (ew, eh), ang = cv2.fitEllipse(c)
+                except cv2.error:
+                    ew = eh = 0.0
+                if ew > 4 and eh > 4 and 0.75 <= (ew / eh) <= 1.34:
+                    probe = np.zeros((ch, cw), np.uint8)
+                    cv2.ellipse(probe, (int(round(ecx)), int(round(ecy))),
+                                (max(int(round(ew / 2)), 1), max(int(round(eh / 2)), 1)),
+                                ang, 0, 360, 1, -1)
+                    inter = float(np.count_nonzero(probe & filled))
+                    union = float(np.count_nonzero(probe | filled))
+                    if union > 0 and inter / union >= 0.88:
+                        gx0, gy0 = x + ecx - ew / 2.0, y + ecy - eh / 2.0
+                        return Surface((float(gx0), float(gy0), float(gx0 + ew), float(gy0 + eh)),
+                                       filled, color, 'ellipse', 0.0, area, fill_ratio,
+                                       vis_bbox=bbox)
 
     # Ellipse first: a circle scores plausibly on fill ratio, so test it explicitly
     # against a fitted ellipse before the rectangle path can claim it.
@@ -2137,10 +2168,13 @@ class ImageReconstructor:
         # piece of artwork sitting on top of a card, and would silently hide a surface
         # that was painted the wrong colour.
         predicted = np.full_like(img, mean_bg, dtype=np.uint8)
+        edges = np.zeros((h, w), np.uint8)
         for s in sorted(paintable, key=lambda s: -(s.width * s.height)):
             if s.color is None:
                 continue
-            x0, y0, x1, y1 = [int(v) for v in s.bbox]
+            # Paint against where the mask was observed, not the (possibly larger)
+            # rendered box, or a clipped shape's mask gets stretched across it.
+            x0, y0, x1, y1 = [int(v) for v in s.vis_bbox]
             x0, y0 = max(0, x0), max(0, y0)
             x1, y1 = min(w, x1), min(h, y1)
             if x1 <= x0 or y1 <= y0:
@@ -2152,11 +2186,21 @@ class ImageReconstructor:
             bgr = np.array([int(c[4:6], 16), int(c[2:4], 16), int(c[0:2], 16)], dtype=np.uint8)
             region = predicted[y0:y1, x0:x1]
             region[m > 0] = bgr
+            outline = cv2.subtract(cv2.dilate(m, _K3), cv2.erode(m, _K3))
+            np.maximum(edges[y0:y1, x0:x1], outline * 255, out=edges[y0:y1, x0:x1])
+
+        # A painted box has hard edges; the source has antialiased ones. That one-pixel
+        # rim always mismatches, and because it traces the whole outline its contour's
+        # bounding box covers the entire control -- which is what put a raster crop on
+        # top of every button. Exclude each surface's own boundary from the comparison.
+        rim = cv2.dilate(edges, _K3, iterations=1) if edges is not None else None
 
         delta = cv2.absdiff(img, predicted)
         _, content = cv2.threshold(cv2.cvtColor(delta, cv2.COLOR_BGR2GRAY), 16, 255, cv2.THRESH_BINARY)
         # Text is drawn as live text, so its ink is already accounted for.
         ink = cv2.dilate(text_mask, _K3, iterations=1)
+        if rim is not None:
+            ink = cv2.bitwise_or(ink, rim)
         residual = cv2.bitwise_and(content, cv2.bitwise_not(ink))
         residual = cv2.morphologyEx(residual, cv2.MORPH_OPEN, _K3)
 
