@@ -1,0 +1,256 @@
+{
+  "image": "Screenshot 2026-09-11 223916.png",
+  "note": "Hand-read from the source image: what each region actually is, and the HTML it deserves. bbox is [x0, y0, x1, y1] in source pixels.",
+  "components": [
+    {
+      "name": "nav Product",
+      "bbox": [
+        352,
+        30,
+        416,
+        52
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "nav Use cases",
+      "bbox": [
+        462,
+        30,
+        545,
+        52
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "nav Pricing",
+      "bbox": [
+        590,
+        30,
+        648,
+        52
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "nav Resources",
+      "bbox": [
+        694,
+        30,
+        777,
+        52
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "Log in",
+      "bbox": [
+        1418,
+        18,
+        1520,
+        66
+      ],
+      "tag": "button"
+    },
+    {
+      "name": "Get started",
+      "bbox": [
+        1540,
+        18,
+        1686,
+        66
+      ],
+      "tag": "button"
+    },
+    {
+      "name": "Start advertising",
+      "bbox": [
+        73,
+        553,
+        337,
+        613
+      ],
+      "tag": "button"
+    },
+    {
+      "name": "See how it works",
+      "bbox": [
+        360,
+        553,
+        635,
+        613
+      ],
+      "tag": "button"
+    },
+    {
+      "name": "Learn more",
+      "bbox": [
+        1163,
+        560,
+        1292,
+        597
+      ],
+      "tag": "button"
+    },
+    {
+      "name": "carousel left",
+      "bbox": [
+        3,
+        420,
+        48,
+        465
+      ],
+      "tag": "button"
+    },
+    {
+      "name": "carousel right",
+      "bbox": [
+        1710,
+        420,
+        1755,
+        465
+      ],
+      "tag": "button"
+    },
+    {
+      "name": "search field",
+      "bbox": [
+        1096,
+        212,
+        1362,
+        250
+      ],
+      "tag": "input"
+    },
+    {
+      "name": "sidebar Home",
+      "bbox": [
+        956,
+        293,
+        1028,
+        310
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "sidebar Popular",
+      "bbox": [
+        956,
+        331,
+        1042,
+        350
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "sidebar All",
+      "bbox": [
+        956,
+        368,
+        1006,
+        386
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "r/Entrepreneur",
+      "bbox": [
+        950,
+        449,
+        1098,
+        474
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "r/SaaS",
+      "bbox": [
+        950,
+        487,
+        1098,
+        512
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "r/Marketing",
+      "bbox": [
+        950,
+        525,
+        1098,
+        550
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "r/Startups",
+      "bbox": [
+        950,
+        563,
+        1098,
+        588
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "r/Business",
+      "bbox": [
+        950,
+        600,
+        1098,
+        625
+      ],
+      "tag": "a"
+    },
+    {
+      "name": "post card",
+      "bbox": [
+        1104,
+        283,
+        1625,
+        665
+      ],
+      "tag": "card"
+    },
+    {
+      "name": "browser mockup",
+      "bbox": [
+        934,
+        196,
+        1640,
+        668
+      ],
+      "tag": "card"
+    },
+    {
+      "name": "upvote 1.2k",
+      "bbox": [
+        1130,
+        630,
+        1200,
+        655
+      ],
+      "tag": "button"
+    },
+    {
+      "name": "comments 342",
+      "bbox": [
+        1240,
+        630,
+        1300,
+        655
+      ],
+      "tag": "button"
+    },
+    {
+      "name": "share",
+      "bbox": [
+        1325,
+        630,
+        1400,
+        655
+      ],
+      "tag": "button"
+    }
+  ]
+}

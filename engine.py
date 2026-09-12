@@ -1509,7 +1509,7 @@ def _rect_evidence(filled, cw, ch, f_area, box_area, region_px) -> Tuple[float, 
 
     return score, radius
 
-def _classify_region(img, x, y, cw, ch, comp, area) -> Optional[Surface]:
+def _classify_region(img, x, y, cw, ch, comp, area, text_ink=None) -> Optional[Surface]:
     """Decides whether a connected flat region can be redrawn as CSS, or must stay pixels."""
     filled = _fill_holes(comp)
     f_area = int(filled.sum())
@@ -1532,9 +1532,22 @@ def _classify_region(img, x, y, cw, ch, comp, area) -> Optional[Surface]:
     if solid_ratio < 0.55 and fill_ratio > 0.80:
         ring_thickness = (f_area - area) / max(2.0 * (cw + ch), 1.0)
         rect_score, radius = _rect_evidence(filled, cw, ch, f_area, box_area, region_px)
-        if 0.5 <= ring_thickness <= 6.0 and min(cw, ch) >= 12 and rect_score >= 0.55:
+
+        # Background surrounding a word is a ring by geometry but not a border. Without
+        # this, every bold label became a stroked box sitting on top of the real element.
+        hole_is_text = False
+        if text_ink is not None:
+            hole = (filled > 0) & (comp == 0)
+            if hole.any():
+                sub_ink = text_ink[y:y+ch, x:x+cw]
+                hole_is_text = float((hole & (sub_ink > 0)).sum()) / float(hole.sum()) > 0.30
+
+        if (0.5 <= ring_thickness <= 6.0 and min(cw, ch) >= 12
+                and rect_score >= 0.55 and not hole_is_text):
             return Surface(bbox, filled, None, 'rect', radius, area, fill_ratio,
                            border_color=color, border_width=round(max(ring_thickness, 1.0), 1))
+        if hole_is_text:
+            return None
         return Surface(bbox, filled, color, 'complex', 0.0, area, fill_ratio)
 
     # A shape running off the page edge is only partly observed, so its fill ratio is
@@ -1636,7 +1649,7 @@ def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray
                 if overlap / float(area) > 0.45:
                     continue
 
-            surf = _classify_region(img, x, y, cw, ch, comp, area)
+            surf = _classify_region(img, x, y, cw, ch, comp, area, text_ink)
             if surf is None:
                 continue
             # The page ground is not a component.
@@ -1944,6 +1957,162 @@ def classify_surface_role(surf: 'Surface', ctx) -> Tuple[str, str, float]:
     # Enough evidence to be a container, not enough to name it. Visually identical.
     return ('input-like' if i == best else 'panel'), 'div', best
 
+def _same_run_style(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    """Whether two runs look like members of one set.
+
+    Weight is deliberately ignored and colour only loosely constrained: a nav marks its
+    active item bold, and an upvote count is tinted when active. Requiring those to
+    match exactly split real groups apart, and the rhythm of the gaps is much stronger
+    evidence of a set than uniform styling is.
+    """
+    big = max(a['fontSize'], b['fontSize'], 1.0)
+    if abs(a['fontSize'] - b['fontSize']) / big > 0.22:
+        return False
+    try:
+        ca, cb = a['color'].lstrip('#'), b['color'].lstrip('#')
+        d = sum((int(ca[i:i+2], 16) - int(cb[i:i+2], 16)) ** 2 for i in (0, 2, 4)) ** 0.5
+    except Exception:
+        return True
+    return d <= 70.0
+
+def _consistent(gaps: List[float], tol: float = 0.45) -> bool:
+    """True when a sequence of gaps reads as a deliberate rhythm rather than chance."""
+    if not gaps:
+        return False
+    mean = sum(gaps) / len(gaps)
+    if mean <= 0:
+        return False
+    spread = (sum((g - mean) ** 2 for g in gaps) / len(gaps)) ** 0.5
+    return (spread / mean) <= tol
+
+def _runs_of(items, key_gap, min_len=3):
+    """Splits an ordered list into maximal runs with a consistent gap and shared style."""
+    out, run = [], [items[0]] if items else []
+    for prev, cur in zip(items, items[1:]):
+        gaps = [key_gap(a, b) for a, b in zip(run, run[1:])] + [key_gap(prev, cur)]
+        if _same_run_style(prev, cur) and key_gap(prev, cur) > 0 and _consistent(gaps):
+            run.append(cur)
+        else:
+            if len(run) >= min_len:
+                out.append(run)
+            run = [cur]
+    if len(run) >= min_len:
+        out.append(run)
+    return out
+
+def find_leading_mark(img, text_ink, run, reach: float = 52.0):
+    """Bounding box of non-text ink immediately left of a run, if any.
+
+    A list item or an action control is an icon and a label read as one thing. Scoring
+    the label alone both loses the icon from the element's box and throws away the
+    strongest clue that the pair is interactive at all.
+    """
+    ih, iw = img.shape[:2]
+    x0, y0, x1, y1 = [int(v) for v in run['bbox']]
+    lx1 = max(0, x0 - 4)
+    lx0 = max(0, int(x0 - reach))
+    ly0, ly1 = max(0, y0 - 6), min(ih, y1 + 6)
+    if lx1 - lx0 < 6 or ly1 <= ly0:
+        return None
+    patch = img[ly0:ly1, lx0:lx1]
+    bg = np.median(patch.reshape(-1, 3), axis=0)
+    mark = (np.abs(patch.astype(np.int32) - bg.astype(np.int32)).max(axis=2) > 30)
+    mark &= (text_ink[ly0:ly1, lx0:lx1] == 0)
+    if mark.sum() < 18:
+        return None
+    ys, xs = np.nonzero(mark)
+    return [float(lx0 + xs.min()), float(ly0 + ys.min()),
+            float(lx0 + xs.max() + 1), float(ly0 + ys.max() + 1)]
+
+def detect_sibling_groups(runs: List[Dict[str, Any]], img, text_ink,
+                          page_w: float, page_h: float) -> List[Dict[str, Any]]:
+    """Finds repeated elements and classifies them as a set rather than one at a time.
+
+    Four evenly spaced labels in a row is overwhelming evidence of a nav; a single one
+    of them in isolation is evidence of nothing. Scoring each separately also produced
+    different tags for members of the same obvious group, which is the tell that the
+    unit of classification was wrong. Deciding once per group and applying the result to
+    every member fixes both the accuracy and the inconsistency.
+    """
+    free = [r for r in runs
+            if not r.get('consumed')
+            and r.get('host_role') not in ('button', 'badge', 'input')
+            and (r.get('text') or '').strip()]
+    if len(free) < 3:
+        return []
+
+    groups: List[Dict[str, Any]] = []
+    used: set = set()
+
+    # --- rows: shared vertical centre, consistent horizontal gaps -------------------
+    rows: List[List[Dict[str, Any]]] = []
+    for r in sorted(free, key=lambda r: (r['bbox'][1] + r['bbox'][3]) / 2.0):
+        cy = (r['bbox'][1] + r['bbox'][3]) / 2.0
+        h = r['bbox'][3] - r['bbox'][1]
+        for row in rows:
+            rcy = (row[0]['bbox'][1] + row[0]['bbox'][3]) / 2.0
+            if abs(cy - rcy) <= max(5.0, h * 0.6):
+                row.append(r)
+                break
+        else:
+            rows.append([r])
+
+    for row in rows:
+        if len(row) < 3:
+            continue
+        row.sort(key=lambda r: r['bbox'][0])
+        for run_items in _runs_of(row, lambda a, b: b['bbox'][0] - a['bbox'][2]):
+            if any(id(r) in used for r in run_items):
+                continue
+            groups.append({'axis': 'row', 'members': run_items})
+            used.update(id(r) for r in run_items)
+
+    # --- columns: shared left edge, consistent vertical pitch -----------------------
+    cols: List[List[Dict[str, Any]]] = []
+    for r in sorted(free, key=lambda r: r['bbox'][0]):
+        if id(r) in used:
+            continue
+        for col in cols:
+            if abs(r['bbox'][0] - col[0]['bbox'][0]) <= 10.0:
+                col.append(r)
+                break
+        else:
+            cols.append([r])
+
+    for col in cols:
+        if len(col) < 3:
+            continue
+        col.sort(key=lambda r: r['bbox'][1])
+        for run_items in _runs_of(col, lambda a, b: b['bbox'][1] - a['bbox'][1]):
+            if any(id(r) in used for r in run_items):
+                continue
+            groups.append({'axis': 'col', 'members': run_items})
+            used.update(id(r) for r in run_items)
+
+    # --- decide what each group is -------------------------------------------------
+    for g in groups:
+        members = g['members']
+        marks = [find_leading_mark(img, text_ink, r) for r in members]
+        with_marks = sum(1 for m in marks if m)
+        g['marks'] = marks
+        top = min(r['bbox'][1] for r in members)
+        labels_short = all(len((r.get('text') or '')) <= 26 for r in members)
+
+        if g['axis'] == 'row' and top <= page_h * 0.12 and labels_short and with_marks == 0:
+            g['role'], g['tag'] = 'navlink', 'a'
+        elif g['axis'] == 'col' and labels_short and with_marks >= len(members) - 1:
+            g['role'], g['tag'] = 'listitem', 'a'
+        elif (g['axis'] == 'row' and labels_short
+              and with_marks >= max(2, len(members) - 1)
+              and members[0].get('host') is not None
+              and all(r.get('host') is members[0].get('host') for r in members)):
+            g['role'], g['tag'] = 'action', 'button'
+        else:
+            # Repetition alone is not evidence of interactivity. Keep the members
+            # consistent with each other and leave the tag neutral.
+            g['role'], g['tag'] = 'group-item', 'span'
+    return groups
+
 def assign_heading_levels(runs: List[Dict[str, Any]]) -> None:
     """Ranks distinct body-independent font sizes into h1/h2/h3.
 
@@ -1981,7 +2150,8 @@ def group_paragraphs(runs: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     labels that happen to share an edge is not welded into one <p>.
     """
     cands = [r for r in runs
-             if r.get('role') == 'body' and not r.get('host_role') in ('button', 'badge', 'input')]
+             if r.get('role') == 'body' and not r.get('grouped')
+             and not r.get('host_role') in ('button', 'badge', 'input')]
     cands.sort(key=lambda r: (round(r['bbox'][0] / 4.0), r['bbox'][1]))
 
     groups: List[List[Dict[str, Any]]] = []
@@ -2045,7 +2215,7 @@ def detect_text_lattice(runs: List[Dict[str, Any]], min_rows: int = 3,
     a single column of labels or one wide row is not a table.
     """
     free = [r for r in runs if r.get('host_role') not in ('button', 'badge', 'input')
-            and not r.get('consumed')]
+            and not r.get('consumed') and not r.get('grouped')]
     if len(free) < min_rows * min_cols:
         return []
 
@@ -2438,7 +2608,9 @@ class ImageReconstructor:
         text_runs, text_mask = ImageReconstructor._extract_text_runs(img)
 
         # 4. Flat fills -> candidate CSS surfaces
-        surfaces = detect_surfaces(img, page_bg_hex, text_ink=(text_mask > 0).astype(np.uint8))
+        surfaces = detect_surfaces(
+            img, page_bg_hex,
+            text_ink=cv2.dilate((text_mask > 0).astype(np.uint8), _K3, iterations=2))
         paintable = [s for s in surfaces if s.shape in ('rect', 'ellipse')]
 
         # A bordered control arrives as two regions: a ring and the fill inside it.
@@ -2463,6 +2635,23 @@ class ImageReconstructor:
         cluster_font_sizes(text_runs)
         cluster_text_colors(text_runs)
         assign_heading_levels(text_runs)
+
+        # Repeated elements are classified as a set. A member's own box grows to take in
+        # its leading icon, because an icon and its label are one control, not two.
+        text_ink_mask = (text_mask > 0).astype(np.uint8)
+        sibling_groups = detect_sibling_groups(text_runs, img, text_ink_mask, w, h)
+        for g in sibling_groups:
+            if g['role'] == 'group-item':
+                for r in g['members']:
+                    r['tag'] = 'span'
+                continue
+            for r, mark in zip(g['members'], g['marks']):
+                r['tag'], r['role'] = g['tag'], g['role']
+                r['grouped'] = True
+                if mark:
+                    b = r['bbox']
+                    r['bbox'] = [min(b[0], mark[0]), min(b[1], mark[1]),
+                                 max(b[2], mark[2]), max(b[3], mark[3])]
 
         elements: List[DocumentElement] = []
         counters: Dict[str, int] = {}
