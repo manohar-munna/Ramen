@@ -446,6 +446,66 @@ def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
     return (round(font_size, 2), round(letter_spacing, 2), round(line_height, 3),
             word_spacing, round(scale_x, 4))
 
+REFERENCE_WIDTH = 1400.0    # the capture width these pixel thresholds were calibrated on
+
+def page_scale(w: int, h: int) -> float:
+    """How much larger this capture is than the one the pixel thresholds assume.
+
+    Every threshold expressed in pixels -- a tile size, a minimum component area, how
+    far a shadow reaches, how wide an antialiased rim is -- describes a physical feature
+    of a rendered page, and all of them grow with the capture. Left absolute they only
+    hold near one resolution: the same page captured at 2x would have its components
+    rejected as noise by an area floor four times too small, and its texture measured in
+    tiles covering a quarter of the ground they were meant to. Scaling them keeps the
+    engine reading the page rather than the screenshot's dimensions.
+    """
+    return float(np.clip(max(w, h) / REFERENCE_WIDTH, 0.4, 4.0))
+
+def scaled_kernel(scale: float, base: int = 3) -> np.ndarray:
+    size = max(3, int(round(base * scale)) | 1)
+    return cv2.getStructuringElement(cv2.MORPH_RECT, (size, size))
+
+TEXT_COLOUR_TOL = 96.0      # how far an antialiased glyph pixel may sit from its own ink
+
+def dominant_ink_colour(crop: np.ndarray, candidate: np.ndarray) -> Optional[np.ndarray]:
+    """The most common colour among candidate glyph pixels, as BGR.
+
+    A median is pulled off the mark when the candidate set is a mixture -- headline type
+    set over artwork picks up whatever is behind it -- and lands on a colour that is in
+    neither the glyphs nor the background. The modal quantised colour survives that,
+    because the glyphs are the one thing in the set that shares a single colour.
+    """
+    px = crop[candidate > 0]
+    if px.size < 24:
+        return None
+    q = (px.astype(np.int32) // 16 * 16)
+    packed = (q[:, 0] << 16) | (q[:, 1] << 8) | q[:, 2]
+    vals, counts = np.unique(packed, return_counts=True)
+    best = vals[int(np.argmax(counts))]
+    bucket = packed == best
+    if int(bucket.sum()) < 12:
+        return None
+    return np.median(px[bucket].reshape(-1, 3), axis=0)
+
+def colour_selective_ink(crop: np.ndarray, candidate: np.ndarray,
+                         colour: Optional[np.ndarray]) -> np.ndarray:
+    """Narrows candidate ink to the pixels that are actually the text's own colour.
+
+    Measuring ink as 'anything unlike the local background' is right on a plain ground
+    and wrong over artwork: a headline crossing a gilt picture frame takes the frame
+    into its ink box, which inflates the fitted size and pushes the run into its
+    neighbour. Selecting by the glyph colour instead leaves the artwork behind.
+    """
+    if colour is None:
+        return candidate
+    dist = np.linalg.norm(crop.astype(np.float32) - colour.astype(np.float32), axis=2)
+    selective = (dist <= TEXT_COLOUR_TOL).astype(np.uint8)
+    # Only trust it when it still explains most of the glyph; a wrong colour estimate
+    # would otherwise erase the run entirely.
+    if np.count_nonzero(selective) < max(0.25 * np.count_nonzero(candidate), 12):
+        return candidate
+    return selective
+
 def keep_core_ink(ink: np.ndarray) -> np.ndarray:
     """Drops ink blobs that never reach this line's own body band.
 
@@ -491,7 +551,7 @@ def ink_top_offset(text: str, font_size: float, line_px: float, bold: bool) -> f
     return (line_px - content) / 2.0 + ink[1] * scale
 
 def erase_text_from_crop(crop: np.ndarray, text_mask: np.ndarray,
-                         textured: bool = False) -> np.ndarray:
+                         textured: bool = False, scale: float = 1.0) -> np.ndarray:
     """Paints out masked text pixels so a raster crop can sit underneath live text.
 
     Which method is right depends on what the text sits on. Over a flat fill, taking
@@ -510,10 +570,11 @@ def erase_text_from_crop(crop: np.ndarray, text_mask: np.ndarray,
         return crop
 
     out = crop.copy()
-    mask = cv2.dilate((text_mask > 0).astype(np.uint8), _K3, iterations=2)
+    rim = max(1, int(round(2 * scale)))
+    mask = cv2.dilate((text_mask > 0).astype(np.uint8), _K3, iterations=rim)
 
     if textured:
-        return cv2.inpaint(out, mask * 255, 4, cv2.INPAINT_NS)
+        return cv2.inpaint(out, mask * 255, max(3, int(round(4 * scale))), cv2.INPAINT_NS)
 
     num, labels = cv2.connectedComponents(mask)
 
@@ -1427,7 +1488,7 @@ GRADIENT_MIN_DRIFT = 1.2    # a flat fill does not drift between neighbouring ti
 GRADIENT_MAX_DRIFT = 16.0   # beyond this it is a boundary, not a ramp
 
 def photographic_mask(img: np.ndarray, text_ink: Optional[np.ndarray] = None,
-                      tile: int = PHOTO_TILE) -> np.ndarray:
+                      scale: float = 1.0) -> np.ndarray:
     """Marks the areas of an image that are photographic or heavily textured.
 
     Everything downstream assumes a page is built from flat fills, and on a flat design
@@ -1446,6 +1507,7 @@ def photographic_mask(img: np.ndarray, text_ink: Optional[np.ndarray] = None,
     would otherwise drag whole paragraphs into the photographic class.
     """
     h, w = img.shape[:2]
+    tile = max(8, int(round(PHOTO_TILE * scale)))
     quant = (cv2.medianBlur(img, 3).astype(np.int32) // 8 * 8)
     packed = (quant[:, :, 0] << 16) | (quant[:, :, 1] << 8) | quant[:, :, 2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -1485,20 +1547,57 @@ def photographic_mask(img: np.ndarray, text_ink: Optional[np.ndarray] = None,
     # Join neighbouring textured tiles; a photograph is continuous, stray tiles are not.
     k = cv2.getStructuringElement(cv2.MORPH_RECT, (tile * 2 + 1, tile * 2 + 1))
     joined = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, k)
+
+    # Closing reaches across whatever lies between two textured tiles, so a dense panel
+    # of interface -- a browser mockup, a card of controls -- gets absorbed along with
+    # the artwork beside it, and every component inside is then vetoed as photographic.
+    # Flat is flat whatever it borders: a fill has zero local variance, while even a
+    # smooth photograph keeps a little everywhere. Carving those pixels back out keeps
+    # the mask on the artwork without needing the texture thresholds retuned per page.
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    mean = cv2.boxFilter(g, -1, (5, 5), normalize=True)
+    sq = cv2.boxFilter(g * g, -1, (5, 5), normalize=True)
+    flat = ((np.clip(sq - mean * mean, 0.0, None) < FLAT_VARIANCE).astype(np.uint8)) * 255
+    # Erode first so the flat side of a photograph's own edge is not carved away with it.
+    flat = cv2.erode(flat, _K3, iterations=max(1, int(round(2 * scale))))
+    joined = cv2.bitwise_and(joined, cv2.bitwise_not(flat))
+    joined = cv2.morphologyEx(joined, cv2.MORPH_OPEN, scaled_kernel(scale, 5))
     # Two masks with different jobs. `raw` vetoes component detection and must stay
     # tight, because a flat control sitting on a photograph is still a control and the
     # joined mask would swallow it. `joined` bounds the area kept as pixels.
     return raw, joined
 
-def photographic_regions(mask: np.ndarray, page_area: float,
+def flat_fraction(img: np.ndarray, x: int, y: int, cw: int, ch: int) -> float:
+    """Share of a region whose pixels sit in perfectly uniform neighbourhoods.
+
+    Interface is built from flat fills, so most of its area has zero local variance --
+    the exceptions are edges and glyphs. A photograph has almost none, however smooth it
+    looks, because sensor and compression noise leave every neighbourhood slightly
+    uneven. This separates the two where texture statistics alone cannot.
+    """
+    patch = img[y:y+ch, x:x+cw]
+    if patch.size == 0:
+        return 0.0
+    g = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    mean = cv2.boxFilter(g, -1, (5, 5), normalize=True)
+    sq = cv2.boxFilter(g * g, -1, (5, 5), normalize=True)
+    var = np.clip(sq - mean * mean, 0.0, None)
+    return float(np.count_nonzero(var < 0.6)) / float(var.size)
+
+FLAT_VARIANCE = 0.05        # a CSS fill is bit-identical; a photograph never quite is
+
+def photographic_regions(mask: np.ndarray, page_area: float, img: Optional[np.ndarray] = None,
                          min_frac: float = PHOTO_MIN_REGION) -> List[Tuple[int, int, int, int]]:
-    """Connected photographic areas large enough to be worth keeping as pixels."""
+    """Connected photographic areas large enough to be worth keeping as pixels.
+
+    """
     n, lab, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
     out = []
     for i in range(1, n):
         x, y, cw, ch, area = stats[i]
-        if area >= page_area * min_frac and cw >= 24 and ch >= 24:
-            out.append((int(x), int(y), int(cw), int(ch)))
+        if area < page_area * min_frac or cw < 24 or ch < 24:
+            continue
+        out.append((int(x), int(y), int(cw), int(ch)))
     return out
 
 # ==============================================================================
@@ -1512,7 +1611,10 @@ _K3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 # artwork floats every raster above every reconstructed component, which is what put
 # decorative pixels on top of real buttons and swallowed their clicks.
 Z_SURFACE = 2      # a surface sits at its own depth
-Z_STEP = 10        # each nesting level gets its own band
+# Containment is expressed by DOM nesting, so z only orders siblings by layer.
+# Scaling it by depth as well double-counted the hierarchy and let any nested
+# surface paint over the text of a shallower one -- a page lost every headline
+# to six empty panels sitting one level deeper than they were.
 Z_ART = 3          # artwork rides just above the surface that contains it
 Z_CONTROL = 4      # a promoted control outranks decoration that merely overlaps it
 Z_BACKDROP = 1     # photographic ground sits just above whatever surface holds it
@@ -1781,7 +1883,8 @@ def _corners_symmetric(filled: np.ndarray, tol: float = 0.34) -> bool:
 
 def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray] = None,
                     max_colors: int = 90, photo_mask: Optional[np.ndarray] = None,
-                    photo_region: Optional[np.ndarray] = None) -> List[Surface]:
+                    photo_region: Optional[np.ndarray] = None,
+                    scale: float = 1.0) -> List[Surface]:
     """Segments the image into flat-filled regions by quantised colour.
 
     UI is built from flat fills, so connected regions of one colour recover the real
@@ -1790,6 +1893,8 @@ def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray
     flat (gradients, artwork, photos) falls out as 'complex' and stays pixels.
     """
     h, w = img.shape[:2]
+    min_area = MIN_SURFACE_AREA * scale * scale
+    min_side = max(5, int(round(5 * scale)))
     smooth = cv2.medianBlur(img, 3)
     quant = (smooth.astype(np.int32) // 8 * 8).astype(np.uint32)
     packed = (quant[:, :, 0] << 16) | (quant[:, :, 1] << 8) | quant[:, :, 2]
@@ -1800,14 +1905,14 @@ def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray
 
     surfaces: List[Surface] = []
     for idx in order[:max_colors]:
-        if counts[idx] < MIN_SURFACE_AREA:
+        if counts[idx] < min_area:
             break
         mask = (packed == vals[idx]).astype(np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _K3)
         n, lab, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
         for i in range(1, n):
             x, y, cw, ch, area = stats[i]
-            if area < MIN_SURFACE_AREA or cw < 5 or ch < 5:
+            if area < min_area or cw < min_side or ch < min_side:
                 continue
             comp = (lab[y:y+ch, x:x+cw] == i).astype(np.uint8)
 
@@ -1842,14 +1947,20 @@ def detect_surfaces(img: np.ndarray, page_bg: str, text_ink: Optional[np.ndarray
             if photo_region is not None:
                 ih, iw = h, w
                 within = float(np.count_nonzero(probe & (photo_region[y:y+ch, x:x+cw] > 0)))
-                if within / probe_area > 0.6:
+                # A component painted in a single colour is a fill, not a facet of a
+                # photograph, however textured its surroundings are. Judging only by the
+                # region mask vetoed flat controls that happened to sit inside one.
+                own = img[y:y+ch, x:x+cw][probe > 0]
+                uniform = (own.size > 0
+                           and float(own.reshape(-1, 3).std(axis=0).max()) < 9.0)
+                if within / probe_area > 0.6 and not uniform:
                     if (cw * ch) > page_area * 0.03:
                         continue
                     # Sample the ring from the surrounding image, not from inside the
                     # crop: a component fills its own bounding box, so dilating within
                     # those bounds is clipped away and leaves no ring at all -- which
                     # silently vetoed every high-contrast control on a photograph.
-                    pad = 5
+                    pad = max(5, int(round(5 * scale)))
                     ex0, ey0 = max(0, x - pad), max(0, y - pad)
                     ex1, ey1 = min(iw, x + cw + pad), min(ih, y + ch + pad)
                     padded = np.zeros((ey1 - ey0, ex1 - ex0), np.uint8)
@@ -1891,7 +2002,8 @@ def _lum_bgr(bgr) -> float:
 
 SHADOW_REACH = 30
 
-def detect_box_shadow(img: np.ndarray, surf: 'Surface', parent_bg: str):
+def detect_box_shadow(img: np.ndarray, surf: 'Surface', parent_bg: str,
+                      scale: float = 1.0):
     """Recovers a CSS drop shadow from the darkening in the ring around a surface.
 
     A shadow is a soft, monotonically decaying darkening of the background just outside
@@ -1904,12 +2016,13 @@ def detect_box_shadow(img: np.ndarray, surf: 'Surface', parent_bg: str):
     one, so the darkening has to decay with distance the way a blur does.
     """
     ih, iw = img.shape[:2]
+    reach = max(10, int(round(SHADOW_REACH * scale)))
     x0, y0, x1, y1 = [int(round(v)) for v in surf.vis_bbox]
-    if (x1 - x0) < 12 or (y1 - y0) < 12:
+    if (x1 - x0) < 12 * scale or (y1 - y0) < 12 * scale:
         return None
 
-    ex0, ey0 = max(0, x0 - SHADOW_REACH), max(0, y0 - SHADOW_REACH)
-    ex1, ey1 = min(iw, x1 + SHADOW_REACH), min(ih, y1 + SHADOW_REACH)
+    ex0, ey0 = max(0, x0 - reach), max(0, y0 - reach)
+    ex1, ey1 = min(iw, x1 + reach), min(ih, y1 + reach)
     if (ex1 - ex0) < 16 or (ey1 - ey0) < 16:
         return None
 
@@ -1936,7 +2049,7 @@ def detect_box_shadow(img: np.ndarray, surf: 'Surface', parent_bg: str):
 
     dist = cv2.distanceTransform((box == 0).astype(np.uint8), cv2.DIST_L2, 3)
     profile = []
-    for r in range(1, SHADOW_REACH):
+    for r in range(1, reach):
         band = valid & (dist >= r) & (dist < r + 1)
         profile.append(float(darker[band].mean()) if band.sum() >= 12 else 0.0)
     if len(profile) < 8 or profile[0] < 3.0:
@@ -1949,7 +2062,7 @@ def detect_box_shadow(img: np.ndarray, surf: 'Surface', parent_bg: str):
     tail = sum(profile[-4:]) / 4.0
     if tail > peak * 0.35:
         return None
-    blur = float(next((r for r, v in enumerate(profile, 1) if v <= peak * 0.15), SHADOW_REACH))
+    blur = float(next((r for r, v in enumerate(profile, 1) if v <= peak * 0.15), reach))
     alpha = float(min(peak / 255.0 * 2.6, 0.40))
     if alpha < 0.04:
         return None                     # too faint to be worth a rule
@@ -2654,6 +2767,19 @@ class ImageReconstructor:
             if x1 <= x0 or y1 <= y0:
                 continue
 
+            # Lettering that belongs to the subject of a photograph -- painted on a
+            # shipping container, printed on a shirt -- is image content, not page copy.
+            # Re-emitting it as live text puts an approximated face at an approximated
+            # position over pixels that were already correct, and doubles it. A baseline
+            # running off the horizontal is the giveaway: page copy is set square, while
+            # lettering on a photographed object follows the object into perspective.
+            quad = np.asarray(box, dtype=np.float32)
+            if quad.shape == (4, 2):
+                edge = quad[1] - quad[0]
+                skew = abs(np.degrees(np.arctan2(float(edge[1]), float(edge[0]))))
+                if min(skew, 180.0 - skew) > 5.0:
+                    continue
+
             # A single character with no word around it is almost always an icon the
             # recogniser forced into the alphabet (a magnifier read as 'Q', a bell as
             # 'D'). Leave those pixels to the artwork pass instead of inventing text.
@@ -2680,17 +2806,23 @@ class ImageReconstructor:
 
             text_color = "#111111"
             ink_box = None
+            ink_mask = None
             if max_d > 22.0:
-                thresh = max(18.0, float(np.percentile(diff, 75)))
-                stroke_px = crop[diff >= thresh]
-                if len(stroke_px) > 0:
-                    text_color = _bgr_to_hex(np.median(stroke_px, axis=0).astype(int))
-
                 # Detection boxes carry padding, so they are not ink bounds. Fitting a
                 # font to them oversizes every run. Recover the true ink extent from the
                 # pixels that differ from the local background -- which also works for
                 # light-on-dark, where an Otsu "dark pixels are ink" test is backwards.
-                ink = (diff >= max(20.0, max_d * 0.45)).astype(np.uint8)
+                candidate = (diff >= max(20.0, max_d * 0.45)).astype(np.uint8)
+                glyph_bgr = dominant_ink_colour(crop, candidate)
+                if glyph_bgr is not None:
+                    text_color = _bgr_to_hex(glyph_bgr.astype(int))
+                else:
+                    stroke_px = crop[diff >= max(18.0, float(np.percentile(diff, 75)))]
+                    if len(stroke_px) > 0:
+                        text_color = _bgr_to_hex(np.median(stroke_px, axis=0).astype(int))
+
+                ink = colour_selective_ink(crop, candidate, glyph_bgr)
+                ink_mask = ink
                 ink = keep_core_ink(ink)
                 rows, cols = np.any(ink, axis=1), np.any(ink, axis=0)
                 if rows.any() and cols.any():
@@ -2706,8 +2838,8 @@ class ImageReconstructor:
 
             # Record the glyph pixels themselves, not the box. A filled box would hide
             # whatever a control's background is doing between the letters.
-            if max_d > 22.0:
-                stroke = (diff >= max(20.0, max_d * 0.45)).astype(np.uint8) * 255
+            if ink_mask is not None:
+                stroke = ink_mask.astype(np.uint8) * 255
                 sub = text_mask[y0_box:y0_box + crop.shape[0], x0_box:x0_box + crop.shape[1]]
                 np.maximum(sub, stroke, out=sub)
 
@@ -2797,7 +2929,7 @@ class ImageReconstructor:
     @staticmethod
     def _extract_residual_art(img, w, h, mean_bg, text_mask, paintable,
                               asset_dir, surface_ids=None, depths=None,
-                              explained=None) -> List[DocumentElement]:
+                              explained=None, scale=1.0) -> List[DocumentElement]:
         """Rasterises whatever no surface or text run explained.
 
         This is the deliberate fallback for complex artwork -- gradients, mascots,
@@ -2868,8 +3000,7 @@ class ImageReconstructor:
         residual = cv2.bitwise_and(content, cv2.bitwise_not(ink))
         residual = cv2.morphologyEx(residual, cv2.MORPH_OPEN, _K3)
 
-        grouped = cv2.morphologyEx(
-            residual, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)))
+        grouped = cv2.morphologyEx(residual, cv2.MORPH_CLOSE, scaled_kernel(scale, 7))
         contours, _ = cv2.findContours(grouped, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         # Closing welds a control's arrow glyph, its drop shadow and its antialiased rim
@@ -2882,13 +3013,13 @@ class ImageReconstructor:
             if cw < 3 or ch < 3:
                 continue
             ink = int(np.count_nonzero(residual[y:y+ch, x:x+cw]))
-            if ink and (ink / float(cw * ch)) < 0.35 and (cw * ch) > 2500:
+            if ink and (ink / float(cw * ch)) < 0.35 and (cw * ch) > 2500 * scale * scale:
                 n, lab, stats, _ = cv2.connectedComponentsWithStats(
                     residual[y:y+ch, x:x+cw], 8)
                 for i in range(1, n):
                     sx, sy = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
                     sw, sh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-                    if stats[i, cv2.CC_STAT_AREA] >= 12:
+                    if stats[i, cv2.CC_STAT_AREA] >= 12 * scale * scale:
                         boxes.append((x + sx, y + sy, sw, sh))
             else:
                 boxes.append((x, y, cw, ch))
@@ -2905,7 +3036,7 @@ class ImageReconstructor:
                 continue
             ink = int(np.count_nonzero(residual[y:y+ch, x:x+cw]))
             # Small is fine -- icons are small. Sparse noise is not.
-            if ink < 40 or (cw * ch) < 40:
+            if ink < 40 * scale * scale or (cw * ch) < 40 * scale * scale:
                 continue
             if cw > w * 0.985 and ch > h * 0.985:
                 continue
@@ -2941,7 +3072,7 @@ class ImageReconstructor:
                 naturalWidth=float(cw), naturalHeight=float(ch),
                 tag='img', role='artwork',
                 parentId=parent_id,
-                zIndex=Z_SURFACE + depth * Z_STEP + Z_ART,
+                zIndex=Z_SURFACE + Z_ART,
             ))
             idx += 1
         return out
@@ -2954,6 +3085,10 @@ class ImageReconstructor:
         source_file: Optional[str] = None
     ) -> PageData:
         h, w = img.shape[:2]
+        # Pixel thresholds below describe features of a rendered page, not of this file,
+        # so they are expressed against a reference capture width and scaled to whatever
+        # this one happens to be.
+        scale = page_scale(w, h)
 
         # 1. Original pixels, kept for fidelity comparison and as the ultimate fallback
         _, enc_img = cv2.imencode('.png', img)
@@ -2968,13 +3103,15 @@ class ImageReconstructor:
         text_runs, text_mask = ImageReconstructor._extract_text_runs(img)
 
         # 4. What kind of content is where, before asking what components are in it
-        dilated_ink = cv2.dilate((text_mask > 0).astype(np.uint8), _K3, iterations=2)
-        photo_raw, photo_joined = photographic_mask(img, dilated_ink)
-        photo_boxes = photographic_regions(photo_joined, float(w * h))
+        dilated_ink = cv2.dilate((text_mask > 0).astype(np.uint8), _K3,
+                                 iterations=max(1, int(round(2 * scale))))
+        photo_raw, photo_joined = photographic_mask(img, dilated_ink, scale=scale)
+        photo_boxes = photographic_regions(photo_joined, float(w * h), img=img)
 
         # 5. Flat fills -> candidate CSS surfaces
         surfaces = detect_surfaces(img, page_bg_hex, text_ink=dilated_ink,
-                                   photo_mask=photo_raw, photo_region=photo_joined)
+                                   photo_mask=photo_raw, photo_region=photo_joined,
+                                   scale=scale)
         paintable = [s for s in surfaces if s.shape in ('rect', 'ellipse')]
 
         # A bordered control arrives as two regions: a ring and the fill inside it.
@@ -2987,7 +3124,7 @@ class ImageReconstructor:
 
         for s in paintable:
             ground = s.parent.color if (s.parent and s.parent.color) else page_bg_hex
-            s.shadow = detect_box_shadow(img, s, ground)
+            s.shadow = detect_box_shadow(img, s, ground, scale=scale)
 
         # 5. Decide what each surface is, then let those roles inform the text roles
         ctx = {'img': img, 'text_ink': (text_mask > 0).astype(np.uint8), 'page_bg': page_bg_hex}
@@ -3069,8 +3206,8 @@ class ImageReconstructor:
                 box=box,
                 confidence=conf,
                 parentId=surface_ids.get(id(s.parent)) if s.parent is not None else None,
-                zIndex=(Z_SURFACE + depth * Z_STEP +
-                        (Z_CONTROL if role in ('button', 'badge', 'input') else 0)),
+                zIndex=(Z_SURFACE
+                        + (Z_CONTROL if role in ('button', 'badge', 'input') else 0)),
             )
 
             # An <input> is void, so its label has to become the placeholder attribute.
@@ -3144,7 +3281,7 @@ class ImageReconstructor:
                 bbox=[float(px0), float(py0), float(px1), float(py1)],
                 tag='p', role='paragraph', confidence=0.75,
                 parentId=surface_ids.get(id(host)) if host is not None else None,
-                zIndex=Z_SURFACE + depths.get(id(host), 0) * Z_STEP + Z_TEXT,
+                zIndex=Z_SURFACE + Z_TEXT,
             ))
             for r in group:
                 r['consumed'] = True
@@ -3153,7 +3290,7 @@ class ImageReconstructor:
                     bbox=[float(v) for v in r['bbox']],
                     text=r['text'], tag='span', role='paragraph-line',
                     style=r['style'], parentId=para_id,
-                    zIndex=Z_SURFACE + depths.get(id(host), 0) * Z_STEP + Z_TEXT,
+                    zIndex=Z_SURFACE + Z_TEXT,
                 ))
 
         for run in text_runs:
@@ -3168,7 +3305,7 @@ class ImageReconstructor:
                 role=run.get('role') or 'text',
                 style=run['style'],
                 parentId=surface_ids.get(id(host)) if host is not None else None,
-                zIndex=Z_SURFACE + depths.get(id(host), 0) * Z_STEP + Z_TEXT,
+                zIndex=Z_SURFACE + Z_TEXT,
             ))
 
         # Photographic and gradient areas are kept whole, underneath the components
@@ -3180,7 +3317,7 @@ class ImageReconstructor:
                 continue
             local_ink = text_mask[py:py+ph, px:px+pw]
             if np.any(local_ink):
-                crop = erase_text_from_crop(crop, local_ink, textured=True)
+                crop = erase_text_from_crop(crop, local_ink, textured=True, scale=scale)
             ok, enc = cv2.imencode('.png', crop)
             if not ok:
                 continue
@@ -3209,13 +3346,13 @@ class ImageReconstructor:
                 assetName=asset_name,
                 naturalWidth=float(pw), naturalHeight=float(ph),
                 tag='img', role='backdrop', parentId=parent_id,
-                zIndex=Z_SURFACE + depth * Z_STEP + Z_BACKDROP,
+                zIndex=Z_SURFACE + Z_BACKDROP,
             ))
 
         # 8. Residual artwork: everything no surface or text explained stays as pixels
         elements.extend(ImageReconstructor._extract_residual_art(
             img, w, h, mean_bg, text_mask, paintable, asset_dir, surface_ids, depths,
-            explained=photo_joined if photo_boxes else None
+            explained=photo_joined if photo_boxes else None, scale=scale
         ))
 
         elements.sort(key=lambda e: e.zIndex or 1)
@@ -3512,15 +3649,21 @@ class HTMLRenderer:
         elem_op = float(elem.opacity if elem.opacity is not None else 1.0)
         op_str = f"opacity: {elem_op:.2f}; " if elem_op < 0.999 else ""
 
-        common_style = (f"position: absolute; left: {left:.2f}px; top: {top:.2f}px; "
-                        f"width: {width:.2f}px; height: {height:.2f}px; "
-                        f"z-index: {z_index}; {op_str}{rot}")
-
         kids = (children or {}).get(elem.id, [])
         kids_html = "".join(
             HTMLRenderer.render_element(k, editable=editable, origin=(x0, y0), children=children)
             for k in kids
         )
+
+        # A container must not open its own stacking context. With one, a descendant's
+        # z-index is confined to it, so a headline at z=8 inside a panel at z=2 lost to
+        # any sibling of that panel at z=3 -- an entire page of text disappeared behind
+        # a backdrop that way. Leaving containers on `z-index: auto` lets every element
+        # compete in one order, which is the order these values were chosen for.
+        z_rule = f"z-index: {z_index}; " if not kids else ""
+        common_style = (f"position: absolute; left: {left:.2f}px; top: {top:.2f}px; "
+                        f"width: {width:.2f}px; height: {height:.2f}px; "
+                        f"{z_rule}{op_str}{rot}")
         data_attrs = (f'id="{elem.id}" data-id="{elem.id}" data-type="{elem.type}"'
                       f'{f" data-role={chr(34)}{elem.role}{chr(34)}" if elem.role else ""}')
 
