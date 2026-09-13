@@ -29,3 +29,9 @@ Thumbs.db
 
 # Scratch artifacts
 scratch/
+
+# Training data and base weights: fetched by mlkit/fetch_dataset.py and by
+# ultralytics on first run. Large, reproducible, and not part of the application.
+datasets/
+weights/
+*.pt
