@@ -3456,42 +3456,107 @@ class ImageReconstructor:
 
         # Photographic and gradient areas are kept whole, underneath the components
         # drawn on them. Text is erased from the raster because it is re-emitted live.
+        #
+        # "Underneath" was only ever true of controls. A promoted control is lifted by
+        # Z_CONTROL and outranks a backdrop, but a card or a panel sits at the plain
+        # surface depth and loses to every photograph laid over it -- 20 of the 43
+        # scored components across the reference pages were detected and then painted
+        # out of existence, two whole cards on the Reddit page among them. Raising the
+        # containers instead would replace the photograph with their flat fill, which
+        # trades a real defect for a worse one.
+        #
+        # So the photograph is cut around them: each swallowed container is handed the
+        # slice of it that sits on that container, as a child, and that slice is erased
+        # from the backdrop. The same pixels land in the same places, but they arrive
+        # inside a real card instead of on top of one nothing ever renders.
         photo_ids = []
-        for p_idx, (px, py, pw, ph) in enumerate(photo_boxes, start=1):
-            crop = img[py:py+ph, px:px+pw]
-            if crop.size == 0:
-                continue
-            local_ink = text_mask[py:py+ph, px:px+pw]
-            if np.any(local_ink):
-                crop = erase_text_from_crop(crop, local_ink, textured=True, scale=scale)
-            ok, enc = cv2.imencode('.png', crop)
-            if not ok:
-                continue
-            asset_name = f"backdrop_{p_idx}.png"
-            if asset_dir:
-                os.makedirs(asset_dir, exist_ok=True)
-                cv2.imwrite(os.path.join(asset_dir, asset_name), crop)
-            # A backdrop belongs in the containment hierarchy like anything else.
-            # Pinning every photograph beneath every surface hid the hero image behind
-            # the plain white card it was sitting on.
-            art_bbox = [float(px), float(py), float(px + pw), float(py + ph)]
-            parent_id, depth = None, 0
+        containers = [e for e in elements
+                      if e.type == 'rect' and (e.role or 'surface') not in CULLABLE_ROLES
+                      and e.role not in ('button', 'badge', 'input')]
+        b_idx = 0
+
+        def _immediate(region, pool):
+            """Containers inside `region` with no other candidate in between."""
+            inside = [c for c in pool if _contains(region, c.bbox, pad=2.0)
+                      and not _contains(c.bbox, region, pad=2.0)]
+            return [c for c in inside
+                    if not any(d is not c and _contains(d.bbox, c.bbox, pad=2.0)
+                               and not _contains(c.bbox, d.bbox, pad=2.0)
+                               for d in inside)]
+
+        # Each entry is a rectangle of photograph still looking for an owner:
+        # (x, y, w, h, parent element id, alpha mask or None when fully opaque).
+        queue = [(px, py, pw, ph, None, None) for (px, py, pw, ph) in photo_boxes]
+        for i, (px, py, pw, ph, _, _) in enumerate(list(queue)):
             for host in sorted((s for s in paintable if s.color is not None),
                                key=lambda s: s.width * s.height):
-                if _contains(host.bbox, art_bbox, pad=3.0):
-                    parent_id = surface_ids.get(id(host))
-                    depth = depths.get(id(host), 0)
+                if _contains(host.bbox, [float(px), float(py),
+                                         float(px + pw), float(py + ph)], pad=3.0):
+                    queue[i] = (px, py, pw, ph, surface_ids.get(id(host)), None)
                     break
 
-            eid = f"backdrop-{p_idx}"
+        while queue:
+            rx, ry, rw, rh, r_parent, r_alpha = queue.pop(0)
+            if rw < 2 or rh < 2 or rx + rw > w or ry + rh > h:
+                continue
+            crop = img[ry:ry+rh, rx:rx+rw]
+            if crop.size == 0:
+                continue
+            region = [float(rx), float(ry), float(rx + rw), float(ry + rh)]
+            alpha = (np.full((rh, rw), 255, np.uint8) if r_alpha is None
+                     else r_alpha.copy())
+
+            for c in _immediate(region, containers):
+                cm = _painted_mask(c)
+                if cm is None:
+                    continue
+                cx0 = int(round(float(c.bbox[0])))
+                cy0 = int(round(float(c.bbox[1])))
+                ax0, ay0 = max(rx, cx0), max(ry, cy0)
+                ax1 = min(rx + rw, cx0 + cm.shape[1])
+                ay1 = min(ry + rh, cy0 + cm.shape[0])
+                if ax1 - ax0 < 4 or ay1 - ay0 < 4:
+                    continue
+                piece = cm[ay0-cy0:ay1-cy0, ax0-cx0:ax1-cx0] > 0
+                window = alpha[ay0-ry:ay1-ry, ax0-rx:ax1-rx]
+                child_alpha = np.where(piece, window, 0).astype(np.uint8)
+                if not np.any(child_alpha):
+                    continue              # an ancestor already claimed these pixels
+                window[piece] = 0
+                queue.append((ax0, ay0, ax1-ax0, ay1-ay0, c.id, child_alpha))
+
+            if not np.any(alpha):
+                continue                  # handed entirely to the containers inside it
+            ink = text_mask[ry:ry+rh, rx:rx+rw]
+            if np.any(ink):
+                crop = erase_text_from_crop(crop, ink, textured=True, scale=scale)
+            if bool(np.all(alpha)):
+                out_png = crop            # nothing was cut out; stay three-channel
+            else:
+                out_png = cv2.cvtColor(crop, cv2.COLOR_BGR2BGRA)
+                out_png[:, :, 3] = alpha
+                # Colour under a hole is never drawn, but PNG still stores it, and a
+                # carved backdrop would keep a full copy of every card cut out of it.
+                # Flatten the dead area so the encoder can run it away to nothing.
+                out_png[:, :, :3][alpha == 0] = 0
+            ok, enc = cv2.imencode('.png', out_png)
+            if not ok:
+                continue
+            b_idx += 1
+            asset_name = f"backdrop_{b_idx}.png"
+            if asset_dir:
+                os.makedirs(asset_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(asset_dir, asset_name), out_png)
+            eid = f"backdrop-{b_idx}"
             photo_ids.append(eid)
+            paint_masks[eid] = (alpha > 0).astype(np.uint8)
             elements.append(DocumentElement(
                 id=eid, type='image',
-                bbox=art_bbox,
+                bbox=[float(rx), float(ry), float(rx + rw), float(ry + rh)],
                 src=f"data:image/png;base64,{base64.b64encode(enc.tobytes()).decode('utf-8')}",
                 assetName=asset_name,
-                naturalWidth=float(pw), naturalHeight=float(ph),
-                tag='img', role='backdrop', parentId=parent_id,
+                naturalWidth=float(rw), naturalHeight=float(rh),
+                tag='img', role='backdrop', parentId=r_parent,
                 zIndex=Z_SURFACE + Z_BACKDROP,
             ))
 
