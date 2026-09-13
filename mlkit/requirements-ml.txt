@@ -1,0 +1,6 @@
+# Detector-only dependencies. The reconstruction engine does not need these; install
+# them to train or run mlkit/.
+ultralytics>=8.3
+torch>=2.2
+torchvision>=0.17
+huggingface_hub>=0.24

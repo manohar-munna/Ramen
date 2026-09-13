@@ -29,3 +29,11 @@ Thumbs.db
 
 # Scratch artifacts
 scratch/
+
+# ML datasets and training runs
+datasets/
+yolo11n.pt
+
+# Trained model weights
+models/
+weights/
