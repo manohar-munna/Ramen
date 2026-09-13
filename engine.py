@@ -3503,8 +3503,23 @@ class ImageReconstructor:
             if crop.size == 0:
                 continue
             region = [float(rx), float(ry), float(rx + rw), float(ry + rh)]
-            alpha = (np.full((rh, rw), 255, np.uint8) if r_alpha is None
-                     else r_alpha.copy())
+            if r_alpha is not None:
+                alpha = r_alpha.copy()
+            else:
+                # Crop the photograph to its own silhouette, not to its bounding box.
+                # A diagonal truck, a rounded badge, an object photographed at an angle
+                # -- each arrives as a rectangle up to twice its own size, and every
+                # heading and paragraph inside that rectangle is painted over. On the
+                # logistics page the two backdrops claimed half the page while only
+                # 54% of what they claimed was photograph, burying 43,528 pixels of
+                # type. The silhouette was already measured; it was being thrown away
+                # in favour of a bounding box.
+                shape = (photo_joined[ry:ry+rh, rx:rx+rw] > 0).astype(np.uint8)
+                # Glyph tiles and smooth patches read as non-photographic, which leaves
+                # holes in the middle of an object. Anything fully enclosed by the
+                # photograph belongs to it: text sits *on* the picture and needs the
+                # picture behind it.
+                alpha = _fill_holes(shape) * 255
 
             for c in _immediate(region, containers):
                 cm = _painted_mask(c)
