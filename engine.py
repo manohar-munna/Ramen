@@ -1621,6 +1621,126 @@ Z_BACKDROP = 1     # photographic ground sits just above whatever surface holds 
 Z_TABLE = 5
 Z_TEXT = 6         # text is the top layer within its band
 
+
+# A page is reconstructed by painting candidate surfaces and then covering the parts
+# CSS got wrong with the original pixels. Nothing in that process ever asks whether a
+# surface still shows once everything above it has been drawn -- and measured across
+# the reference pages, most of them do not: 252 of one page's 261 rectangles sat
+# entirely under a later element. They cost markup, bytes and meaning while changing
+# no pixel, so they are removed here rather than shipped.
+CULL_VISIBLE_FRACTION = 0.005   # survives as less than this share of its own footprint
+CULL_VISIBLE_PIXELS = 32        # ...and as fewer than this many pixels: a rim, not a box
+
+# Only anonymous decoration is ever removed. A scored component is a claim about what
+# the page means, and a buried one is evidence that something above it is wrong -- most
+# often a raster crop that should have been trimmed around it. Deleting the component
+# would destroy the finding and leave the raster in place: culling the card because a
+# screenshot of the card sits on top of it loses on both counts.
+CULLABLE_ROLES = frozenset({'surface', 'shape', 'artwork', 'backdrop', 'decoration'})
+
+
+def _painted_mask(elem: 'DocumentElement') -> Optional[np.ndarray]:
+    """What this element's CSS box actually covers, as a crop-local mask.
+
+    Rounded corners and ellipses matter: a pill-shaped button does not hide the
+    corners of the card behind it, and treating its box as solid would cull them.
+    """
+    x0, y0, x1, y1 = [int(round(float(v))) for v in elem.bbox]
+    w, h = max(1, x1 - x0), max(1, y1 - y0)
+    box = elem.box
+    radius = 0
+    if box is not None and box.borderRadius:
+        r = str(box.borderRadius).strip()
+        if r.endswith('%'):
+            try:
+                radius = int(min(w, h) * float(r[:-1]) / 100.0)
+            except ValueError:
+                radius = 0
+        else:
+            try:
+                radius = int(round(float(r.rstrip('px'))))
+            except ValueError:
+                radius = 0
+    radius = max(0, min(radius, min(w, h) // 2))
+    m = np.zeros((h, w), np.uint8)
+    if radius <= 0:
+        m[:] = 1
+        return m
+    cv2.rectangle(m, (radius, 0), (w - radius - 1, h - 1), 1, -1)
+    cv2.rectangle(m, (0, radius), (w - 1, h - radius - 1), 1, -1)
+    for cx, cy in ((radius, radius), (w - radius - 1, radius),
+                   (radius, h - radius - 1), (w - radius - 1, h - radius - 1)):
+        cv2.circle(m, (cx, cy), radius, 1, -1)
+    return m
+
+
+def cull_occluded(elements: List['DocumentElement'], w: int, h: int,
+                  masks: Dict[str, np.ndarray], scale: float = 1.0) -> List['DocumentElement']:
+    """Removes elements that no longer show once the page is fully painted.
+
+    Walks the paint order from the top down, accumulating the pixels already claimed.
+    An element whose own footprint is entirely spoken for by what sits above it cannot
+    affect the render, so it goes. Live text and tables are never removed and never
+    counted as coverage -- glyphs are thin, and treating a text box as solid would
+    hide whatever it was written on.
+
+    `masks` supplies the true painted shape for elements whose footprint is not their
+    box: a transparent artwork crop covers only its own ink.
+    """
+    if not elements:
+        return elements
+    covered = np.zeros((h, w), np.uint8)
+    min_px = max(1.0, CULL_VISIBLE_PIXELS * scale * scale)
+    dropped: set = set()
+
+    for elem in reversed(elements):          # topmost first
+        if elem.type in ('text', 'table') or elem.html:
+            continue                         # content, not decoration: always kept
+        cullable = (elem.role or 'surface') in CULLABLE_ROLES and elem.text is None
+        x0, y0 = int(round(float(elem.bbox[0]))), int(round(float(elem.bbox[1])))
+        m = masks.get(elem.id)
+        if m is None:
+            m = _painted_mask(elem)
+        if m is None or m.size == 0:
+            continue
+        cx0, cy0 = max(0, x0), max(0, y0)
+        cx1, cy1 = min(w, x0 + m.shape[1]), min(h, y0 + m.shape[0])
+        if cx1 <= cx0 or cy1 <= cy0:
+            if cullable:
+                dropped.add(elem.id)         # entirely off-page
+            continue
+        local = m[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0]
+        own = int(np.count_nonzero(local))
+        if own == 0:
+            if cullable:
+                dropped.add(elem.id)
+            continue
+        seen = covered[cy0:cy1, cx0:cx1]
+        visible = int(np.count_nonzero(local & (seen == 0)))
+        if cullable and visible < min_px and visible < own * CULL_VISIBLE_FRACTION:
+            dropped.add(elem.id)
+            continue
+        # Partially visible elements still hide what is beneath the part that shows.
+        if float(elem.opacity if elem.opacity is not None else 1.0) > 0.99:
+            np.maximum(seen, local, out=seen)
+
+    if not dropped:
+        return elements
+
+    # Culling a container would orphan its contents, so adopt them upward instead.
+    parent_of = {e.id: getattr(e, 'parentId', None) for e in elements}
+    kept = []
+    for e in elements:
+        if e.id in dropped:
+            continue
+        pid = parent_of.get(e.id)
+        while pid is not None and pid in dropped:
+            pid = parent_of.get(pid)
+        e.parentId = pid
+        kept.append(e)
+    return kept
+
+
 def _fill_holes(mask: np.ndarray) -> np.ndarray:
     """Returns `mask` with interior holes closed (border-connected background removed)."""
     h, w = mask.shape
@@ -2950,7 +3070,8 @@ class ImageReconstructor:
     @staticmethod
     def _extract_residual_art(img, w, h, mean_bg, text_mask, paintable,
                               asset_dir, surface_ids=None, depths=None,
-                              explained=None, scale=1.0) -> List[DocumentElement]:
+                              explained=None, scale=1.0,
+                              masks=None) -> List[DocumentElement]:
         """Rasterises whatever no surface or text run explained.
 
         This is the deliberate fallback for complex artwork -- gradients, mascots,
@@ -3086,6 +3207,9 @@ class ImageReconstructor:
                     depth = (depths or {}).get(id(s), 0)
                     break
 
+            if masks is not None:
+                # An artwork crop is mostly transparent; only its ink hides anything.
+                masks[f"art-{idx}"] = (local > 0).astype(np.uint8)
             out.append(DocumentElement(
                 id=f"art-{idx}", type='image',
                 bbox=art_bbox,
@@ -3184,6 +3308,7 @@ class ImageReconstructor:
                                  max(b[2], mark[2]), max(b[3], mark[3])]
 
         elements: List[DocumentElement] = []
+        paint_masks: Dict[str, np.ndarray] = {}
         counters: Dict[str, int] = {}
 
         def next_id(kind: str) -> str:
@@ -3373,10 +3498,12 @@ class ImageReconstructor:
         # 8. Residual artwork: everything no surface or text explained stays as pixels
         elements.extend(ImageReconstructor._extract_residual_art(
             img, w, h, mean_bg, text_mask, paintable, asset_dir, surface_ids, depths,
-            explained=photo_joined if photo_boxes else None, scale=scale
+            explained=photo_joined if photo_boxes else None, scale=scale,
+            masks=paint_masks
         ))
 
         elements.sort(key=lambda e: e.zIndex or 1)
+        elements = cull_occluded(elements, w, h, paint_masks, scale=scale)
 
         return PageData(
             pageNumber=page_num,
