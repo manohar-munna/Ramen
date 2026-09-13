@@ -2299,6 +2299,82 @@ def detect_box_shadow(img: np.ndarray, surf: 'Surface', parent_bg: str,
         dx = float(np.sign(dx) * round(blur * 0.6, 1))
     return dx, dy, round(blur, 1), round(alpha, 3)
 
+
+# A surface is hole-filled out to its bounding box on the assumption that whatever
+# perforates it is drawn on top of it. For a card that is true, and refusing to fill
+# was what once reduced whole cards to photographs. For a strip of page background that
+# happens to wrap around a card it is false: the component is 16% of its own box, and
+# painting the other 84% put a sage-green slab across 60% of the logistics page.
+# Everything standing on that slab then disagreed with the prediction, came back as one
+# 710x396 residual raster, and the wrong colour showed through the glyph-shaped holes in
+# that raster as a grey shadow behind every heading. It read as broken drop shadows; the
+# cause was a fill claiming ground it never covered.
+OVERCLAIM_OWN_SHARE = 0.55   # a fill covering less of its own filled area is suspect
+OVERCLAIM_MISMATCH = 0.45    # and is dropped if it cannot explain this much of the rest
+
+
+def drop_overclaimed_fills(surfaces: List[Surface], img: np.ndarray,
+                           text_ink: Optional[np.ndarray] = None,
+                           photo_region: Optional[np.ndarray] = None) -> int:
+    """Stops a surface painting ground it neither covers nor hands to a child.
+
+    Only fills that claim far more than they occupy are examined -- `area` is the
+    component as it was found, before hole-filling squared it off -- and the question
+    asked is the one that separates a container from a background: of what this colour
+    claims, setting aside what a child will cover and what text will be drawn over,
+    does the page actually look like this colour? A card says yes; its interior is its
+    own fill, perforated by its contents. A background strip says no, because what it
+    claims is the card standing on it.
+    """
+    h, w = img.shape[:2]
+    dropped = 0
+    for s in surfaces:
+        if s.color is None or s.mask is None or s.mask.size == 0:
+            continue
+        mh, mw = s.mask.shape
+        if mw < 16 or mh < 16:
+            continue
+        filled = s.mask > 0
+        f_area = int(filled.sum())
+        if f_area <= 0 or s.area / float(f_area) >= OVERCLAIM_OWN_SHARE:
+            continue                       # occupies most of what it claims: a real fill
+
+        x0, y0 = int(round(s.vis_bbox[0])), int(round(s.vis_bbox[1]))
+        x1, y1 = min(w, x0 + mw), min(h, y0 + mh)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        test = filled[:y1 - y0, :x1 - x0].copy()
+        for kid in s.children:             # a child will paint over its own footprint
+            kx0, ky0, kx1, ky1 = [int(round(v)) for v in kid.bbox]
+            ax0, ay0 = max(x0, kx0) - x0, max(y0, ky0) - y0
+            ax1, ay1 = min(x1, kx1) - x0, min(y1, ky1) - y0
+            if ax1 > ax0 and ay1 > ay0:
+                test[ay0:ay1, ax0:ax1] = False
+        if text_ink is not None:           # and live text will be drawn over its own
+            test &= (text_ink[y0:y1, x0:x1] == 0)
+        if photo_region is not None:       # and a backdrop will cover the artwork on it
+            # Without this the test blames a fill for pixels that were never its job.
+            # The SaaS page is a white page under a soft gradient hero: white is the
+            # right answer for the page and wrong for every pixel the gradient covers,
+            # so silencing it cost 1.3 points to fix a fault it did not have.
+            test &= (photo_region[y0:y1, x0:x1] == 0)
+        if int(test.sum()) < 800:
+            continue
+
+        c = s.color.lstrip('#')
+        want = np.array([int(c[4:6], 16), int(c[2:4], 16), int(c[0:2], 16)], np.float32)
+        got = img[y0:y1, x0:x1][test].reshape(-1, 3).astype(np.float32)
+        # A textured but correctly-coloured region has many pixels off the fill and a
+        # median on it. Judging by the per-pixel count alone silenced an orange panel
+        # whose real median was the same orange to within seven levels.
+        if float(np.abs(np.median(got, axis=0) - want).mean()) <= 20.0:
+            continue
+        dev = np.abs(got - want).mean(axis=1)
+        if float((dev > 28.0).mean()) > OVERCLAIM_MISMATCH:
+            s.color = None                 # keep the container, stop it painting
+            dropped += 1
+    return dropped
+
 def build_containment(surfaces: List[Surface]) -> List[Surface]:
     """Nests surfaces by area so each one's parent is the smallest box that holds it."""
     ordered = sorted(surfaces, key=lambda s: -(s.width * s.height))
@@ -3227,8 +3303,11 @@ class ImageReconstructor:
 
         # Innermost surface containing a piece of artwork becomes its parent, so the
         # artwork renders inside that component instead of covering it.
-        nest = sorted((s for s in paintable if s.color is not None),
-                      key=lambda s: (s.width * s.height))
+        # Containment, not paint: a surface that was stopped from painting is still the
+        # box its contents live in. Filtering these searches on colour sent 58 of the
+        # SaaS page's elements back to the page root the moment one over-claiming fill
+        # was silenced.
+        nest = sorted(paintable, key=lambda s: (s.width * s.height))
 
         out: List[DocumentElement] = []
         idx = 1
@@ -3355,6 +3434,7 @@ class ImageReconstructor:
         paintable = ImageReconstructor._dedupe_surfaces(paintable)
 
         build_containment(paintable)
+        drop_overclaimed_fills(paintable, img, dilated_ink, photo_joined)
         assign_texts(paintable, text_runs)
 
         for s in paintable:
@@ -3578,8 +3658,7 @@ class ImageReconstructor:
         # (x, y, w, h, parent element id, alpha mask or None when fully opaque).
         queue = [(px, py, pw, ph, None, None) for (px, py, pw, ph) in photo_boxes]
         for i, (px, py, pw, ph, _, _) in enumerate(list(queue)):
-            for host in sorted((s for s in paintable if s.color is not None),
-                               key=lambda s: s.width * s.height):
+            for host in sorted(paintable, key=lambda s: s.width * s.height):
                 if _contains(host.bbox, [float(px), float(py),
                                          float(px + pw), float(py + ph)], pad=3.0):
                     queue[i] = (px, py, pw, ph, surface_ids.get(id(host)), None)
