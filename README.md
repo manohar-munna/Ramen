@@ -137,6 +137,14 @@ fidelity as a guardrail and read the rendered output yourself.
 | Image path, 6 reference pages | **89.91%** mean SSIM (86.9 – 93.4) |
 | Component accuracy | **24/25** on the page with ground truth |
 | Digital PDF, 20-page benchmark | **90.81%** mean SSIM |
+| Test suite | **10/10** |
+| Spread across a 2.7x resolution range | **6.51** points, worst page |
+
+Every page scores higher at 1.6x than at 0.6x, and the gap has widened rather than
+closed (5.4 points before the last round of changes, 6.51 after). Resolution
+normalisation makes the thresholds scale-aware but does not make small captures
+reconstruct as well as large ones, and nothing currently measures which threshold is
+responsible.
 
 ---
 
