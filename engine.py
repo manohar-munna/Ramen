@@ -1706,15 +1706,29 @@ def _boundary_is_real(img, x, y, cw, ch, filled) -> float:
     difference is that a card has a visible boundary all the way round, while the
     band's rectangle is invented -- most of its outline cuts through smooth pixels.
     """
-    patch = img[y:y+ch, x:x+cw]
-    if patch.size == 0 or min(cw, ch) < 6:
+    if min(cw, ch) < 6:
+        return 1.0
+    # The edge of a container is the step between it and whatever surrounds it, which
+    # lies just outside its own bounding box. Measuring the gradient on the box alone
+    # put the outline exactly on the border of the window, where Sobel replicates and
+    # sees nothing -- so a full-page panel with a hard edge all the way round scored
+    # zero and was demoted to pixels. The patch is padded so the step is inside it.
+    ih, iw = img.shape[:2]
+    pad = 3
+    ex0, ey0 = max(0, x - pad), max(0, y - pad)
+    ex1, ey1 = min(iw, x + cw + pad), min(ih, y + ch + pad)
+    patch = img[ey0:ey1, ex0:ex1]
+    if patch.size == 0:
         return 1.0
     gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     mag = cv2.magnitude(gx, gy)
     strong = cv2.dilate((mag > 22.0).astype(np.uint8), _K3, iterations=1)
-    band = cv2.subtract(filled, cv2.erode(filled, _K3, iterations=1))
+
+    placed = np.zeros(patch.shape[:2], np.uint8)
+    placed[y - ey0:y - ey0 + ch, x - ex0:x - ex0 + cw] = filled
+    band = cv2.subtract(cv2.dilate(placed, _K3, iterations=1), cv2.erode(placed, _K3, iterations=1))
     total = int(band.sum())
     if total < 12:
         return 1.0
@@ -1798,6 +1812,13 @@ def _classify_region(img, x, y, cw, ch, comp, area, text_ink=None) -> Optional[S
             return Surface(bbox, filled, None, 'rect', radius, area, fill_ratio,
                            border_color=color, border_width=round(max(ring_thickness, 1.0), 1))
         if hole_is_text:
+            # Text on a fill and the page showing around text look identical by area:
+            # both are a ring whose hole is glyphs. What separates them is that a fill
+            # has an edge of its own all the way round, while the page background bleeds
+            # into the rest of the page and its bounding box is arbitrary. Without this
+            # an orange banner with a headline on it was discarded outright.
+            if min(cw, ch) >= 20 and _boundary_is_real(img, x, y, cw, ch, filled) >= 0.5:
+                return Surface(bbox, filled, color, 'rect', radius, area, fill_ratio)
             return None
 
         # Not a ring after all. A container is perforated by everything drawn on top of
