@@ -1894,6 +1894,65 @@ def _rect_evidence(filled, cw, ch, f_area, box_area, region_px) -> Tuple[float, 
 
     return score, radius
 
+
+# The residual pass exists for artwork CSS cannot describe. It also catches every fill
+# the segmenter failed to find, and ships it as a photograph of a flat colour: 29% of
+# the rasters across the reference pages are a single colour, 20% of the logistics page
+# among them. That is worse than wasteful. A residual crop is opaque only where the
+# prediction was wrong, so a missed white card becomes a white PNG with a hole at every
+# glyph -- and the surface painted the wrong colour underneath shows through each hole
+# as a grey shadow around the text. Recovering the fill removes the raster and the
+# shadows together.
+RESIDUAL_FLAT_SPREAD = 3.0      # mean channel deviation a fill has to stay under
+RESIDUAL_FLAT_COVERAGE = 0.90   # over this much of its own box, once holes are closed
+RESIDUAL_FLAT_STRAY = 0.02      # ...and explaining all but this share of the rest
+
+
+def flat_residual_fill(crop: np.ndarray, mask: np.ndarray,
+                       cw: int, ch: int) -> Optional[Tuple[str, float]]:
+    """(colour, radius) when a residual region is really one flat box, else None.
+
+    Deliberately strict on both counts. Uniform colour alone would promote a slice of
+    sky; rectangularity alone would promote a mascot on a plain background. Something
+    has to be both before its pixels are thrown away for a hex value.
+    """
+    px = crop[mask > 0]
+    if px.size < 1200:
+        return None
+    px = px.reshape(-1, 3).astype(np.float32)
+    med = np.median(px, axis=0)
+    if float(np.abs(px - med).mean()) > RESIDUAL_FLAT_SPREAD:
+        return None
+    filled = _fill_holes((mask > 0).astype(np.uint8))
+    f_area = int(filled.sum())
+    box_area = float(cw * ch)
+    if box_area <= 0 or f_area / box_area < RESIDUAL_FLAT_COVERAGE:
+        return None
+
+    # The fill is painted over the whole box, but the mask only says the prediction was
+    # wrong *inside* it. Everywhere else the prediction was already right, and painting
+    # over that is how promoting one card cost 1.6 points of the logistics page: the
+    # box also spanned icons and a strip of the page behind it. So the colour has to
+    # explain the pixels the mask never claimed, or the region is a card with things on
+    # it rather than a flat card, and its pixels are the honest answer.
+    outside = crop[(mask == 0)]
+    if outside.size:
+        stray = np.abs(outside.reshape(-1, 3).astype(np.float32) - med).mean(axis=1)
+        if float((stray > 24.0).mean()) > RESIDUAL_FLAT_STRAY:
+            return None
+
+    # Rectangularity decides the corner radius here, not whether to promote at all. A
+    # residual mask is shaped by where the prediction was wrong, which has no reason to
+    # follow the real outline, so the radius solver reads the missing area as enormous
+    # corners -- 139px of them on a 710x396 card. One colour over nine tenths of a box
+    # is a fill whatever its rim looks like; the corners are the uncertain part, so an
+    # implausible radius is dropped rather than allowed to reshape the box.
+    rect_score, radius = _rect_evidence(filled, cw, ch, f_area, box_area, px)
+    if rect_score < 0.45 or radius > 0.25 * min(cw, ch):
+        radius = 0.0
+    return _bgr_to_hex(med), radius
+
+
 def _classify_region(img, x, y, cw, ch, comp, area, text_ink=None) -> Optional[Surface]:
     """Decides whether a connected flat region can be redrawn as CSS, or must stay pixels."""
     filled = _fill_holes(comp)
@@ -3187,6 +3246,45 @@ class ImageReconstructor:
             local = residual[y:y+ch, x:x+cw]
             if crop.size == 0:
                 continue
+
+            # Text was subtracted from the residual so it would not be rasterised twice.
+            # But the mask subtracted is the *dilated* ink, which is wider than the
+            # glyph it protects, so what is left is a letter-shaped hole a size too big.
+            # Live text fills the letter and not the gap around it, and the page shows
+            # through the difference as a grey halo behind every heading -- read, quite
+            # reasonably, as broken drop shadows. Close those gaps and paint the type
+            # out of the pixels instead, which is what backdrops have always done.
+            gap = (_fill_holes((local > 0).astype(np.uint8)) > 0) & (local == 0)
+            local_ink = text_mask[y:y+ch, x:x+cw]
+            gap &= cv2.dilate(local_ink, _K3,
+                              iterations=max(2, int(round(3 * scale)))) > 0
+            if np.any(gap):
+                crop = erase_text_from_crop(crop, local_ink, textured=False, scale=scale)
+                local = local.copy()
+                local[gap] = 255
+
+            art_bbox = [float(x), float(y), float(x + cw), float(y + ch)]
+            parent_id = None
+            for s in nest:
+                if _contains(s.bbox, art_bbox, pad=2.0):
+                    parent_id = (surface_ids or {}).get(id(s))
+                    break
+
+            flat = flat_residual_fill(crop, local, cw, ch)
+            if flat is not None:
+                colour, radius = flat
+                out.append(DocumentElement(
+                    id=f"fill-{idx}", type='rect', bbox=art_bbox,
+                    tag='div', role='surface',
+                    box=BoxStyle(backgroundColor=colour,
+                                 borderRadius=(f"{radius:.1f}px" if radius >= 1.0
+                                               else None)),
+                    confidence=0.6, parentId=parent_id,
+                    zIndex=Z_SURFACE + Z_ART,
+                ))
+                idx += 1
+                continue
+
             bgra = cv2.cvtColor(crop, cv2.COLOR_BGR2BGRA)
             bgra[:, :, 3] = np.where(local > 0, 255, 0).astype(np.uint8)
 
@@ -3198,14 +3296,6 @@ class ImageReconstructor:
             if asset_dir:
                 os.makedirs(asset_dir, exist_ok=True)
                 cv2.imwrite(os.path.join(asset_dir, asset_name), bgra)
-
-            art_bbox = [float(x), float(y), float(x + cw), float(y + ch)]
-            parent_id, depth = None, 0
-            for s in nest:
-                if _contains(s.bbox, art_bbox, pad=2.0):
-                    parent_id = (surface_ids or {}).get(id(s))
-                    depth = (depths or {}).get(id(s), 0)
-                    break
 
             if masks is not None:
                 # An artwork crop is mostly transparent; only its ink hides anything.
