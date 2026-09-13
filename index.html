@@ -2137,7 +2137,7 @@ function renderCurrentPage() {
     });
 
     const mount = (elem, origin) => {
-        const domElem = renderElementToDOM(elem, origin);
+        const domElem = renderElementToDOM(elem, origin, (kids.get(elem.id) || []).length > 0);
         if (!domElem) return null;
         const childOrigin = [elem.bbox[0], elem.bbox[1]];
         (kids.get(elem.id) || []).forEach(child => {
@@ -2159,7 +2159,7 @@ function renderCurrentPage() {
 
 const VOID_TAGS = new Set(['input', 'img', 'br', 'hr']);
 
-function renderElementToDOM(elem, origin) {
+function renderElementToDOM(elem, origin, hasChildren) {
     const ox = (origin && origin[0]) || 0;
     const oy = (origin && origin[1]) || 0;
     const x0 = elem.bbox[0] - ox;
@@ -2184,7 +2184,13 @@ function renderElementToDOM(elem, origin) {
     div.style.top = `${y0}px`;
     div.style.width = `${w}px`;
     div.style.height = `${h}px`;
-    div.style.zIndex = elem.zIndex || 1;
+    // A container must not open its own stacking context. With one, a descendant's
+    // z-index is confined to it: a card at z=2 holding a heading at z=8 loses the whole
+    // subtree to any sibling backdrop at z=3, and the photograph appears to swallow the
+    // text written on it. Removing the card made the text reappear, which is how this
+    // was found. The exporter already leaves containers on `z-index: auto`; the canvas
+    // has to agree with it or the two disagree about what the page looks like.
+    if (!hasChildren) div.style.zIndex = elem.zIndex || 1;
     if (elem.opacity !== undefined && elem.opacity !== null && elem.opacity < 0.999) {
         div.style.opacity = elem.opacity;
     }
