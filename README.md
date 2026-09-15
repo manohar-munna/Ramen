@@ -81,15 +81,18 @@ Ramen/
 ├── enhancer.py                  # Optional Gemini rewrite pass (not part of the engine)
 ├── test_app.py                  # Test suite for engine & API
 ├── requirements.txt
+├── .env.example                 # Copy to .env for the enhancement key
 ├── benchmarks/                  # Everything the engine is measured against
-│   ├── images/                  # Reference screenshots for the image path
+│   ├── images/                  # 11 reference screenshots; SOURCES.md says where from
 │   ├── pdfs/                    # Reference PDFs for the digital path
 │   └── ground_truth/            # Hand-read component lists, one JSON per image
 ├── tools/
 │   ├── eval_image.py            # Fidelity (SSIM / pixel diff) for the image path
 │   ├── eval_pdf.py              # Fidelity for the digital PDF path
 │   ├── audit_components.py      # Component accuracy against ground truth
-│   └── test_scale_invariance.py # Same page at several capture sizes
+│   ├── test_scale_invariance.py # Same page at several capture sizes
+│   ├── audit_enhanced.py        # What a rewrite did to the content it was given
+│   └── enhance_all.py           # Enhance every reference and score it; resumable
 └── mlkit/                       # Trained UI detector — a side experiment, not wired in
 ```
 
