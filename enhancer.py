@@ -94,7 +94,46 @@ def restore_assets(html: str, assets: List[str]) -> Tuple[str, List[int]]:
     return _PLACEHOLDER_RE.sub(swap, html), missing
 
 
-def describe_assets(assets: List[str], max_colours: int = 3) -> List[str]:
+_ELEMENT_RE = re.compile(r"<[^>]*data:image/[^>]*>")
+_ROLE_RE = re.compile(r'data-role="([^"]+)"')
+_BOX_RE = re.compile(r"width:\s*([\d.]+)px;\s*height:\s*([\d.]+)px")
+
+# Describe what the engine actually recorded, not what it might imply. "backdrop" here
+# means only "a photographic or gradient region kept as pixels" -- calling it a section
+# background in the prompt read as an instruction, and a hero illustration came back
+# tiled behind the entire page with the text unreadable on top of it. The skeleton
+# already carries each image's measured position, so the model can see where a picture
+# sat; it only needs to know which markers are photographs and which are small graphics.
+_ROLE_NOTES = {
+    "backdrop": "photograph or gradient, kept as pixels",
+    "artwork": "small graphic or icon",
+}
+
+
+def asset_roles(html: str, assets: List[str]) -> Dict[int, str]:
+    """Maps each stripped asset back to the data-role of the element that carried it."""
+    # The role sits on the wrapping div and the data URI on an <img> inside it, so the
+    # two are never in the same tag. Walk the document instead: each role claims the
+    # assets that appear before the next one does.
+    by_uri = {uri: i for i, uri in enumerate(assets)}
+    roles: Dict[int, str] = {}
+    marks = [(m.start(), m.group(1)) for m in _ROLE_RE.finditer(html)]
+    for m in _DATA_URI_RE.finditer(html):
+        i = by_uri.get("".join(m.group(0).split()))
+        if i is None or i in roles:
+            continue
+        owner = ""
+        for pos, role in marks:
+            if pos > m.start():
+                break
+            owner = role
+        if owner:
+            roles[i] = owner
+    return roles
+
+
+def describe_assets(assets: List[str], max_colours: int = 3,
+                    roles: Optional[Dict[int, str]] = None) -> List[str]:
     """One line per held-back image: its size and the colours in it.
 
     Stripping the images also strips the page's colour identity, which is a problem
@@ -135,7 +174,9 @@ def describe_assets(assets: List[str], max_colours: int = 3) -> List[str]:
             for _, idx in counts[:max_colours]:
                 r, g, b = pal[idx * 3:idx * 3 + 3]
                 names.append("#%02x%02x%02x" % (r, g, b))
-            lines.append(f"{_PLACEHOLDER % i}  {w}x{h}  {' '.join(names)}")
+            note = _ROLE_NOTES.get((roles or {}).get(i, ""), "")
+            lines.append(f"{_PLACEHOLDER % i}  {w}x{h}  {' '.join(names)}"
+                         + (f"  -- {note}" if note else ""))
         except Exception:
             lines.append(f"{_PLACEHOLDER % i}  (unreadable)")
     return lines
@@ -149,6 +190,169 @@ def _unfence(text: str) -> str:
         return fence.group(1).strip()
     return text
 
+
+
+# ---------------------------------------------------------------- flattening rasters
+
+# A reconstruction's artwork is deliberately fragmentary: the residual pass cuts out
+# exactly the pixels CSS could not explain, which on a photographic page means dozens of
+# small crops that only add up to a picture because each one is pinned to an exact
+# coordinate. That is correct for a faithful render and useless for a rewrite -- the
+# moment those fragments enter normal flow they scatter, and a logistics page came back
+# with its brand mark floating over a shipping container and a caption three times its
+# proper size.
+#
+# So compose them first. Fragments that overlap, or sit close enough to be reading as one
+# picture, are painted onto a single canvas in paint order and handed over as one image.
+# The model then receives a handful of real pictures with real aspect ratios instead of a
+# pile of jigsaw pieces, and laying those out is a job it can actually do.
+FLATTEN_GAP = 12.0          # px at reference width; fragments nearer than this join up
+FLATTEN_MIN_GROUP = 2       # a lone fragment is left exactly as it was
+
+
+def _bbox_of(elem) -> Tuple[float, float, float, float]:
+    b = list(elem.bbox or [0, 0, 0, 0]) + [0, 0, 0, 0]
+    return float(b[0]), float(b[1]), float(b[2]), float(b[3])
+
+
+def _group_fragments(boxes: List[Tuple[float, float, float, float]],
+                     gap: float) -> List[List[int]]:
+    """Union-find over boxes that touch once grown by `gap`."""
+    parent = list(range(len(boxes)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i in range(len(boxes)):
+        ax0, ay0, ax1, ay1 = boxes[i]
+        for j in range(i + 1, len(boxes)):
+            bx0, by0, bx1, by1 = boxes[j]
+            if (ax0 - gap < bx1 and bx0 - gap < ax1
+                    and ay0 - gap < by1 and by0 - gap < ay1):
+                union(i, j)
+
+    groups: Dict[int, List[int]] = {}
+    for i in range(len(boxes)):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
+def flatten_page_rasters(page, gap: float = FLATTEN_GAP):
+    """Returns a copy of `page` whose overlapping image fragments are composed.
+
+    Paint order is the element order, which the engine has already sorted by z-index, so
+    compositing in that order reproduces what a browser would draw.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return page
+
+    elements = list(page.elements or [])
+    idx = [i for i, e in enumerate(elements)
+           if e.type == "image" and e.src and e.src.startswith("data:image")]
+    if len(idx) < FLATTEN_MIN_GROUP:
+        return page
+
+    scale = max(float(page.width or 1400.0) / 1400.0, 0.5)
+    boxes = [_bbox_of(elements[i]) for i in idx]
+
+    # Proximity alone, deliberately, after trying the obvious refinement and measuring it.
+    # Restricting groups to fragments sharing a container is better reasoned and produces
+    # worse pages: it left 17 images instead of 7, they collided in flow exactly as the
+    # raw fragments had, and the model dropped three of them. Fewer, larger pictures are
+    # easier to lay out than many small correct ones.
+    groups = _group_fragments(boxes, gap * scale)
+
+    replacements: Dict[int, object] = {}
+    drop: set = set()
+    made = 0
+
+    for members in groups:
+        if len(members) < FLATTEN_MIN_GROUP:
+            continue
+        members.sort()                                  # paint order
+        gx0 = min(boxes[m][0] for m in members)
+        gy0 = min(boxes[m][1] for m in members)
+        gx1 = max(boxes[m][2] for m in members)
+        gy1 = max(boxes[m][3] for m in members)
+        gw, gh = int(round(gx1 - gx0)), int(round(gy1 - gy0))
+        if gw < 2 or gh < 2 or gw * gh > 40_000_000:    # a canvas nobody wants to hold
+            continue
+
+        canvas = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
+        painted = 0
+        for m in members:
+            e = elements[idx[m]]
+            x0, y0, x1, y1 = boxes[m]
+            w, h = int(round(x1 - x0)), int(round(y1 - y0))
+            if w < 1 or h < 1:
+                continue
+            try:
+                raw = base64.b64decode(e.src.partition(",")[2])
+                im = Image.open(io.BytesIO(raw)).convert("RGBA")
+            except Exception:
+                continue
+            # The renderer stretches each crop to its box, so match that here rather
+            # than pasting at natural size: several of them are not the same.
+            if im.size != (w, h):
+                im = im.resize((w, h), Image.LANCZOS)
+            canvas.alpha_composite(im, (int(round(x0 - gx0)), int(round(y0 - gy0))))
+            painted += 1
+
+        if painted < FLATTEN_MIN_GROUP:
+            continue
+
+        # Trim fully transparent margins, so the box the model sees is the picture.
+        bbox = canvas.getbbox()
+        if bbox and bbox != (0, 0, gw, gh):
+            canvas = canvas.crop(bbox)
+            gx0, gy0 = gx0 + bbox[0], gy0 + bbox[1]
+            gw, gh = canvas.size
+        if gw < 2 or gh < 2:
+            continue
+
+        buf = io.BytesIO()
+        canvas.save(buf, format="PNG", optimize=True)
+        uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+        keep = idx[members[0]]
+        host = elements[keep]
+        merged = host.model_copy(update={
+            "bbox": [gx0, gy0, gx0 + gw, gy0 + gh],
+            "src": uri,
+            "naturalWidth": float(gw),
+            "naturalHeight": float(gh),
+            # Parent it where the largest fragment sat: that is the container the
+            # picture visually belongs to, and the smaller pieces are decoration on it.
+            "parentId": elements[idx[max(members, key=lambda m: (boxes[m][2] - boxes[m][0])
+                                         * (boxes[m][3] - boxes[m][1]))]].parentId,
+        })
+        replacements[keep] = merged
+        for m in members[1:]:
+            drop.add(idx[m])
+        made += 1
+
+    if not made:
+        return page
+
+    out = [replacements.get(i, e) for i, e in enumerate(elements) if i not in drop]
+    return page.model_copy(update={"elements": out})
+
+
+def flatten_document(doc):
+    """`flatten_page_rasters` across every page of a document."""
+    return doc.model_copy(update={
+        "pages": [flatten_page_rasters(p) for p in (doc.pages or [])]
+    })
 
 # ---------------------------------------------------------------- the instruction
 
@@ -173,6 +377,10 @@ MUST NOT CHANGE
 MUST DO
 - Replace absolute positioning with real layout: flexbox and grid, normal document
   flow, sensible containers. The page must reflow when the window is resized.
+- Sections must not overlap or be stacked on top of one another. Where the input has
+  one element inside the bounds of another, that is containment: nest it, rather than
+  emitting two blocks that collide. Read each element's measured `left`/`top`/`width`/
+  `height` to work out what sat inside what.
 - Use semantic elements: header, nav, main, section, footer, h1-h6, p, ul/li, button,
   a. Where the input already uses a meaningful tag, keep that meaning.
 - Put the CSS in one `<style>` block, organised, using CSS custom properties for the
@@ -389,7 +597,8 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
     produced something worth looking at -- but does report the loss so the caller can.
     """
     skeleton, assets = strip_assets(html)
-    prompt = build_prompt(skeleton, len(assets), extra, describe_assets(assets))
+    prompt = build_prompt(skeleton, len(assets), extra,
+                          describe_assets(assets, roles=asset_roles(html, assets)))
 
     reply = _unfence(call_gemini(prompt, api_key=api_key, model=model, timeout=timeout,
                                  on_retry=on_retry))
@@ -418,7 +627,8 @@ def _main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Rewrite a reconstruction into a laid-out, animated page.")
     ap.add_argument("source", nargs="?",
-                    help="a screenshot/PDF to reconstruct first, or an .html file")
+                    help="a screenshot or PDF to reconstruct first, a .json document "
+                         "export, or an already-rendered .html file")
     ap.add_argument("-o", "--out", help="where to write the result "
                                         "(default: <source>.enhanced.html)")
     ap.add_argument("-m", "--model", help=f"default: {DEFAULT_MODEL}")
@@ -427,6 +637,8 @@ def _main(argv: Optional[List[str]] = None) -> int:
                     help="build the prompt and report its size without calling anything")
     ap.add_argument("--list-models", action="store_true",
                     help="ask the API which models this key can call, and exit")
+    ap.add_argument("--no-flatten", action="store_true",
+                    help="send the raster fragments as-is instead of composing them")
     args = ap.parse_args(argv)
 
     if args.list_models:
@@ -437,20 +649,35 @@ def _main(argv: Optional[List[str]] = None) -> int:
     if not args.source:
         ap.error("a source is required unless --list-models is given")
 
-    if args.source.lower().endswith((".html", ".htm")):
+    lower = args.source.lower()
+    if lower.endswith((".html", ".htm")):
         with open(args.source, encoding="utf-8") as fh:
             html = fh.read()
+        if not args.no_flatten:
+            print("note: raster flattening needs the document model, so it is skipped "
+                  "for .html input. Pass the image, or a .json export, to get it.")
     else:
         from engine import DocumentData, HTMLRenderer, ImageReconstructor
-        page = ImageReconstructor.reconstruct_image(args.source)
-        html = HTMLRenderer.render_document(
-            DocumentData(title=os.path.basename(args.source), pageCount=1, pages=[page]),
-            editable=False, interactive=False)
+        if lower.endswith(".json"):
+            import json as _json
+            with open(args.source, encoding="utf-8") as fh:
+                doc = DocumentData.model_validate(_json.load(fh))
+        else:
+            page = ImageReconstructor.reconstruct_image(args.source)
+            doc = DocumentData(title=os.path.basename(args.source), pageCount=1,
+                               pages=[page])
+        if not args.no_flatten:
+            before = sum(1 for p in doc.pages for e in p.elements if e.type == "image")
+            doc = flatten_document(doc)
+            after = sum(1 for p in doc.pages for e in p.elements if e.type == "image")
+            if after != before:
+                print(f"flattened {before} raster fragments into {after} images")
+        html = HTMLRenderer.render_document(doc, editable=False, interactive=False)
 
     if args.dry_run:
         skeleton, assets = strip_assets(html)
         prompt = build_prompt(skeleton, len(assets), args.instructions,
-                              describe_assets(assets))
+                              describe_assets(assets, roles=asset_roles(html, assets)))
         print(f"page      {len(html):>9,} chars")
         print(f"prompt    {len(prompt):>9,} chars  (~{len(prompt)//4:,} tokens)")
         print(f"assets    {len(assets):>9,} held back, "

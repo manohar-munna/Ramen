@@ -59,6 +59,7 @@ class EnhanceRequest(BaseModel):
     html: Optional[str] = None
     instructions: Optional[str] = None
     model: Optional[str] = None
+    flatten: bool = True
 
 def update_job_stage(job_id: str, stage: str, detail: str, percent: int, completed: bool = False, error: str = None):
     JOB_PROGRESS[job_id] = {
@@ -263,9 +264,14 @@ def enhance_document(req: EnhanceRequest):
         raise HTTPException(status_code=400, detail="Send either 'document' or 'html'.")
     try:
         if req.html:
+            # Flattening needs the element model; raw HTML has already lost it.
             html_content = req.html
         else:
             doc_data = DocumentData.model_validate(req.document)
+            if req.flatten:
+                # Compose the raster fragments first. They only form a picture at their
+                # measured coordinates, and the rewrite puts everything into flow.
+                doc_data = enhancer.flatten_document(doc_data)
             html_content = Exporter.export_standalone_html(doc_data, interactive=False)
         result = enhancer.enhance_html(
             html_content, model=req.model, extra=req.instructions
