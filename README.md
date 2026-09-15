@@ -166,35 +166,96 @@ well *built*. Rewriting it as flowing, semantic, animated HTML has no ground tru
 measure against, so it is a separate pass and a language model does it.
 
 ```bash
-cp .env.example .env          # then put a Gemini key in it
+cp .env.example .env                        # then put a Gemini key in it
 python enhancer.py benchmarks/images/axion-logistics.png
-python enhancer.py page.html --dry-run    # prompt size, no network call
+python enhancer.py page.json --dry-run      # prompt size, no network call
+python enhancer.py --list-models            # what this key can actually call
+python tools/enhance_all.py                 # every reference, scored; resumable
 ```
 
 Or press **Enhance** in the editor. The result opens in a new tab; the reconstruction is
 untouched.
 
-**Images are held back.** About 95% of a reconstructed page by weight is inline base64
-PNG — the logistics page is 1.52M characters, roughly 380k tokens, none of which a
-language model can use, since it cannot see pixels. Each data URI is swapped for a short
-marker (identical assets sharing one), which takes that page to 67k characters and ~17k
-tokens; the markers are restored afterwards. So the images never depend on the model
-reproducing a megabyte of base64 exactly, and a marker it drops is counted and reported
-rather than silently costing you an image.
+### Images are held back
 
-**What it will and will not do.** The prompt forbids changing any visible text, dropping
-any image marker, or moving far from the original palette and type scale; it asks for
-flex/grid layout, semantic tags, hover and focus states, transitions, responsiveness down
-to 480px, and `prefers-reduced-motion` support. None of that is enforced — it is a model
-following instructions, and the output is not measured by any of the tools above. Treat
-the enhanced page as a draft to read, not as a reconstruction.
+About 95% of a reconstructed page by weight is inline base64 PNG — the logistics page is
+1.52M characters, roughly 380k tokens, none of which a language model can use, since it
+cannot see pixels. Each data URI is swapped for a short marker (identical assets sharing
+one), which takes that page to ~17k tokens; the markers are restored afterwards, so the
+images never depend on the model reproducing a megabyte of base64 exactly.
+
+Each marker is sent with its pixel size, dominant colours and whether it is a photograph
+or a small graphic. That costs about 1.4k characters and is what took the reference
+photographs from scattered fragments to correctly proportioned images — a model asked to
+lay out pictures it cannot see needs to be told something about them.
+
+### Fragments are composed first
+
+The residual pass cuts out exactly the pixels CSS could not explain, so a photographic
+page arrives as dozens of crops that only add up to a picture because each is pinned to a
+measured coordinate. In normal flow they scatter. Overlapping fragments are therefore
+painted onto one canvas before the model sees them — woodnest goes from 107 to 73, yelp
+19 to 8, stanford 18 to 3.
+
+**This is verified rather than assumed.** Compositing is what the browser does anyway, so
+flattening ought to be invisible; it is not invisible by construction. The renderer leaves
+a container on `z-index: auto` exactly when it has children, so merging or re-parenting
+changes who has children and restacks things a long way from the edit. Checked across the
+eleven references, five pages rendered differently — by up to 237 levels on a channel.
+Two analytic guards were written for that and both failed in the same run, in opposite
+directions: one refused a page that was provably identical while passing another that was
+114 levels out. So both versions are now rendered and compared, and a page that would
+change is handed over unflattened. Six of the eleven flatten, five fall back, and all
+eleven render identically to their reconstruction.
+
+### When the model drops an image
+
+It is asked for that image back by anchor rather than by rewrite. Requesting a corrected
+copy of the whole document meant regenerating seventy thousand characters to add four
+`<img>` tags, and the same four came back missing every round. Instead the model returns
+one line per lost image — the marker and a short run of text copied from its own output —
+and the insertion is done locally: the anchor must appear exactly once or it is refused
+and counted. Whichever attempt lost least is kept.
+
+### What it will and will not do
+
+The prompt forbids changing any visible text, dropping any image marker, or moving far
+from the original palette and type scale; it asks for flex/grid layout, semantic tags,
+hover and focus states, transitions, responsiveness down to 480px, and
+`prefers-reduced-motion` support. **None of that is enforced** — it is a model following
+instructions. Run `tools/audit_enhanced.py` on the result: it diffs visible words and
+embedded images against the reconstruction and says what actually moved.
+
+Output varies between runs of the same page. Axion came back once with no text lost and
+once 29 words short, same prompt, different model. Treat the enhanced page as a draft,
+and treat the audit as the thing that tells you which draft you got.
+
+### Measured across all eleven references
+
+| | |
+|---|---|
+| Every image preserved | **11 of 11 pages** |
+| No visible text lost | **10 of 11** (axion lost 29 word occurrences) |
+| Images dropped in total | **0**, so the repair pass never had to fire |
+| `position: absolute` | 78 → 7, 128 → 4, 118 → 6, typical |
+| Flex/grid containers | 9 to 33 per page, from 2 |
 
 | | |
 |---|---|
 | `GEMINI_API_KEY` | required, from [AI Studio](https://aistudio.google.com/apikey) |
-| `GEMINI_MODEL` | optional, defaults to `gemini-2.5-pro` |
+| `GEMINI_MODEL` | optional; defaults to a flash model that answers |
 
 `.env` is gitignored. No new dependency — the call goes through `urllib`.
+
+**On models and quota.** Availability is genuinely unreliable and worth knowing before
+you debug the wrong thing. `gemini-2.5-pro` is still listed by the models endpoint while
+returning 404 to any key created after it was retired; pro models 429 on the free tier
+entirely; and a flash model returned 503 to a full page four times running while
+answering a one-line prompt instantly. The free tier allows **20 requests per day per
+model**, so enhancing eleven pages meant rotating across four of them. `--list-models`
+asks the API rather than trusting documentation, retries honour the server's own
+`retryDelay`, and an exhausted daily allowance fails immediately instead of backing off
+against something no backoff can fix.
 
 ---
 
