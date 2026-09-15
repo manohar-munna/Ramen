@@ -21,9 +21,12 @@ of base64 exactly.
 """
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Dict, List, Optional, Tuple
@@ -34,7 +37,17 @@ _PLACEHOLDER = "RAMEN_ASSET_%d"
 _PLACEHOLDER_RE = re.compile(r"RAMEN_ASSET_(\d+)")
 _DATA_URI_RE = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+")
 
-DEFAULT_MODEL = "gemini-2.5-pro"
+# An alias rather than a pinned version, deliberately. A pinned name goes stale without
+# warning: gemini-2.5-pro was still listed by the models endpoint while returning 404 to
+# any key created after it was retired. Flash rather than pro because pro is not in the
+# free tier -- a new key gets 429 on every pro model and works fine on flash, and being
+# usable out of the box matters more here than the last few points of quality.
+DEFAULT_MODEL = "gemini-3-flash-preview"
+# Availability is genuinely unreliable: gemini-2.5-pro is still listed by the models
+# endpoint while returning 404 to any key made after it was retired, pro models 429 on
+# the free tier, and gemini-flash-latest returned 503 to a full page four times running
+# while answering a one-line prompt instantly. So try several rather than trusting one.
+FALLBACK_MODELS = ("gemini-3-flash-preview", "gemini-flash-latest", "gemini-3.5-flash")
 _ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/models/"
              "{model}:generateContent")
 
@@ -81,6 +94,53 @@ def restore_assets(html: str, assets: List[str]) -> Tuple[str, List[int]]:
     return _PLACEHOLDER_RE.sub(swap, html), missing
 
 
+def describe_assets(assets: List[str], max_colours: int = 3) -> List[str]:
+    """One line per held-back image: its size and the colours in it.
+
+    Stripping the images also strips the page's colour identity, which is a problem
+    nobody notices until the result comes back grey. On the logistics page the red is
+    entirely in the photographs of the containers; every flat surface really is a grey or
+    a near-white, so a model shown only the skeleton has no way to know the page is red,
+    and duly picks a palette of #1a1a1a and #888888.
+
+    Sending a few dominant colours and the dimensions costs a couple of dozen tokens and
+    gives back both the palette and enough shape information to size the image sensibly.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return []
+
+    lines = []
+    for i, uri in enumerate(assets):
+        head, _, payload = uri.partition(",")
+        try:
+            raw = base64.b64decode(payload)
+            im = Image.open(io.BytesIO(raw))
+            w, h = im.size
+            rgb = im.convert("RGBA")
+            # Ignore transparent pixels: a carved-out backdrop is mostly nothing, and
+            # averaging the nothing in turns every colour towards the same grey.
+            small = rgb.resize((min(w, 64), min(h, 64)))
+            pixels = [p for p in small.getdata() if p[3] > 128]
+            if not pixels:
+                lines.append(f"{_PLACEHOLDER % i}  {w}x{h}  (fully transparent)")
+                continue
+            quant = Image.new("RGB", (len(pixels), 1))
+            quant.putdata([p[:3] for p in pixels])
+            quant = quant.quantize(colors=max_colours, method=Image.Quantize.FASTOCTREE)
+            pal = quant.getpalette() or []
+            counts = sorted(quant.getcolors() or [], reverse=True)
+            names = []
+            for _, idx in counts[:max_colours]:
+                r, g, b = pal[idx * 3:idx * 3 + 3]
+                names.append("#%02x%02x%02x" % (r, g, b))
+            lines.append(f"{_PLACEHOLDER % i}  {w}x{h}  {' '.join(names)}")
+        except Exception:
+            lines.append(f"{_PLACEHOLDER % i}  (unreadable)")
+    return lines
+
+
 def _unfence(text: str) -> str:
     """Models wrap code in fences however often you ask them not to."""
     text = text.strip()
@@ -125,6 +185,15 @@ MUST DO
 - Keep images responsive: `max-width: 100%%`, `height: auto`, and `object-fit` where an
   image fills a box.
 
+THE IMAGES YOU CANNOT SEE
+Each marker below is followed by its pixel size and its most common colours. The page's
+real colour identity is usually in these rather than in the CSS, because photographs
+carry it and flat surfaces do not. Build the palette from them as well as from the
+stylesheet -- do not return a grey page because the skeleton looked grey. Use the sizes
+to give each image a sensible aspect ratio.
+
+%(assets)s
+
 OUTPUT
 Return the complete HTML document and nothing else. No explanation, no commentary, no
 markdown fences. Start with `<!DOCTYPE html>`.
@@ -135,11 +204,13 @@ Here is the file:
 """
 
 
-def build_prompt(skeleton: str, n_assets: int, extra: Optional[str] = None) -> str:
+def build_prompt(skeleton: str, n_assets: int, extra: Optional[str] = None,
+                 asset_lines: Optional[List[str]] = None) -> str:
     prompt = PROMPT % {
         "html": skeleton,
         "n_assets": n_assets,
         "max_asset": max(n_assets - 1, 0),
+        "assets": "\n".join(asset_lines or []) or "(none)",
     }
     if extra:
         prompt += "\n\nAdditional instructions from the user, which take precedence:\n"
@@ -192,9 +263,42 @@ def _api_key(explicit: Optional[str] = None) -> str:
     return key
 
 
+def list_models(api_key: Optional[str] = None, timeout: int = 60) -> List[str]:
+    """Model names this key can actually pass to generateContent.
+
+    Worth having as a first-class command: the error you get for a retired model names a
+    replacement that may also not be available to you, and guessing from documentation is
+    how this broke in the first place.
+    """
+    req = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+        headers={"x-goog-api-key": _api_key(api_key)})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise EnhancementError(f"Could not list models: {e.code}") from e
+    except urllib.error.URLError as e:
+        raise EnhancementError(f"Could not reach Gemini: {e.reason}") from e
+    return sorted(
+        m["name"].replace("models/", "")
+        for m in payload.get("models", [])
+        if "generateContent" in m.get("supportedGenerationMethods", []))
+
+
+# 503 means the model is busy and 429 can mean a per-minute ceiling rather than an
+# exhausted plan. Both are worth waiting out rather than handing back to the caller: a
+# page takes a couple of minutes to reconstruct, and losing that to a transient spike is
+# a poor trade for the few seconds a retry costs.
+RETRY_STATUSES = (429, 500, 502, 503, 504)
+RETRY_ATTEMPTS = 4
+RETRY_BACKOFF = 6.0     # seconds, doubling
+
+
 def call_gemini(prompt: str, api_key: Optional[str] = None,
-                model: Optional[str] = None, timeout: int = 300) -> str:
-    """Sends one prompt and returns the text of the reply."""
+                model: Optional[str] = None, timeout: int = 300,
+                attempts: int = RETRY_ATTEMPTS, on_retry=None) -> str:
+    """Sends one prompt and returns the text of the reply, retrying transient failures."""
     model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
     body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -206,25 +310,23 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
         },
     }).encode("utf-8")
 
-    req = urllib.request.Request(
-        _ENDPOINT.format(model=model),
-        data=body,
-        headers={"Content-Type": "application/json",
-                 "x-goog-api-key": _api_key(api_key)},
-        method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:600]
-        raise EnhancementError(f"Gemini returned {e.code}: {detail}") from e
-    except urllib.error.URLError as e:
-        raise EnhancementError(f"Could not reach Gemini: {e.reason}") from e
+    key = _api_key(api_key)
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            payload = _post(model, body, key, timeout)
+            break
+        except _Transient as t:
+            if attempt >= attempts:
+                raise t.error
+            delay = RETRY_BACKOFF * (2 ** (attempt - 1))
+            if on_retry:
+                on_retry(attempt, attempts, t.code, delay)
+            time.sleep(delay)
 
     candidates = payload.get("candidates") or []
     if not candidates:
         blocked = (payload.get("promptFeedback") or {}).get("blockReason")
-        raise EnhancementError(f"Gemini returned no candidates"
+        raise EnhancementError("Gemini returned no candidates"
                                + (f" (blocked: {blocked})" if blocked else ""))
     parts = (candidates[0].get("content") or {}).get("parts") or []
     text = "".join(p.get("text", "") for p in parts).strip()
@@ -238,19 +340,59 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
     return text
 
 
+class _Transient(Exception):
+    def __init__(self, code, error):
+        self.code, self.error = code, error
+
+
+def _post(model: str, body: bytes, key: str, timeout: int) -> dict:
+    req = urllib.request.Request(
+        _ENDPOINT.format(model=model),
+        data=body,
+        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:600]
+        # These two are worth naming, because the raw message sends people the wrong way.
+        sep = chr(10) + chr(10)
+        if e.code == 404 and "model" in detail.lower():
+            hint = (sep + f"The model '{model}' is not available to this key. Models are "
+                    "retired without being delisted, so a name can appear valid and still "
+                    "404. Run `python enhancer.py --list-models` to see what this key can "
+                    "actually call, then set GEMINI_MODEL in .env.")
+        elif e.code == 429:
+            hint = (sep + "This is a quota limit, not a bad key. Pro models are not in the "
+                    "free tier: a new key gets 429 on every one of them and works on flash. "
+                    "Either leave GEMINI_MODEL unset (it defaults to flash) or enable "
+                    "billing for pro access.")
+        else:
+            hint = ""
+        err = EnhancementError(f"Gemini returned {e.code}: {detail}{hint}")
+        if e.code in RETRY_STATUSES:
+            raise _Transient(e.code, err) from e
+        raise err from e
+    except urllib.error.URLError as e:
+        raise EnhancementError(f"Could not reach Gemini: {e.reason}") from e
+
+
 # ---------------------------------------------------------------- the whole pass
 
 def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] = None,
-                 extra: Optional[str] = None, timeout: int = 300) -> Dict[str, object]:
+                 extra: Optional[str] = None, timeout: int = 300,
+                 on_retry=None) -> Dict[str, object]:
     """Rewrites a reconstructed page. Returns the HTML and what happened to it.
 
     Never raises for a merely disappointing result -- a model that drops an image still
     produced something worth looking at -- but does report the loss so the caller can.
     """
     skeleton, assets = strip_assets(html)
-    prompt = build_prompt(skeleton, len(assets), extra)
+    prompt = build_prompt(skeleton, len(assets), extra, describe_assets(assets))
 
-    reply = _unfence(call_gemini(prompt, api_key=api_key, model=model, timeout=timeout))
+    reply = _unfence(call_gemini(prompt, api_key=api_key, model=model, timeout=timeout,
+                                 on_retry=on_retry))
     if "<" not in reply:
         raise EnhancementError("Gemini's reply does not look like HTML: "
                                + reply[:200])
@@ -272,18 +414,28 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
 def _main(argv: Optional[List[str]] = None) -> int:
     import argparse
     import sys
-    import time
 
     ap = argparse.ArgumentParser(
         description="Rewrite a reconstruction into a laid-out, animated page.")
-    ap.add_argument("source", help="a screenshot/PDF to reconstruct first, or an .html file")
+    ap.add_argument("source", nargs="?",
+                    help="a screenshot/PDF to reconstruct first, or an .html file")
     ap.add_argument("-o", "--out", help="where to write the result "
                                         "(default: <source>.enhanced.html)")
     ap.add_argument("-m", "--model", help=f"default: {DEFAULT_MODEL}")
     ap.add_argument("-i", "--instructions", help="extra direction for the rewrite")
     ap.add_argument("--dry-run", action="store_true",
                     help="build the prompt and report its size without calling anything")
+    ap.add_argument("--list-models", action="store_true",
+                    help="ask the API which models this key can call, and exit")
     args = ap.parse_args(argv)
+
+    if args.list_models:
+        for name in list_models():
+            print(name)
+        return 0
+
+    if not args.source:
+        ap.error("a source is required unless --list-models is given")
 
     if args.source.lower().endswith((".html", ".htm")):
         with open(args.source, encoding="utf-8") as fh:
@@ -297,7 +449,8 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     if args.dry_run:
         skeleton, assets = strip_assets(html)
-        prompt = build_prompt(skeleton, len(assets), args.instructions)
+        prompt = build_prompt(skeleton, len(assets), args.instructions,
+                              describe_assets(assets))
         print(f"page      {len(html):>9,} chars")
         print(f"prompt    {len(prompt):>9,} chars  (~{len(prompt)//4:,} tokens)")
         print(f"assets    {len(assets):>9,} held back, "
@@ -307,8 +460,14 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     out = args.out or (os.path.splitext(args.source)[0] + ".enhanced.html")
     started = time.time()
+
+    def note(attempt, total, code, delay):
+        print(f"  {code} from the model (attempt {attempt}/{total}); "
+              f"retrying in {delay:.0f}s", flush=True)
+
     try:
-        result = enhance_html(html, model=args.model, extra=args.instructions)
+        result = enhance_html(html, model=args.model, extra=args.instructions,
+                              on_retry=note)
     except EnhancementError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
