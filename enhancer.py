@@ -77,6 +77,27 @@ def strip_assets(html: str) -> Tuple[str, List[str]]:
     return _DATA_URI_RE.sub(swap, html), assets
 
 
+def missing_markers(html: str, n_assets: int) -> List[int]:
+    """Indices of assets whose marker does not appear in `html`."""
+    seen = {int(m) for m in _PLACEHOLDER_RE.findall(html)}
+    return [i for i in range(n_assets) if i not in seen]
+
+
+def marker_context(skeleton: str, index: int, span: int = 220) -> str:
+    """The text around a marker in the original skeleton, as a one-line hint.
+
+    Telling the model an image is missing is not much use on its own; telling it what
+    the image sat next to is, because that is the question it has to answer to put it
+    back in the right place.
+    """
+    m = re.search(r"RAMEN_ASSET_%d\b" % index, skeleton)
+    if not m:
+        return ""
+    lo = max(0, m.start() - span)
+    hi = min(len(skeleton), m.end() + span)
+    return " ".join(skeleton[lo:hi].split())
+
+
 def restore_assets(html: str, assets: List[str]) -> Tuple[str, List[int]]:
     """Puts the data URIs back. Returns the HTML and any markers the model lost.
 
@@ -84,8 +105,7 @@ def restore_assets(html: str, assets: List[str]) -> Tuple[str, List[int]]:
     image, and the caller should be able to say so instead of silently shipping a page
     with content missing.
     """
-    seen = {int(m) for m in _PLACEHOLDER_RE.findall(html)}
-    missing = [i for i in range(len(assets)) if i not in seen]
+    missing = missing_markers(html, len(assets))
 
     def swap(match: re.Match) -> str:
         i = int(match.group(1))
@@ -539,6 +559,87 @@ Here is the file:
 """
 
 
+REPAIR_PROMPT = """\
+You rewrote an HTML page and some images were lost: their `RAMEN_ASSET_<n>` markers are
+not in your output, so those pictures are gone from the page.
+
+Do NOT rewrite the document. Just say where each missing image belongs.
+
+For each marker below, reply with one line:
+
+    RAMEN_ASSET_<n> ||| <anchor>
+
+where `<anchor>` is a short run of text copied EXACTLY from the document below, between
+40 and 120 characters, that appears exactly once. The image will be inserted immediately
+after that anchor. Choose an anchor that puts the picture where it belongs -- inside the
+right section, next to the content it goes with.
+
+Reply with nothing but those lines. No explanation, no markdown fences.
+
+Missing images:
+
+%(missing)s
+
+The document:
+
+%(html)s
+"""
+
+
+_LOG: List[str] = []          # diagnostics the caller may want to print
+_REPAIR_LINE = re.compile(r"(RAMEN_ASSET_(\d+))\s*\|\|\|\s*(.+?)\s*$", re.M)
+
+
+def build_repair_prompt(current: str, missing: List[int], skeleton: str,
+                        asset_lines: Optional[List[str]] = None) -> str:
+    by_index = {}
+    for line in (asset_lines or []):
+        parts = line.split()
+        if parts:
+            m = _PLACEHOLDER_RE.match(parts[0])
+            if m:
+                by_index[int(m.group(1))] = line
+
+    notes = []
+    for i in missing:
+        notes.append("- " + (by_index.get(i) or (_PLACEHOLDER % i)))
+        ctx = marker_context(skeleton, i)
+        if ctx:
+            notes.append("  it sat here in the original: %s" % ctx)
+    return REPAIR_PROMPT % {"missing": "\n".join(notes), "html": current}
+
+
+def apply_repair(current: str, reply: str, missing: List[int]) -> Tuple[str, List[int]]:
+    """Inserts each missing marker after the anchor the model named.
+
+    The model decides *where*; the insertion itself is done here. Asking it to hand back
+    a corrected copy of the whole document meant regenerating seventy thousand characters
+    to add four image tags, and it simply did not -- the same four came back missing
+    every time. An anchor is a dozen tokens and can be checked before it is trusted.
+    """
+    placed, rejected = [], []
+    for whole, index, anchor in _REPAIR_LINE.findall(reply):
+        i = int(index)
+        if i not in missing:
+            continue
+        anchor = anchor.strip().strip('"').strip("'")
+        hits = current.count(anchor)
+        if len(anchor) < 8 or hits != 1:
+            # Not found or ambiguous. Worth counting rather than swallowing: an anchor
+            # that never matches means the model is quoting text it did not write.
+            rejected.append((i, len(anchor), hits))
+            continue
+        tag = f'<img src="{whole}" alt="" loading="lazy">'
+        at = current.index(anchor) + len(anchor)
+        current = current[:at] + tag + current[at:]
+        placed.append(i)
+    if rejected:
+        _LOG.append("repair: rejected %d anchor(s): %s"
+                    % (len(rejected), ", ".join(
+                        "asset %d (len %d, %d matches)" % r for r in rejected)))
+    return current, [i for i in missing if i not in placed]
+
+
 def build_prompt(skeleton: str, n_assets: int, extra: Optional[str] = None,
                  asset_lines: Optional[List[str]] = None) -> str:
     prompt = PROMPT % {
@@ -629,6 +730,9 @@ RETRY_STATUSES = (429, 500, 502, 503, 504)
 RETRY_ATTEMPTS = 4
 RETRY_BACKOFF = 6.0     # seconds, doubling
 
+# How many times to go back and ask for images the rewrite lost.
+REPAIR_ATTEMPTS = 2
+
 
 def call_gemini(prompt: str, api_key: Optional[str] = None,
                 model: Optional[str] = None, timeout: int = 300,
@@ -653,7 +757,8 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
         except _Transient as t:
             if attempt >= attempts:
                 raise t.error
-            delay = RETRY_BACKOFF * (2 ** (attempt - 1))
+            # The server knows better than a doubling guess when it says so.
+            delay = t.retry_after or (RETRY_BACKOFF * (2 ** (attempt - 1)))
             if on_retry:
                 on_retry(attempt, attempts, t.code, delay)
             time.sleep(delay)
@@ -676,8 +781,8 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
 
 
 class _Transient(Exception):
-    def __init__(self, code, error):
-        self.code, self.error = code, error
+    def __init__(self, code, error, retry_after=None):
+        self.code, self.error, self.retry_after = code, error, retry_after
 
 
 def _post(model: str, body: bytes, key: str, timeout: int) -> dict:
@@ -699,15 +804,30 @@ def _post(model: str, body: bytes, key: str, timeout: int) -> dict:
                     "404. Run `python enhancer.py --list-models` to see what this key can "
                     "actually call, then set GEMINI_MODEL in .env.")
         elif e.code == 429:
-            hint = (sep + "This is a quota limit, not a bad key. Pro models are not in the "
-                    "free tier: a new key gets 429 on every one of them and works on flash. "
-                    "Either leave GEMINI_MODEL unset (it defaults to flash) or enable "
-                    "billing for pro access.")
+            if "per day" in detail or "_requests, limit:" in detail:
+                hint = (sep + "The free tier's daily request allowance for this model is "
+                        "gone; no amount of retrying will help until it resets. Try "
+                        "another model (python enhancer.py --list-models) or enable "
+                        "billing.")
+            else:
+                hint = (sep + "A rate limit rather than a bad key. Pro models are also "
+                        "outside the free tier, so a new key gets 429 on every one of "
+                        "them and works on flash.")
         else:
             hint = ""
         err = EnhancementError(f"Gemini returned {e.code}: {detail}{hint}")
-        if e.code in RETRY_STATUSES:
-            raise _Transient(e.code, err) from e
+        # A daily allowance does not come back in forty seconds, so backing off against
+        # it only wastes the caller's time before failing anyway.
+        exhausted = e.code == 429 and ("per day" in detail or "_requests, limit:" in detail)
+        if e.code in RETRY_STATUSES and not exhausted:
+            wait = None
+            m = re.search(r'"retryDelay"\s*:\s*"([\d.]+)s"', detail)
+            if m:
+                try:
+                    wait = float(m.group(1))
+                except ValueError:
+                    wait = None
+            raise _Transient(e.code, err, wait) from e
         raise err from e
     except urllib.error.URLError as e:
         raise EnhancementError(f"Could not reach Gemini: {e.reason}") from e
@@ -724,8 +844,8 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
     produced something worth looking at -- but does report the loss so the caller can.
     """
     skeleton, assets = strip_assets(html)
-    prompt = build_prompt(skeleton, len(assets), extra,
-                          describe_assets(assets, roles=asset_roles(html, assets)))
+    asset_lines = describe_assets(assets, roles=asset_roles(html, assets))
+    prompt = build_prompt(skeleton, len(assets), extra, asset_lines)
 
     reply = _unfence(call_gemini(prompt, api_key=api_key, model=model, timeout=timeout,
                                  on_retry=on_retry))
@@ -733,12 +853,38 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
         raise EnhancementError("Gemini's reply does not look like HTML: "
                                + reply[:200])
 
+    # A dropped marker is a piece of the page nobody can see any more, and re-rolling the
+    # whole rewrite to fix it throws away a good layout to chase an image. Ask for the
+    # missing ones specifically instead, telling it what each one sat next to -- that is
+    # the question it has to answer to put them back in the right place. Keep whichever
+    # attempt lost the least, so a repair that makes things worse costs nothing.
+    del _LOG[:]
+    lost = missing_markers(reply, len(assets))
+    lost_initially = list(lost)
+    repairs = 0
+    while lost and repairs < REPAIR_ATTEMPTS:
+        repairs += 1
+        try:
+            answer = call_gemini(
+                build_repair_prompt(reply, lost, skeleton, asset_lines),
+                api_key=api_key, model=model, timeout=timeout, on_retry=on_retry)
+        except EnhancementError:
+            break                       # the first result is still worth returning
+        fixed, still = apply_repair(reply, answer, lost)
+        if len(still) >= len(lost):
+            break                       # no anchor was usable; keep what we had
+        reply, lost = fixed, still
+
     enhanced, missing = restore_assets(reply, assets)
     return {
         "html": enhanced,
         "model": model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL,
         "assets_total": len(assets),
         "assets_missing": missing,
+        "assets_missing_initially": lost_initially,
+        "assets_recovered": len(lost_initially) - len(missing),
+        "repair_rounds": repairs,
+        "notes": list(_LOG),
         "sent_chars": len(prompt),
         "original_chars": len(html),
         "enhanced_chars": len(enhanced),
@@ -831,9 +977,18 @@ def _main(argv: Optional[List[str]] = None) -> int:
     print(f"{result['model']} in {time.time() - started:.0f}s -> {out}")
     print(f"  {result['original_chars']:,} chars in, {result['enhanced_chars']:,} out; "
           f"sent {result['sent_chars']:,}")
+    rounds = result.get("repair_rounds") or 0
+    first = result.get("assets_missing_initially") or []
+    if first:
+        print(f"  the rewrite dropped {len(first)} image(s): {first}")
+    if rounds:
+        print(f"  recovered {result.get('assets_recovered', 0)} of them "
+              f"over {rounds} repair round(s)")
+    for note in result.get("notes") or []:
+        print(f"  {note}")
     missing = result["assets_missing"]
     if missing:
-        print(f"  WARNING: the model dropped {len(missing)} image(s): {missing}")
+        print(f"  WARNING: {len(missing)} image(s) still missing: {missing}")
     return 0
 
 
