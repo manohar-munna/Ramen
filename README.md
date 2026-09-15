@@ -4,9 +4,15 @@ Reconstructs a page image or a PDF into HTML that both **looks like the original
 **is made of real elements** — a button that is a `<button>`, a link that is an `<a>`, a
 heading that is an `<h1>` — with an editor for correcting what the engine got wrong.
 
-**Deterministic. No LLM, no VLM, no generative model.** Everything is measured from the
-pixels: colour segmentation, shape evidence, OCR, and typographic fitting. The only
-learned component in the reconstruction path is the OCR, and it only reads text.
+**Reconstruction is deterministic. No LLM, no VLM, no generative model.** Everything is
+measured from the pixels: colour segmentation, shape evidence, OCR, and typographic
+fitting. The only learned component in the reconstruction path is the OCR, and it only
+reads text.
+
+There is also an **optional** pass that hands the finished HTML to Gemini to be rebuilt
+with real layout and transitions. It is off unless you supply a key, it runs after
+reconstruction rather than inside it, and it cannot change what the engine measured — see
+[Enhancement](#enhancement-optional).
 
 ---
 
@@ -72,6 +78,7 @@ Ramen/
 ├── app.py                       # FastAPI server & REST API endpoints
 ├── engine.py                    # Reconstruction engine
 ├── index.html                   # Single-page desktop editor UI
+├── enhancer.py                  # Optional Gemini rewrite pass (not part of the engine)
 ├── test_app.py                  # Test suite for engine & API
 ├── requirements.txt
 ├── benchmarks/                  # Everything the engine is measured against
@@ -145,6 +152,46 @@ closed (5.4 points before the last round of changes, 6.51 after). Resolution
 normalisation makes the thresholds scale-aware but does not make small captures
 reconstruct as well as large ones, and nothing currently measures which threshold is
 responsible.
+
+---
+
+## Enhancement (optional)
+
+The engine optimises for faithfulness and is measured on it, which is why its output is a
+pile of absolutely-positioned divs: nothing in the pipeline is rewarded for the page being
+well *built*. Rewriting it as flowing, semantic, animated HTML has no ground truth to
+measure against, so it is a separate pass and a language model does it.
+
+```bash
+cp .env.example .env          # then put a Gemini key in it
+python enhancer.py benchmarks/images/axion-logistics.png
+python enhancer.py page.html --dry-run    # prompt size, no network call
+```
+
+Or press **Enhance** in the editor. The result opens in a new tab; the reconstruction is
+untouched.
+
+**Images are held back.** About 95% of a reconstructed page by weight is inline base64
+PNG — the logistics page is 1.52M characters, roughly 380k tokens, none of which a
+language model can use, since it cannot see pixels. Each data URI is swapped for a short
+marker (identical assets sharing one), which takes that page to 67k characters and ~17k
+tokens; the markers are restored afterwards. So the images never depend on the model
+reproducing a megabyte of base64 exactly, and a marker it drops is counted and reported
+rather than silently costing you an image.
+
+**What it will and will not do.** The prompt forbids changing any visible text, dropping
+any image marker, or moving far from the original palette and type scale; it asks for
+flex/grid layout, semantic tags, hover and focus states, transitions, responsiveness down
+to 480px, and `prefers-reduced-motion` support. None of that is enforced — it is a model
+following instructions, and the output is not measured by any of the tools above. Treat
+the enhanced page as a draft to read, not as a reconstruction.
+
+| | |
+|---|---|
+| `GEMINI_API_KEY` | required, from [AI Studio](https://aistudio.google.com/apikey) |
+| `GEMINI_MODEL` | optional, defaults to `gemini-2.5-pro` |
+
+`.env` is gitignored. No new dependency — the call goes through `urllib`.
 
 ---
 
