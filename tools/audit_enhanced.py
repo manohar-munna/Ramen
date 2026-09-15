@@ -20,9 +20,19 @@ _DATA_URI = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,([A-Za-z0-9+/=]+)")
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 
 
+_HEAD = re.compile(r"<head[^>]*>.*?</head>", re.S | re.I)
+
+
 def visible_words(html: str) -> Counter:
-    """Every word a reader would see, as a multiset."""
-    body = _STYLE.sub(" ", html)
+    """Every word a reader would see in the page, as a multiset.
+
+    The <head> is cut first. It carries the <title>, which is not on the page and which
+    a rewrite is right to improve -- "site-stanford" becoming "Stanford University" is a
+    better title, not lost content. Counting it reported a word lost on five of the
+    eleven references and hid how clean those runs actually were.
+    """
+    body = _HEAD.sub(" ", html)
+    body = _STYLE.sub(" ", body)
     body = _TAG.sub(" ", body)
     # html.unescape rather than a handful of replacements: the reconstruction emits
     # numeric entities such as &#x27;, and a partial decoder reads that as the word
