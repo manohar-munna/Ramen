@@ -236,8 +236,12 @@ def _bbox_of(elem) -> Tuple[float, float, float, float]:
 
 
 def _group_fragments(boxes: List[Tuple[float, float, float, float]],
-                     gap: float) -> List[List[int]]:
-    """Union-find over boxes that touch once grown by `gap`."""
+                     gap: float, blocked=None) -> List[List[int]]:
+    """Union-find over boxes that touch once grown by `gap`.
+
+    `blocked(i, j)` may veto a pair. Two fragments can only be composed onto one canvas
+    if nothing paints between them, so the caller uses it to keep the page's layering.
+    """
     parent = list(range(len(boxes)))
 
     def find(i):
@@ -257,6 +261,8 @@ def _group_fragments(boxes: List[Tuple[float, float, float, float]],
             bx0, by0, bx1, by1 = boxes[j]
             if (ax0 - gap < bx1 and bx0 - gap < ax1
                     and ay0 - gap < by1 and by0 - gap < ay1):
+                if blocked and blocked(i, j):
+                    continue
                 union(i, j)
 
     groups: Dict[int, List[int]] = {}
@@ -265,8 +271,39 @@ def _group_fragments(boxes: List[Tuple[float, float, float, float]],
     return list(groups.values())
 
 
+def _reparent_is_safe(elements, host_id: str, moved_index: int,
+                      x0: float, y0: float, x1: float, y1: float) -> bool:
+    """Whether nesting an element inside `host_id` leaves the page looking the same.
+
+    Nesting is not free. A child paints with its parent, so moving an element earlier in
+    the document moves it earlier in the paint order, and anything that used to sit
+    between the two now covers it. Measured before this existed: five of the eleven
+    reference pages rendered differently after flattening, by as much as 237 levels on a
+    channel, and the splitting step was most of it.
+    """
+    host_at = None
+    for i, e in enumerate(elements):
+        if e.id == host_id:
+            host_at = i
+            break
+    if host_at is None or host_at > moved_index:
+        return False                      # the host paints after it; nesting reorders
+    for k in range(host_at + 1, moved_index):
+        other = elements[k]
+        if other.type == "rect" and (other.box is None
+                                     or not other.box.backgroundColor):
+            continue                      # paints nothing
+        if other.type == "text":
+            continue                      # text is emitted above everything regardless
+        ox0, oy0, ox1, oy1 = _bbox_of(other)
+        if ox0 < x1 and x0 < ox1 and oy0 < y1 and y0 < oy1:
+            return False                  # this would end up on top of the moved element
+    return True
+
+
 def _innermost_container(elements, x0: float, y0: float, x1: float, y1: float,
-                         pad: float = 2.0) -> Optional[str]:
+                         pad: float = 2.0, moved_index: Optional[int] = None
+                         ) -> Optional[str]:
     """Id of the smallest painted box that encloses this rectangle, if any."""
     best_id, best_area = None, None
     for e in elements:
@@ -279,6 +316,9 @@ def _innermost_container(elements, x0: float, y0: float, x1: float, y1: float,
             # A box the same size as the picture is the picture's own frame, not a
             # section that holds it; either is fine, but prefer the tighter one.
             if area > 0 and (best_area is None or area < best_area):
+                if moved_index is not None and not _reparent_is_safe(
+                        elements, e.id, moved_index, x0, y0, x1, y1):
+                    continue
                 best_id, best_area = e.id, area
     return best_id
 
@@ -305,6 +345,14 @@ def _split_across_containers(elements, elem, min_share: float = 0.06):
     if w < 4 or h < 4:
         return None
 
+    at = None
+    for i, e in enumerate(elements):
+        if e is elem or e.id == elem.id:
+            at = i
+            break
+    if at is None:
+        return None
+
     tops = [e for e in elements
             if e.type == "rect" and not getattr(e, "parentId", None)]
     pieces = []
@@ -317,6 +365,8 @@ def _split_across_containers(elements, elem, min_share: float = 0.06):
         share = ((ix1 - ix0) * (iy1 - iy0)) / max((x1 - x0) * (y1 - y0), 1.0)
         if share < min_share:
             continue                     # a clipped corner, not a column of the picture
+        if not _reparent_is_safe(elements, host.id, at, ix0, iy0, ix1, iy1):
+            return None                  # cutting it up here would change the render
         pieces.append((host.id, ix0, iy0, ix1, iy1))
 
     if len(pieces) < 2:
@@ -387,22 +437,55 @@ def flatten_page_rasters(page, gap: float = FLATTEN_GAP):
     # whether anything can hold the result.
     by_id = {e.id: e for e in elements}
 
+    _PAGE = object()          # one shared key, not one per homeless fragment
+
     def root_of(elem):
         seen = set()
+        first = True
         while True:
             pid = getattr(elem, "parentId", None)
             if not pid or pid in seen or pid not in by_id:
-                return elem.id
+                # A fragment with no container is not inside anything, so pairing it
+                # with another of the same kind crosses no boundary. Returning its own
+                # id here instead gave every one of them a group to itself: on the
+                # woodnest page 99 of 107 rasters are unparented, 166 pairs of them sit
+                # within the merge gap, and not one merge happened.
+                return _PAGE if first else elem.id
             seen.add(pid)
             elem = by_id[pid]
+            first = False
 
     groups: List[List[int]] = []
     by_root: Dict[object, List[int]] = {}
     for k, i in enumerate(idx):
         by_root.setdefault(root_of(elements[i]), []).append(k)
+    # Compositing puts every fragment of a group at one position in the paint order, so
+    # it is only faithful while nothing else is drawn between them. Where something is --
+    # a card painted over one crop and under the next -- merging silently reorders the
+    # page. Checked across the references rather than assumed: before this, five of the
+    # eleven rendered differently after flattening, by up to 237 levels on a channel.
+    def paints_between(a: int, b: int) -> bool:
+        lo, hi = sorted((idx[a], idx[b]))
+        ux0 = min(boxes[a][0], boxes[b][0])
+        uy0 = min(boxes[a][1], boxes[b][1])
+        ux1 = max(boxes[a][2], boxes[b][2])
+        uy1 = max(boxes[a][3], boxes[b][3])
+        for k in range(lo + 1, hi):
+            other = elements[k]
+            if other.type == "image":
+                continue          # another fragment: it joins the group or stays in order
+            if other.type == "rect" and (other.box is None
+                                         or not other.box.backgroundColor):
+                continue          # paints nothing, so it cannot come between them
+            ox0, oy0, ox1, oy1 = _bbox_of(other)
+            if ox0 < ux1 and ux0 < ox1 and oy0 < uy1 and uy0 < oy1:
+                return True
+        return False
+
     for members in by_root.values():
         sub = [boxes[m] for m in members]
-        for grp in _group_fragments(sub, gap * scale):
+        veto = lambda a, b: paints_between(members[a], members[b])   # noqa: E731
+        for grp in _group_fragments(sub, gap * scale, blocked=veto):
             groups.append([members[g] for g in grp])
 
     replacements: Dict[int, object] = {}
@@ -468,7 +551,8 @@ def flatten_page_rasters(page, gap: float = FLATTEN_GAP):
             "src": uri,
             "naturalWidth": float(gw),
             "naturalHeight": float(gh),
-            "parentId": _innermost_container(elements, gx0, gy0, gx0 + gw, gy0 + gh),
+            "parentId": _innermost_container(elements, gx0, gy0, gx0 + gw, gy0 + gh,
+                                             moved_index=keep),
         })
         replacements[keep] = merged
         for m in members[1:]:
@@ -495,11 +579,101 @@ def flatten_page_rasters(page, gap: float = FLATTEN_GAP):
     return page.model_copy(update={"elements": split})
 
 
-def flatten_document(doc):
-    """`flatten_page_rasters` across every page of a document."""
-    return doc.model_copy(update={
-        "pages": [flatten_page_rasters(p) for p in (doc.pages or [])]
-    })
+_CHROME_CANDIDATES = (
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "google-chrome", "chromium", "chromium-browser",
+)
+
+
+def _find_chrome() -> Optional[str]:
+    import shutil
+    for c in _CHROME_CANDIDATES:
+        if os.path.isfile(c):
+            return c
+        found = shutil.which(c)
+        if found:
+            return found
+    return None
+
+
+def renders_identically(before, after, tolerance: int = 2) -> Optional[bool]:
+    """Whether two pages draw the same thing. None when it cannot be checked.
+
+    Flattening ought to be invisible -- compositing is what the browser was doing
+    anyway -- but it is not invisible by construction. The renderer leaves a container
+    on `z-index: auto` exactly when it has children, so merging or re-parenting changes
+    who has children and silently restacks things a long way from the edit. Analytic
+    guards for that were tried and were both too strict and too loose in the same run:
+    they refused a page that was provably fine and passed one that was 114 levels out.
+    Rendering both and looking is the only answer that is actually about the pixels.
+    """
+    chrome = _find_chrome()
+    if not chrome:
+        return None
+    try:
+        import subprocess
+        import tempfile
+        import numpy as np
+        from PIL import Image
+        from engine import DocumentData, HTMLRenderer
+    except Exception:
+        return None
+
+    w = int(float(before.width or 1400))
+    h = int(float(before.height or 1000))
+    shots = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for tag, page in (("a", before), ("b", after)):
+            html = HTMLRenderer.render_document(
+                DocumentData(title=tag, pageCount=1, pages=[page]),
+                editable=False, interactive=False)
+            html = html.replace("padding: 24px;", "padding: 0;").replace(
+                "gap: 24px;", "gap: 0;")
+            hp = os.path.join(tmp, tag + ".html")
+            with open(hp, "w", encoding="utf-8") as fh:
+                fh.write(html)
+            sp = os.path.join(tmp, tag + ".png")
+            try:
+                subprocess.run([chrome, "--headless", "--disable-gpu",
+                                "--hide-scrollbars", "--force-device-scale-factor=1",
+                                "--window-size=%d,%d" % (w, h),
+                                "--virtual-time-budget=5000",
+                                "--screenshot=" + sp, "file:///" + hp.replace("\\", "/")],
+                               check=True, capture_output=True, timeout=180)
+                shots.append(np.asarray(Image.open(sp).convert("RGB"), dtype=np.int16))
+            except Exception:
+                return None
+    if len(shots) != 2:
+        return None
+    a, b = shots
+    hh, ww = min(a.shape[0], b.shape[0]), min(a.shape[1], b.shape[1])
+    return int(np.abs(a[:hh, :ww] - b[:hh, :ww]).max()) <= tolerance
+
+
+def flatten_document(doc, verify: bool = True):
+    """`flatten_page_rasters` across every page, keeping only what renders the same.
+
+    A page that cannot be flattened without changing how it looks is handed over
+    unflattened. That is worse input for the rewrite -- more fragments to place -- but
+    it is honest input, and a picture quietly restacked is worse than a fiddly one.
+    """
+    pages = []
+    for page in (doc.pages or []):
+        flat = flatten_page_rasters(page)
+        if flat is page or not verify:
+            pages.append(flat)
+            continue
+        same = renders_identically(page, flat)
+        if same is False:
+            _LOG.append("flatten: %d fragments left alone on one page; composing them "
+                        "would have changed the render"
+                        % sum(1 for e in page.elements if e.type == "image"))
+            pages.append(page)
+        else:
+            pages.append(flat)
+    return doc.model_copy(update={"pages": pages})
 
 # ---------------------------------------------------------------- the instruction
 
