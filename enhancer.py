@@ -245,6 +245,97 @@ def _group_fragments(boxes: List[Tuple[float, float, float, float]],
     return list(groups.values())
 
 
+def _innermost_container(elements, x0: float, y0: float, x1: float, y1: float,
+                         pad: float = 2.0) -> Optional[str]:
+    """Id of the smallest painted box that encloses this rectangle, if any."""
+    best_id, best_area = None, None
+    for e in elements:
+        if e.type != "rect":
+            continue
+        bx0, by0, bx1, by1 = _bbox_of(e)
+        if (bx0 - pad <= x0 and by0 - pad <= y0
+                and bx1 + pad >= x1 and by1 + pad >= y1):
+            area = (bx1 - bx0) * (by1 - by0)
+            # A box the same size as the picture is the picture's own frame, not a
+            # section that holds it; either is fine, but prefer the tighter one.
+            if area > 0 and (best_area is None or area < best_area):
+                best_id, best_area = e.id, area
+    return best_id
+
+
+def _split_across_containers(elements, elem, min_share: float = 0.06):
+    """Cuts an unparentable raster along the top-level boxes it crosses.
+
+    A photograph that spans two columns has nothing that contains it, so it can only be
+    emitted at the document root -- where a picture the width of the page is read as the
+    page's background and put behind all the content. Usually it is not one picture at
+    all: the region detector joined two photographs that happened to sit in the same
+    horizontal band. Cutting it back along the containers it crosses gives each column
+    its own image, each nested where it belongs.
+
+    Returns replacement elements, or None to leave it alone.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    x0, y0, x1, y1 = _bbox_of(elem)
+    w, h = int(round(x1 - x0)), int(round(y1 - y0))
+    if w < 4 or h < 4:
+        return None
+
+    tops = [e for e in elements
+            if e.type == "rect" and not getattr(e, "parentId", None)]
+    pieces = []
+    for host in tops:
+        hx0, hy0, hx1, hy1 = _bbox_of(host)
+        ix0, iy0 = max(x0, hx0), max(y0, hy0)
+        ix1, iy1 = min(x1, hx1), min(y1, hy1)
+        if ix1 - ix0 < 4 or iy1 - iy0 < 4:
+            continue
+        share = ((ix1 - ix0) * (iy1 - iy0)) / max((x1 - x0) * (y1 - y0), 1.0)
+        if share < min_share:
+            continue                     # a clipped corner, not a column of the picture
+        pieces.append((host.id, ix0, iy0, ix1, iy1))
+
+    if len(pieces) < 2:
+        return None                      # nothing gained by cutting it up
+
+    try:
+        raw = base64.b64decode(elem.src.partition(",")[2])
+        im = Image.open(io.BytesIO(raw)).convert("RGBA")
+    except Exception:
+        return None
+    if im.size != (w, h):
+        im = im.resize((w, h), Image.LANCZOS)
+
+    out = []
+    for n, (host_id, ix0, iy0, ix1, iy1) in enumerate(pieces, start=1):
+        crop = im.crop((int(round(ix0 - x0)), int(round(iy0 - y0)),
+                        int(round(ix1 - x0)), int(round(iy1 - y0))))
+        bbox = crop.getbbox()
+        if not bbox:
+            continue                     # this column of the picture is empty
+        crop = crop.crop(bbox)
+        px0, py0 = ix0 + bbox[0], iy0 + bbox[1]
+        cw, ch = crop.size
+        if cw < 4 or ch < 4:
+            continue
+        buf = io.BytesIO()
+        crop.save(buf, format="PNG", optimize=True)
+        out.append(elem.model_copy(update={
+            "id": f"{elem.id}-{n}",
+            "bbox": [px0, py0, px0 + cw, py0 + ch],
+            "src": "data:image/png;base64,"
+                   + base64.b64encode(buf.getvalue()).decode("ascii"),
+            "naturalWidth": float(cw),
+            "naturalHeight": float(ch),
+            "parentId": host_id,
+        }))
+    return out if len(out) >= 2 else None
+
+
 def flatten_page_rasters(page, gap: float = FLATTEN_GAP):
     """Returns a copy of `page` whose overlapping image fragments are composed.
 
@@ -265,12 +356,34 @@ def flatten_page_rasters(page, gap: float = FLATTEN_GAP):
     scale = max(float(page.width or 1400.0) / 1400.0, 0.5)
     boxes = [_bbox_of(elements[i]) for i in idx]
 
-    # Proximity alone, deliberately, after trying the obvious refinement and measuring it.
-    # Restricting groups to fragments sharing a container is better reasoned and produces
-    # worse pages: it left 17 images instead of 7, they collided in flow exactly as the
-    # raw fragments had, and the model dropped three of them. Fewer, larger pictures are
-    # easier to lay out than many small correct ones.
-    groups = _group_fragments(boxes, gap * scale)
+    # Merge on proximity, but never across the top-level containers of the page. A group
+    # that spans two of them has no element that contains it, so the composite has to be
+    # emitted at the document root -- and a root-level image 1235x836 on a 1297x1056 page
+    # is, quite reasonably, read as the page's background and put behind everything.
+    #
+    # Grouping by immediate parent instead was tried and is worse: 17 images rather than
+    # 7, colliding in flow exactly as the raw fragments had, three of them dropped. The
+    # top-level ancestor is the boundary that matters, because it is the one that decides
+    # whether anything can hold the result.
+    by_id = {e.id: e for e in elements}
+
+    def root_of(elem):
+        seen = set()
+        while True:
+            pid = getattr(elem, "parentId", None)
+            if not pid or pid in seen or pid not in by_id:
+                return elem.id
+            seen.add(pid)
+            elem = by_id[pid]
+
+    groups: List[List[int]] = []
+    by_root: Dict[object, List[int]] = {}
+    for k, i in enumerate(idx):
+        by_root.setdefault(root_of(elements[i]), []).append(k)
+    for members in by_root.values():
+        sub = [boxes[m] for m in members]
+        for grp in _group_fragments(sub, gap * scale):
+            groups.append([members[g] for g in grp])
 
     replacements: Dict[int, object] = {}
     drop: set = set()
@@ -326,26 +439,40 @@ def flatten_page_rasters(page, gap: float = FLATTEN_GAP):
 
         keep = idx[members[0]]
         host = elements[keep]
+        # The composite covers more ground than any one fragment did, so inheriting a
+        # fragment's parent can leave it hanging outside the box that holds it. Ask which
+        # element actually contains the new rectangle, smallest first: that is the section
+        # it belongs to, and nesting it there is what stops it becoming a page backdrop.
         merged = host.model_copy(update={
             "bbox": [gx0, gy0, gx0 + gw, gy0 + gh],
             "src": uri,
             "naturalWidth": float(gw),
             "naturalHeight": float(gh),
-            # Parent it where the largest fragment sat: that is the container the
-            # picture visually belongs to, and the smaller pieces are decoration on it.
-            "parentId": elements[idx[max(members, key=lambda m: (boxes[m][2] - boxes[m][0])
-                                         * (boxes[m][3] - boxes[m][1]))]].parentId,
+            "parentId": _innermost_container(elements, gx0, gy0, gx0 + gw, gy0 + gh),
         })
         replacements[keep] = merged
         for m in members[1:]:
             drop.add(idx[m])
         made += 1
 
-    if not made:
-        return page
-
     out = [replacements.get(i, e) for i, e in enumerate(elements) if i not in drop]
-    return page.model_copy(update={"elements": out})
+
+    # Anything still homeless spans more than one top-level box; cut it along them.
+    split: List[object] = []
+    changed = False
+    for e in out:
+        if (e.type == "image" and e.src and not getattr(e, "parentId", None)
+                and e.src.startswith("data:image")):
+            parts = _split_across_containers(out, e)
+            if parts:
+                split.extend(parts)
+                changed = True
+                continue
+        split.append(e)
+
+    if not made and not changed:
+        return page
+    return page.model_copy(update={"elements": split})
 
 
 def flatten_document(doc):
