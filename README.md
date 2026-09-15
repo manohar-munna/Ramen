@@ -217,16 +217,18 @@ trained on both learns to tell them apart and applies a different prior to each.
 
 ## Known limitations
 
-- **Pill-shaped controls are not promoted.** Every strongly-rounded surface on the six
+- **Pill-shaped controls are not promoted.** Every strongly-rounded surface across the
   reference pages has zero text runs attached to it, including a 1203×68 pill nav bar, so
   the button scorer returns 0 before it starts. The scoring is not rejecting them; the
-  label never reaches them.
+  label never reaches them. Diagnosed, not fixed, and probably the best ratio of value to
+  effort left in the project.
 - **Icons are absorbed into the text layer.** OCR reads a glyph-like icon as characters —
   one renders as the literal string `83` — so the icon is neither drawn nor available as
   an element.
 - **Ground truth exists for one page.** Component accuracy is therefore a single-page
-  measurement, and generalisation is unproven. Adding references is the highest-value
-  contribution.
+  measurement, and generalisation is unproven. There are now eleven reference images but
+  only one has a hand-read component list, so "24/25" is a claim about one page. Adding
+  ground truth is the highest-value contribution to this repo.
 - **Output is mostly base64.** Roughly 90% of each exported file is inline PNG data, and
   a page runs 0.6–1.8 MB. Fine to view, not yet a clean hand-editable document.
 - **Typeface is approximated.** The engine fits size, spacing and width, but cannot
@@ -245,3 +247,14 @@ trained on both learns to tell them apart and applies a different prior to each.
   authentication, no upload size limit and no cleanup policy for `outputs/`.
 - **`html2canvas` is loaded from a CDN** for the in-app fidelity comparison, so that one
   feature needs network access.
+
+### Not limitations, though they look like them
+
+- **Words that come back cut off.** The logistics page reconstructs `pertise`, `ogistics`
+  and `olutions`. Every one of those starts at x≈890, which is the left edge of a white
+  card the design lays over the panel behind it: the `Ex` and the `L` are genuinely not
+  in the pixels, and a reader of the screenshot sees the same thing. Completing them
+  would mean inferring glyphs from context, which is invention rather than measurement,
+  so the engine leaves them. The enhancement prompt forbids "fixing" them for the same
+  reason, and `tools/audit_enhanced.py` reports it as *added* text when a model does it
+  anyway.
