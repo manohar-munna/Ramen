@@ -17,6 +17,7 @@ from engine import (
     PDFAnalyzer, DigitalExtractor, ScannedExtractor, ImageReconstructor,
     HTMLRenderer, Exporter, FidelityChecker, ModelManager
 )
+import enhancer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
@@ -51,6 +52,13 @@ class CompareRequest(BaseModel):
 class ExportRequest(BaseModel):
     document: Dict[str, Any]
     format: str = "zip"  # 'zip', 'html', 'json'
+
+class EnhanceRequest(BaseModel):
+    # Either a document to render first, or HTML that is already rendered.
+    document: Optional[Dict[str, Any]] = None
+    html: Optional[str] = None
+    instructions: Optional[str] = None
+    model: Optional[str] = None
 
 def update_job_stage(job_id: str, stage: str, detail: str, percent: int, completed: bool = False, error: str = None):
     JOB_PROGRESS[job_id] = {
@@ -233,6 +241,41 @@ def export_document(req: ExportRequest):
             )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Export failed: {str(e)}")
+
+@app.get("/api/enhance/status")
+def enhance_status():
+    """Whether the enhancement pass can run. Never returns the key itself."""
+    return {
+        "configured": enhancer.is_configured(),
+        "model": os.environ.get("GEMINI_MODEL") or enhancer.DEFAULT_MODEL,
+    }
+
+@app.post("/api/enhance")
+def enhance_document(req: EnhanceRequest):
+    """Rewrites a reconstruction into a laid-out, animated page via Gemini.
+
+    Strictly optional and strictly downstream: nothing here feeds back into the engine,
+    and the faithful reconstruction the caller sent is unchanged by it. The response
+    carries both the new HTML and what the model did to the images, because a page that
+    quietly lost one is worse than an error.
+    """
+    if not req.html and not req.document:
+        raise HTTPException(status_code=400, detail="Send either 'document' or 'html'.")
+    try:
+        if req.html:
+            html_content = req.html
+        else:
+            doc_data = DocumentData.model_validate(req.document)
+            html_content = Exporter.export_standalone_html(doc_data, interactive=False)
+        result = enhancer.enhance_html(
+            html_content, model=req.model, extra=req.instructions
+        )
+        return result
+    except enhancer.EnhancementError as e:
+        # The model or the key is the problem, not the request. 502 says so.
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Enhancement failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
