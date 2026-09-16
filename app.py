@@ -9,7 +9,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTa
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 import pymupdf
 
 from engine import (
@@ -18,6 +18,9 @@ from engine import (
     HTMLRenderer, Exporter, FidelityChecker, ModelManager
 )
 import enhancer
+import logging
+
+logger = logging.getLogger("ramen.api")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
@@ -280,8 +283,19 @@ def enhance_document(req: EnhanceRequest):
     except enhancer.EnhancementError as e:
         # The model or the key is the problem, not the request. 502 says so.
         raise HTTPException(status_code=502, detail=str(e))
+    except ValidationError as e:
+        raise HTTPException(status_code=400,
+                            detail=f"That document did not validate: {e}")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Enhancement failed: {str(e)}")
+        # Anything reaching here is a fault on this side, and 400 said the opposite --
+        # it sent one debugging session looking at the browser's payload when the real
+        # cause was the server holding a half-reloaded module. Log the traceback and
+        # name the exception type, so the next one is readable from either end.
+        logger.exception("enhancement failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Enhancement failed inside the server: "
+                   f"{type(e).__name__}: {e}. The full traceback is in the server log.")
 
 if __name__ == "__main__":
     import uvicorn
