@@ -293,11 +293,11 @@ trained on both learns to tell them apart and applies a different prior to each.
 
 ## Known limitations
 
-- **Pill-shaped controls are not promoted.** Every strongly-rounded surface across the
-  reference pages has zero text runs attached to it, including a 1203×68 pill nav bar, so
-  the button scorer returns 0 before it starts. The scoring is not rejecting them; the
-  label never reaches them. Diagnosed, not fixed, and probably the best ratio of value to
-  effort left in the project.
+- **Fully pill-shaped controls are untested.** Rounded buttons are promoted correctly --
+  the Reddit page yields `<button>` elements with `#ff4500` backgrounds and an `<input>`
+  with its placeholder, all painted by CSS. But no control with a radius of half its own
+  height appears anywhere in the eleven references, so that case has no evidence behind
+  it either way.
 - **Icons are absorbed into the text layer.** OCR reads a glyph-like icon as characters —
   one renders as the literal string `83` — so the icon is neither drawn nor available as
   an element.
