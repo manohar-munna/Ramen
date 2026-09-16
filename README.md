@@ -125,6 +125,8 @@ python tools/eval_image.py path/to/one.png  # or just one
 python tools/eval_pdf.py                    # the 20-page PDF benchmark
 python tools/audit_components.py            # component accuracy where ground truth exists
 python tools/test_scale_invariance.py       # the same page at 0.6x, 1x, 1.6x
+python tools/audit_enhanced.py A.html B.html   # what a rewrite did to the content
+python tools/enhance_all.py                 # enhance every reference and score it
 ```
 
 **Adding a reference**: drop a screenshot into `benchmarks/images/`. The fidelity tools
@@ -144,17 +146,30 @@ fidelity as a guardrail and read the rendered output yourself.
 
 | | |
 |---|---|
-| Image path, 6 reference pages | **89.91%** mean SSIM (86.9 – 93.4) |
-| Component accuracy | **24/25** on the page with ground truth |
+| Image path, 11 reference pages | **92.33%** mean SSIM (86.9 – 97.2) |
+| Component accuracy | **24/25** on the one page with ground truth |
 | Digital PDF, 20-page benchmark | **90.81%** mean SSIM |
 | Test suite | **10/10** |
 | Spread across a 2.7x resolution range | **6.51** points, worst page |
+
+**That mean went up without the engine getting better.** The six pages collected while
+building it still average 89.91%, unchanged; the five real-site captures added later
+average 95.24%, and pull the combined figure to 92.33%. They score higher because they
+are mostly flat interface at 1920x941 — larger captures and less photography — which is
+exactly the kind of thing this pipeline finds easy. Read the two groups separately or the
+number will flatter the next change you make.
+
+| | |
+|---|---|
+| The original six | **89.91%** — hero sections, heavy photography |
+| Five real sites | **95.24%** — bandcamp, netflix, stanford, whatsapp, yelp |
 
 Every page scores higher at 1.6x than at 0.6x, and the gap has widened rather than
 closed (5.4 points before the last round of changes, 6.51 after). Resolution
 normalisation makes the thresholds scale-aware but does not make small captures
 reconstruct as well as large ones, and nothing currently measures which threshold is
-responsible.
+responsible. That figure is from the original six; it has not been re-measured across
+all eleven.
 
 ---
 
