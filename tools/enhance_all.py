@@ -113,7 +113,7 @@ def main():
             t1 = time.time()
             try:
                 result = enhancer.enhance_html(
-                    faithful, model=args.model,
+                    faithful, model=args.model, reference=path,
                     on_retry=lambda a, t, c, d: print(
                         "    %s from the model (%d/%d); waiting %.0fs" % (c, a, t, d),
                         flush=True))

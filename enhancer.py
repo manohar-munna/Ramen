@@ -29,7 +29,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Distinctive enough that a model will carry it through verbatim, and short enough that
 # it costs nothing. Deliberately not a URL: nothing should try to fetch it.
@@ -814,14 +814,36 @@ def apply_repair(current: str, reply: str, missing: List[int]) -> Tuple[str, Lis
     return current, [i for i in missing if i not in placed]
 
 
+REFERENCE_NOTE = """\
+
+THE SCREENSHOT
+A screenshot of the page this HTML was reconstructed from is attached. It is the
+authority on what the page is meant to look like, and the HTML below is only a
+machine's approximation of it -- where the two disagree, believe the screenshot.
+
+Use it to work out what the HTML cannot tell you: which blocks are one component,
+what is a header or a card or a footer, what the reading order is, which things are
+aligned with each other, and where the real margins and rhythm are. Several of the
+HTML's elements are fragments of one visual thing; the screenshot is how you can tell.
+
+It does not license inventing anything. Text still comes from the HTML, character for
+character, including words the screenshot shows cut off behind something -- those are
+genuinely cut off in the design and must stay that way.
+"""
+
+
 def build_prompt(skeleton: str, n_assets: int, extra: Optional[str] = None,
-                 asset_lines: Optional[List[str]] = None) -> str:
+                 asset_lines: Optional[List[str]] = None,
+                 has_reference: bool = False) -> str:
     prompt = PROMPT % {
         "html": skeleton,
         "n_assets": n_assets,
         "max_asset": max(n_assets - 1, 0),
         "assets": "\n".join(asset_lines or []) or "(none)",
     }
+    if has_reference:
+        head, sep, tail = prompt.partition("OUTPUT\n")
+        prompt = head + REFERENCE_NOTE + "\n" + sep + tail
     if extra:
         prompt += "\n\nAdditional instructions from the user, which take precedence:\n"
         prompt += extra.strip() + "\n"
@@ -910,11 +932,20 @@ REPAIR_ATTEMPTS = 2
 
 def call_gemini(prompt: str, api_key: Optional[str] = None,
                 model: Optional[str] = None, timeout: int = 300,
-                attempts: int = RETRY_ATTEMPTS, on_retry=None) -> str:
-    """Sends one prompt and returns the text of the reply, retrying transient failures."""
+                attempts: int = RETRY_ATTEMPTS, on_retry=None,
+                image: Optional[Tuple[str, str]] = None) -> str:
+    """Sends one prompt, optionally with an image, and returns the text of the reply.
+
+    `image` is (mime type, base64 payload). A screenshot costs about a thousand tokens
+    against a skeleton of sixteen thousand, which is cheap for the only description of
+    the page that is not second-hand.
+    """
     model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
+    parts: List[Dict[str, Any]] = [{"text": prompt}]
+    if image:
+        parts.append({"inline_data": {"mime_type": image[0], "data": image[1]}})
     body = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"parts": parts}],
         "generationConfig": {
             # Low but not zero: layout decisions benefit from a little freedom, and
             # nothing here needs to be reproducible -- the faithful version already is.
@@ -1009,9 +1040,40 @@ def _post(model: str, body: bytes, key: str, timeout: int) -> dict:
 
 # ---------------------------------------------------------------- the whole pass
 
+def as_inline_image(source) -> Optional[Tuple[str, str]]:
+    """(mime, base64) from a path, raw bytes, or a data URI. None if there is nothing."""
+    if not source:
+        return None
+    if isinstance(source, tuple):
+        return source
+    if isinstance(source, bytes):
+        return "image/png", base64.b64encode(source).decode("ascii")
+    text = str(source)
+    if text.startswith("data:"):
+        head, _, payload = text.partition(",")
+        mime = head[5:].split(";")[0] or "image/png"
+        return mime, "".join(payload.split())
+    if os.path.isfile(text):
+        ext = os.path.splitext(text)[1].lower()
+        mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp"}.get(ext, "image/png")
+        with open(text, "rb") as fh:
+            return mime, base64.b64encode(fh.read()).decode("ascii")
+    return None
+
+
+def reference_from_document(doc) -> Optional[Tuple[str, str]]:
+    """The original screenshot, which every reconstructed page already carries."""
+    for page in (getattr(doc, "pages", None) or []):
+        got = as_inline_image(getattr(page, "originalImageSrc", None))
+        if got:
+            return got
+    return None
+
+
 def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] = None,
                  extra: Optional[str] = None, timeout: int = 300,
-                 on_retry=None) -> Dict[str, object]:
+                 on_retry=None, reference=None) -> Dict[str, object]:
     """Rewrites a reconstructed page. Returns the HTML and what happened to it.
 
     Never raises for a merely disappointing result -- a model that drops an image still
@@ -1019,10 +1081,11 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
     """
     skeleton, assets = strip_assets(html)
     asset_lines = describe_assets(assets, roles=asset_roles(html, assets))
-    prompt = build_prompt(skeleton, len(assets), extra, asset_lines)
+    shot = as_inline_image(reference)
+    prompt = build_prompt(skeleton, len(assets), extra, asset_lines, has_reference=bool(shot))
 
     reply = _unfence(call_gemini(prompt, api_key=api_key, model=model, timeout=timeout,
-                                 on_retry=on_retry))
+                                 on_retry=on_retry, image=shot))
     if "<" not in reply:
         raise EnhancementError("Gemini's reply does not look like HTML: "
                                + reply[:200])
@@ -1058,6 +1121,7 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
         "assets_missing_initially": lost_initially,
         "assets_recovered": len(lost_initially) - len(missing),
         "repair_rounds": repairs,
+        "saw_reference": bool(shot),
         "notes": list(_LOG),
         "sent_chars": len(prompt),
         "original_chars": len(html),
@@ -1086,6 +1150,11 @@ def _main(argv: Optional[List[str]] = None) -> int:
                     help="ask the API which models this key can call, and exit")
     ap.add_argument("--no-flatten", action="store_true",
                     help="send the raster fragments as-is instead of composing them")
+    ap.add_argument("-r", "--reference",
+                    help="screenshot of the intended result (defaults to the one the "
+                         "document already carries)")
+    ap.add_argument("--no-reference", action="store_true",
+                    help="do not send a screenshot, only the HTML")
     args = ap.parse_args(argv)
 
     if args.list_models:
@@ -1097,6 +1166,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
         ap.error("a source is required unless --list-models is given")
 
     lower = args.source.lower()
+    reference = args.reference
     if lower.endswith((".html", ".htm")):
         with open(args.source, encoding="utf-8") as fh:
             html = fh.read()
@@ -1113,6 +1183,14 @@ def _main(argv: Optional[List[str]] = None) -> int:
             page = ImageReconstructor.reconstruct_image(args.source)
             doc = DocumentData(title=os.path.basename(args.source), pageCount=1,
                                pages=[page])
+        # The reconstruction carries the screenshot it was built from, so the reference
+        # costs nothing to find and is the only unmediated description of the page.
+        if reference is None and not lower.endswith(".json"):
+            reference = args.source
+        if reference is None:
+            ref = reference_from_document(doc)
+            if ref:
+                reference = ref
         if not args.no_flatten:
             before = sum(1 for p in doc.pages for e in p.elements if e.type == "image")
             doc = flatten_document(doc)
@@ -1121,14 +1199,20 @@ def _main(argv: Optional[List[str]] = None) -> int:
                 print(f"flattened {before} raster fragments into {after} images")
         html = HTMLRenderer.render_document(doc, editable=False, interactive=False)
 
+    if args.no_reference:
+        reference = None
+
     if args.dry_run:
         skeleton, assets = strip_assets(html)
         prompt = build_prompt(skeleton, len(assets), args.instructions,
-                              describe_assets(assets, roles=asset_roles(html, assets)))
+                              describe_assets(assets, roles=asset_roles(html, assets)),
+                              has_reference=bool(as_inline_image(reference)))
         print(f"page      {len(html):>9,} chars")
         print(f"prompt    {len(prompt):>9,} chars  (~{len(prompt)//4:,} tokens)")
         print(f"assets    {len(assets):>9,} held back, "
               f"{100.0 * (len(html) - len(skeleton)) / max(len(html), 1):.1f}% of the page")
+        shot = as_inline_image(reference)
+        print(f"reference {'attached, ~1k tokens' if shot else 'none'}")
         print(f"key       {'present' if is_configured() else 'MISSING - see .env.example'}")
         return 0
 
@@ -1141,14 +1225,15 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     try:
         result = enhance_html(html, model=args.model, extra=args.instructions,
-                              on_retry=note)
+                              on_retry=note, reference=reference)
     except EnhancementError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
     with open(out, "w", encoding="utf-8") as fh:
         fh.write(str(result["html"]))
-    print(f"{result['model']} in {time.time() - started:.0f}s -> {out}")
+    print(f"{result['model']} in {time.time() - started:.0f}s -> {out}"
+          + ("  (with the screenshot)" if result.get("saw_reference") else ""))
     print(f"  {result['original_chars']:,} chars in, {result['enhanced_chars']:,} out; "
           f"sent {result['sent_chars']:,}")
     rounds = result.get("repair_rounds") or 0

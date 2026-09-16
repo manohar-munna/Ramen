@@ -63,6 +63,9 @@ class EnhanceRequest(BaseModel):
     instructions: Optional[str] = None
     model: Optional[str] = None
     flatten: bool = True
+    # A data URI or file path. Left unset, the document's own screenshot is used.
+    referenceImage: Optional[str] = None
+    useReference: bool = True
 
 def update_job_stage(job_id: str, stage: str, detail: str, percent: int, completed: bool = False, error: str = None):
     JOB_PROGRESS[job_id] = {
@@ -266,18 +269,24 @@ def enhance_document(req: EnhanceRequest):
     if not req.html and not req.document:
         raise HTTPException(status_code=400, detail="Send either 'document' or 'html'.")
     try:
+        reference = req.referenceImage if req.useReference else None
         if req.html:
             # Flattening needs the element model; raw HTML has already lost it.
             html_content = req.html
         else:
             doc_data = DocumentData.model_validate(req.document)
+            # Every reconstruction carries the screenshot it came from, so the model can
+            # be shown what the page is supposed to look like without the caller having
+            # to send it twice.
+            if reference is None and req.useReference:
+                reference = enhancer.reference_from_document(doc_data)
             if req.flatten:
                 # Compose the raster fragments first. They only form a picture at their
                 # measured coordinates, and the rewrite puts everything into flow.
                 doc_data = enhancer.flatten_document(doc_data)
             html_content = Exporter.export_standalone_html(doc_data, interactive=False)
         result = enhancer.enhance_html(
-            html_content, model=req.model, extra=req.instructions
+            html_content, model=req.model, extra=req.instructions, reference=reference
         )
         return result
     except enhancer.EnhancementError as e:
