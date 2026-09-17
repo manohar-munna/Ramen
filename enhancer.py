@@ -652,6 +652,67 @@ def renders_identically(before, after, tolerance: int = 2) -> Optional[bool]:
     return int(np.abs(a[:hh, :ww] - b[:hh, :ww]).max()) <= tolerance
 
 
+def render_html(html: str, width: int = 1400, height: int = 2400,
+                timeout: int = 180) -> Optional[Tuple[str, str]]:
+    """Screenshots a page and returns it as (mime, base64), or None if it cannot.
+
+    Entrance animations are settled first. Without that, a page that fades its sections
+    in comes back half transparent and every comparison reads it as a fault -- which it
+    did, and cost an afternoon before the cause was obvious.
+    """
+    chrome = _find_chrome()
+    if not chrome:
+        return None
+    settled = html.replace(
+        "</head>",
+        "<style>*,*::before,*::after{animation:none!important;"
+        "transition:none!important;opacity:1!important}</style></head>", 1)
+    try:
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            hp = os.path.join(tmp, "page.html")
+            with open(hp, "w", encoding="utf-8") as fh:
+                fh.write(settled)
+            sp = os.path.join(tmp, "page.png")
+            subprocess.run([chrome, "--headless", "--disable-gpu", "--hide-scrollbars",
+                            "--force-device-scale-factor=1",
+                            "--window-size=%d,%d" % (width, height),
+                            "--virtual-time-budget=8000",
+                            "--screenshot=" + sp, "file:///" + hp.replace("\\", "/")],
+                           check=True, capture_output=True, timeout=timeout)
+            with open(sp, "rb") as fh:
+                return "image/png", base64.b64encode(fh.read()).decode("ascii")
+    except Exception:
+        return None
+
+
+_WORDS_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_TAGS_RE = re.compile(r"<[^>]+>")
+_HEADSTYLE_RE = re.compile(r"<(head|script|style)[^>]*>.*?</\1>", re.S | re.I)
+
+
+_CONTROL_RE = re.compile(r"<(button|input|select|textarea)[\s>/]", re.I)
+
+# A refinement may tidy wording it inherited, but wholesale new text means it has
+# started transcribing what it sees in the render instead of reading the HTML.
+REFINE_MAX_WORD_GAIN = 4
+
+
+def _count_controls(html: str) -> int:
+    """Real interactive elements. A rewrite that turns them all into <a> has lost."""
+    return len(_CONTROL_RE.findall(html))
+
+
+def _visible_words(html: str):
+    """Multiset of words a reader would see. Used to refuse a lossy refinement."""
+    from collections import Counter
+    import html as _h
+    body = _HEADSTYLE_RE.sub(" ", html)
+    body = _TAGS_RE.sub(" ", body)
+    return Counter(w.lower() for w in _WORDS_RE.findall(_h.unescape(body)))
+
+
 def flatten_document(doc, verify: bool = True):
     """`flatten_page_rasters` across every page, keeping only what renders the same.
 
@@ -731,6 +792,44 @@ Here is the file:
 
 %(html)s
 """
+
+
+REFINE_PROMPT = """\
+You rewrote a page. Two screenshots are attached, in this order:
+
+1. THE TARGET -- the original design this is supposed to look like.
+2. YOUR RESULT -- your own rewrite, rendered in a browser just now.
+
+Compare them and fix the differences. Work on what a person would notice first:
+sections in the wrong order or overlapping, blocks that should sit side by side and
+are stacked (or the reverse), spacing and alignment that do not match, type that is
+much too large or too small, an image at the wrong size or in the wrong place, and
+anything from the target that is missing or clearly out of position.
+
+Rules unchanged from before:
+- Every piece of visible text stays exactly as it is in the HTML below. Do not reword,
+  translate, correct spelling, or add text of your own -- including words the target
+  shows cut off behind something, which are genuinely cut off in the design.
+- Every `RAMEN_ASSET_<n>` marker must survive, in an `src` attribute. There are
+  %(n_assets)d of them.
+- Keep the layout flowing: flexbox and grid, no absolute positioning, responsive down
+  to 480px, hover and focus states, and transitions.
+
+If a difference comes from the reconstruction rather than from your layout -- a colour
+the HTML simply does not contain, a piece of artwork the engine never extracted -- leave
+it alone. You cannot invent what was not given to you.
+
+Return the complete corrected HTML document and nothing else. No explanation, no
+markdown fences. Start with `<!DOCTYPE html>`.
+
+Your current document:
+
+%(html)s
+"""
+
+
+def build_refine_prompt(current: str, n_assets: int) -> str:
+    return REFINE_PROMPT % {"html": current, "n_assets": n_assets}
 
 
 REPAIR_PROMPT = """\
@@ -929,11 +1028,17 @@ RETRY_BACKOFF = 6.0     # seconds, doubling
 # How many times to go back and ask for images the rewrite lost.
 REPAIR_ATTEMPTS = 2
 
+# How many times to render the result and ask the model to close the gap with the
+# original. One round is worth a lot and two is usually worth a little; the guard below
+# means a bad round costs only time.
+REFINE_ROUNDS = 1
+
 
 def call_gemini(prompt: str, api_key: Optional[str] = None,
                 model: Optional[str] = None, timeout: int = 300,
                 attempts: int = RETRY_ATTEMPTS, on_retry=None,
-                image: Optional[Tuple[str, str]] = None) -> str:
+                image: Optional[Tuple[str, str]] = None,
+                images: Optional[List[Tuple[str, str]]] = None) -> str:
     """Sends one prompt, optionally with an image, and returns the text of the reply.
 
     `image` is (mime type, base64 payload). A screenshot costs about a thousand tokens
@@ -942,8 +1047,9 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
     """
     model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
     parts: List[Dict[str, Any]] = [{"text": prompt}]
-    if image:
-        parts.append({"inline_data": {"mime_type": image[0], "data": image[1]}})
+    for shot in ([image] if image else []) + list(images or []):
+        if shot:
+            parts.append({"inline_data": {"mime_type": shot[0], "data": shot[1]}})
     body = json.dumps({
         "contents": [{"parts": parts}],
         "generationConfig": {
@@ -965,7 +1071,7 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
             # The server knows better than a doubling guess when it says so.
             delay = t.retry_after or (RETRY_BACKOFF * (2 ** (attempt - 1)))
             if on_retry:
-                on_retry(attempt, attempts, t.code, delay)
+                on_retry(attempt, attempts, t.code or "a timeout", delay)
             time.sleep(delay)
 
     candidates = payload.get("candidates") or []
@@ -1035,7 +1141,16 @@ def _post(model: str, body: bytes, key: str, timeout: int) -> dict:
             raise _Transient(e.code, err, wait) from e
         raise err from e
     except urllib.error.URLError as e:
-        raise EnhancementError(f"Could not reach Gemini: {e.reason}") from e
+        # A dropped or refused connection is worth another try, same as a 503.
+        raise _Transient(0, EnhancementError(
+            f"Could not reach Gemini: {e.reason}")) from e
+    except (TimeoutError, OSError) as e:
+        # A read timeout is neither HTTPError nor URLError, so it escaped as a raw
+        # traceback and killed the run outright. Generating a whole page legitimately
+        # takes minutes, and waiting too long for one is the most ordinary transient
+        # failure there is.
+        raise _Transient(0, EnhancementError(
+            f"Gemini timed out or the connection failed: {e}")) from e
 
 
 # ---------------------------------------------------------------- the whole pass
@@ -1073,7 +1188,8 @@ def reference_from_document(doc) -> Optional[Tuple[str, str]]:
 
 def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] = None,
                  extra: Optional[str] = None, timeout: int = 300,
-                 on_retry=None, reference=None) -> Dict[str, object]:
+                 on_retry=None, reference=None,
+                 refine: int = REFINE_ROUNDS, on_round=None) -> Dict[str, object]:
     """Rewrites a reconstructed page. Returns the HTML and what happened to it.
 
     Never raises for a merely disappointing result -- a model that drops an image still
@@ -1112,9 +1228,72 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
             break                       # no anchor was usable; keep what we had
         reply, lost = fixed, still
 
+    # ---- look at the result and close the gap -------------------------------------
+    #
+    # Until now this was one shot: the model wrote a page and we took delivery, with no
+    # way for it to know whether the thing it produced resembled the design. Rendering
+    # it and handing back both pictures is the single change that most improves the
+    # output, and it is what screenshot-to-code calls checking its own work.
+    #
+    # Guarded, because a refinement is another generation and can be worse. A round is
+    # kept only if it loses no text and no image it was given; otherwise the previous
+    # version stands.
+    rounds_done = 0
+    for _ in range(max(0, refine)):
+        if not shot:
+            break                    # nothing to compare against
+        current_html, _ = restore_assets(reply, assets)
+        render = render_html(current_html)
+        if not render:
+            _LOG.append("refine: skipped, no headless browser available")
+            break
+        if on_round:
+            on_round(rounds_done + 1, max(0, refine))
+        try:
+            better = _unfence(call_gemini(
+                build_refine_prompt(reply, len(assets)),
+                api_key=api_key, model=model, timeout=timeout, on_retry=on_retry,
+                images=[shot, render]))
+        except EnhancementError as e:
+            _LOG.append("refine: round %d failed (%s)" % (rounds_done + 1,
+                                                          str(e).splitlines()[0][:80]))
+            break
+        if "<" not in better:
+            break
+
+        # Refuse a round that costs content or structure, however much better it looks.
+        # Text loss and image loss were the first two tests and they were not enough: a
+        # round came back with a visibly better left column, every <button> turned into
+        # an <a>, and 38 words of duplicated text where it had transcribed fragments it
+        # could see in its own render as well as read in the HTML. Both now disqualify.
+        lost_now = missing_markers(better, len(assets))
+        before_words = _visible_words(reply)
+        after_words = _visible_words(better)
+        word_loss = sum((before_words - after_words).values())
+        word_gain = sum((after_words - before_words).values())
+        controls_before = _count_controls(reply)
+        controls_after = _count_controls(better)
+        reasons = []
+        if len(lost_now) > len(lost):
+            reasons.append("lost %d image(s)" % (len(lost_now) - len(lost)))
+        if word_loss:
+            reasons.append("lost %d word(s)" % word_loss)
+        if word_gain > REFINE_MAX_WORD_GAIN:
+            reasons.append("invented %d word(s)" % word_gain)
+        if controls_after < controls_before:
+            reasons.append("dropped %d control(s) to plain markup"
+                           % (controls_before - controls_after))
+        if reasons:
+            _LOG.append("refine: round %d discarded -- it %s"
+                        % (rounds_done + 1, ", ".join(reasons)))
+            break
+        reply, lost = better, lost_now
+        rounds_done += 1
+
     enhanced, missing = restore_assets(reply, assets)
     return {
         "html": enhanced,
+        "refine_rounds": rounds_done,
         "model": model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL,
         "assets_total": len(assets),
         "assets_missing": missing,
@@ -1155,6 +1334,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
                          "document already carries)")
     ap.add_argument("--no-reference", action="store_true",
                     help="do not send a screenshot, only the HTML")
+    ap.add_argument("--refine", type=int, default=REFINE_ROUNDS, metavar="N",
+                    help="render the result and ask the model to close the gap with the "
+                         "original, N times (default %d)" % REFINE_ROUNDS)
     args = ap.parse_args(argv)
 
     if args.list_models:
@@ -1224,8 +1406,11 @@ def _main(argv: Optional[List[str]] = None) -> int:
               f"retrying in {delay:.0f}s", flush=True)
 
     try:
-        result = enhance_html(html, model=args.model, extra=args.instructions,
-                              on_retry=note, reference=reference)
+        result = enhance_html(
+            html, model=args.model, extra=args.instructions, on_retry=note,
+            reference=reference, refine=args.refine,
+            on_round=lambda i, n: print("  comparing the render against the original "
+                                        "(round %d/%d)" % (i, n), flush=True))
     except EnhancementError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -1236,6 +1421,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
           + ("  (with the screenshot)" if result.get("saw_reference") else ""))
     print(f"  {result['original_chars']:,} chars in, {result['enhanced_chars']:,} out; "
           f"sent {result['sent_chars']:,}")
+    refined = result.get("refine_rounds") or 0
+    if refined:
+        print(f"  refined over {refined} visual round(s)")
     rounds = result.get("repair_rounds") or 0
     first = result.get("assets_missing_initially") or []
     if first:

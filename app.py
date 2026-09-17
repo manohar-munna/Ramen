@@ -66,6 +66,8 @@ class EnhanceRequest(BaseModel):
     # A data URI or file path. Left unset, the document's own screenshot is used.
     referenceImage: Optional[str] = None
     useReference: bool = True
+    # Render the result and let the model compare it with the original, this many times.
+    refine: Optional[int] = None
 
 def update_job_stage(job_id: str, stage: str, detail: str, percent: int, completed: bool = False, error: str = None):
     JOB_PROGRESS[job_id] = {
@@ -286,7 +288,8 @@ def enhance_document(req: EnhanceRequest):
                 doc_data = enhancer.flatten_document(doc_data)
             html_content = Exporter.export_standalone_html(doc_data, interactive=False)
         result = enhancer.enhance_html(
-            html_content, model=req.model, extra=req.instructions, reference=reference
+            html_content, model=req.model, extra=req.instructions, reference=reference,
+            refine=(enhancer.REFINE_ROUNDS if req.refine is None else req.refine),
         )
         return result
     except enhancer.EnhancementError as e:
