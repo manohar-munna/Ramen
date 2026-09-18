@@ -281,7 +281,8 @@ async def generate_live(ws: WebSocket):
         try:
             doc = DocumentData.model_validate(doc_raw)
             for kind, payload in enhancer.generate_from_document(
-                    doc, model=request.get("model")):
+                    doc, model=request.get("model"),
+                    verify=int(request.get("verify", enhancer.VERIFY_ROUNDS))):
                 loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
         except enhancer.EnhancementError as e:
             loop.call_soon_threadsafe(queue.put_nowait, ("error", str(e)))
@@ -302,6 +303,10 @@ async def generate_live(ws: WebSocket):
                 break
             if kind == "status":
                 await ws.send_json({"type": "status", "detail": payload})
+            elif kind == "issue":
+                await ws.send_json({"type": "issue", "detail": payload})
+            elif kind == "revision":
+                await ws.send_json({"type": "revision", **payload})
             elif kind == "chunk":
                 await ws.send_json({"type": "chunk", "text": payload})
             elif kind == "done":

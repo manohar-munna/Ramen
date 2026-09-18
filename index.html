@@ -1352,6 +1352,15 @@ html, body {
 }
 .live-build-title { font-weight: 600; font-size: 13px; }
 .live-build-status { font-size: 12px; opacity: .75; font-variant-numeric: tabular-nums; }
+.live-build-issues {
+    font-size: 12px; display: flex; gap: 6px; overflow: hidden;
+    max-width: 46vw; white-space: nowrap;
+}
+.live-build-issues span {
+    padding: 2px 8px; border-radius: 10px; flex: 0 0 auto;
+    background: rgba(255,170,60,.16); color: #ffb648;
+    overflow: hidden; text-overflow: ellipsis; max-width: 22vw;
+}
 .live-build-spacer { flex: 1 1 auto; }
 .live-build-body { flex: 1 1 auto; position: relative; overflow: hidden; }
 .live-build-frame {
@@ -1739,6 +1748,7 @@ html, body {
   <div class="live-build-bar">
     <span class="live-build-title">Building from the screenshot</span>
     <span id="live-build-status" class="live-build-status">connecting...</span>
+    <span id="live-build-issues" class="live-build-issues"></span>
     <span class="live-build-spacer"></span>
     <button id="live-build-code" class="btn-toggle">Code</button>
     <button id="live-build-open" class="btn-toggle" disabled>Open in a tab</button>
@@ -1787,6 +1797,7 @@ const elements = {
     liveBuildFrame: document.getElementById('live-build-frame'),
     liveBuildSource: document.getElementById('live-build-source'),
     liveBuildStatus: document.getElementById('live-build-status'),
+    liveBuildIssues: document.getElementById('live-build-issues'),
     liveBuildCode: document.getElementById('live-build-code'),
     liveBuildOpen: document.getElementById('live-build-open'),
     liveBuildClose: document.getElementById('live-build-close'),
@@ -2974,12 +2985,20 @@ async function refreshEnhanceAvailability() {
 // than a spinner that eventually produces one.
 let liveBuildSocket = null;
 
+// A flat grey square, inline, so a marker that has not been resolved yet costs no
+// request and still occupies the space the picture will take.
+const LIVE_PLACEHOLDER =
+    'data:image/svg+xml;utf8,' + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">' +
+        '<rect width="24" height="24" fill="%23e6e8ec"/></svg>');
+
 function closeLiveBuild() {
     if (liveBuildSocket) { try { liveBuildSocket.close(); } catch (e) {} liveBuildSocket = null; }
     elements.liveBuild.hidden = true;
     elements.liveBuildFrame.srcdoc = '';
     elements.liveBuildSource.textContent = '';
     elements.liveBuildSource.hidden = true;
+    elements.liveBuildIssues.textContent = '';
     elements.liveBuildOpen.disabled = true;
     elements.btnEnhance.disabled = false;
 }
@@ -2999,6 +3018,7 @@ async function buildFromScreenshot() {
         '<style>body{margin:0;font:14px system-ui;color:#8b95a5;display:grid;' +
         'place-items:center;height:100vh}</style><p>waiting for the first markup...</p>';
     elements.liveBuildStatus.textContent = 'connecting...';
+    elements.liveBuildIssues.textContent = '';
     elements.liveBuildOpen.disabled = true;
 
     let finalHtml = null;
@@ -3030,19 +3050,40 @@ async function buildFromScreenshot() {
                 painted = now;
                 // An unterminated tag at the cut point renders as garbage, so trim back
                 // to the last complete one before handing it to the frame.
-                const safe = buffer.slice(0, Math.max(buffer.lastIndexOf('>') + 1, 0));
+                let safe = buffer.slice(0, Math.max(buffer.lastIndexOf('>') + 1, 0));
+                // The real images are substituted server-side once the page is whole.
+                // Until then the markers are literal, and the frame would ask the
+                // server for /RAMEN_ASSET_12 -- hundreds of 404s and a broken-image
+                // icon for each one. Show a neutral box instead while it writes.
+                safe = safe.replace(/RAMEN_ASSET_\d+/g, LIVE_PLACEHOLDER);
                 elements.liveBuildFrame.srcdoc = safe;
                 const secs = ((now - started) / 1000).toFixed(0);
                 elements.liveBuildStatus.textContent =
                     `writing... ${buffer.length.toLocaleString()} characters, ${secs}s`;
             }
+        } else if (msg.type === 'issue') {
+            // Show what it noticed about its own work, newest first.
+            const chip = document.createElement('span');
+            chip.textContent = msg.detail;
+            chip.title = msg.detail;
+            elements.liveBuildIssues.prepend(chip);
+            while (elements.liveBuildIssues.childElementCount > 4) {
+                elements.liveBuildIssues.lastElementChild.remove();
+            }
+        } else if (msg.type === 'revision') {
+            // A corrected page arrived; show it and keep going.
+            finalHtml = msg.html;
+            elements.liveBuildFrame.srcdoc = finalHtml;
+            elements.liveBuildOpen.disabled = false;
         } else if (msg.type === 'done') {
             finalHtml = msg.html;
             elements.liveBuildFrame.srcdoc = finalHtml;
             elements.liveBuildOpen.disabled = false;
             const lost = (msg.assets_missing || []).length;
+            const checks = msg.verify_rounds || 0;
             elements.liveBuildStatus.textContent =
-                `done in ${((Date.now() - started) / 1000).toFixed(0)}s - ${msg.model}, ` +
+                `done in ${((Date.now() - started) / 1000).toFixed(0)}s - ${msg.model}` +
+                (checks ? `, self-corrected ${checks}x` : '') + ', ' +
                 (lost ? `${lost} of ${msg.assets_total} image(s) missing`
                       : `all ${msg.assets_total} images in place`);
         } else if (msg.type === 'error') {

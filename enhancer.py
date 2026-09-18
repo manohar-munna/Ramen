@@ -36,6 +36,8 @@ from typing import Any, Dict, List, Optional, Tuple
 _PLACEHOLDER = "RAMEN_ASSET_%d"
 _PLACEHOLDER_RE = re.compile(r"RAMEN_ASSET_(\d+)")
 _DATA_URI_RE = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+")
+_BLANK_PIXEL = ("data:image/gif;base64,"
+                "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
 
 # An alias rather than a pinned version, deliberately. A pinned name goes stale without
 # warning: gemini-2.5-pro was still listed by the models endpoint while returning 404 to
@@ -109,7 +111,13 @@ def restore_assets(html: str, assets: List[str]) -> Tuple[str, List[int]]:
 
     def swap(match: re.Match) -> str:
         i = int(match.group(1))
-        return assets[i] if 0 <= i < len(assets) else match.group(0)
+        if 0 <= i < len(assets):
+            return assets[i]
+        # A marker outside the range it was given is one the model made up. Left as it
+        # was written it becomes a relative URL, and the page then asks the server for
+        # /RAMEN_ASSET_23 -- hundreds of 404s and a broken image for each. A transparent
+        # pixel is the honest substitute: there was never an image behind it.
+        return _BLANK_PIXEL
 
     return _PLACEHOLDER_RE.sub(swap, html), missing
 
@@ -984,6 +992,32 @@ def is_configured() -> bool:
 
 # ---------------------------------------------------------------- the call
 
+def short_reason(err: Exception) -> str:
+    """A one-line reason fit for a status bar.
+
+    The API answers with a JSON body, so slicing the first characters of the exception
+    yields 'Gemini returned 429: {' -- technically the error and of no use to anyone.
+    Parse it and take the message.
+    """
+    text = str(err)
+    brace = text.find("{")
+    if brace >= 0:
+        try:
+            body = json.loads(text[brace:text.rindex("}") + 1])
+            err_obj = body.get("error") or {}
+            msg = str(err_obj.get("message") or "").replace("\n", " ").strip()
+            code = err_obj.get("code")
+            if code == 429 or "quota" in msg.lower():
+                return "the daily free-tier allowance for this model is used up"
+            if code == 503:
+                return "the model is busy"
+            if msg:
+                return msg[:120]
+        except Exception:
+            pass
+    return text.splitlines()[0][:120]
+
+
 def _api_key(explicit: Optional[str] = None) -> str:
     load_dotenv()
     key = explicit or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
@@ -1363,6 +1397,27 @@ Start with `<!DOCTYPE html>`.
 """
 
 
+# A real graphic is at least this big. Below it, a crop is a rim or a stray pixel run.
+ASSET_MIN_SIDE = 20
+ASSET_MIN_AREA = 900
+
+
+def _asset_dims(assets: List[str]) -> List[Optional[Tuple[int, int]]]:
+    """Pixel size of each data URI, or None where it cannot be read."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return [None] * len(assets)
+    out: List[Optional[Tuple[int, int]]] = []
+    for uri in assets:
+        try:
+            raw = base64.b64decode(uri.partition(",")[2])
+            out.append(Image.open(io.BytesIO(raw)).size)
+        except Exception:
+            out.append(None)
+    return out
+
+
 def page_texts(doc) -> List[str]:
     """Every string the engine read, in reading order, deduplicated."""
     out, seen = [], set()
@@ -1389,10 +1444,88 @@ def build_generate_prompt(texts: List[str], asset_lines: List[str]) -> str:
     }
 
 
+CRITIQUE_PROMPT = """\
+Two screenshots are attached:
+
+1. THE TARGET -- the design that was being reproduced.
+2. THE ATTEMPT -- a page built from it, rendered in a browser just now.
+
+List what is wrong with the attempt. One short line each, at most six, most serious
+first. Look for sections in the wrong order or overlapping, blocks that should be side
+by side and are stacked (or the reverse), spacing and alignment that do not match, type
+far too large or too small, images at the wrong size or in the wrong place, and anything
+in the target that is missing from the attempt.
+
+Judge only what could be fixed in the markup. Ignore differences in the content of a
+photograph, and ignore text that looks truncated -- those words are genuinely cut off in
+the design.
+
+Reply with the lines and nothing else, each starting with "- ". If the attempt is already
+close, reply with the single line "- nothing worth changing".
+"""
+
+
+FIX_PROMPT = """\
+Here is an HTML document and a list of problems someone found by comparing its rendering
+against the design it came from.
+
+PROBLEMS
+%(issues)s
+
+Fix those problems and return the corrected document. Change nothing else.
+
+- Every piece of visible text stays exactly as it is. Do not reword, translate, correct
+  spelling or add text -- including words that look truncated, which are genuinely cut
+  off in the design.
+- Image sources are `RAMEN_ASSET_<n>` markers, numbered 0 to %(max_asset)d and no higher.
+  %(unused_note)s Never invent a marker number and never link to an external image.
+- Keep the layout flowing -- flex and grid, no absolute positioning -- responsive to
+  480px, with hover and focus states and short transitions.
+
+Return the complete document and nothing else. No explanation, no markdown fences.
+Start with `<!DOCTYPE html>`.
+
+%(html)s
+"""
+
+
+def build_critique_prompt() -> str:
+    return CRITIQUE_PROMPT
+
+
+def build_fix_prompt(current: str, issues: List[str], n_assets: int) -> str:
+    unused = missing_markers(current, n_assets)
+    if unused:
+        note = ("Markers %s are not used anywhere, so those pictures are invisible: "
+                "place them where they belong." % ", ".join(str(i) for i in unused[:12]))
+    else:
+        note = "All of them are in use; keep it that way."
+    return FIX_PROMPT % {
+        "issues": "\n".join("- " + i for i in issues) or "- layout does not match",
+        "html": current,
+        "max_asset": max(n_assets - 1, 0),
+        "unused_note": note,
+    }
+
+
+def parse_critique(reply: str) -> List[str]:
+    """The lines of a critique, cleaned. Empty when it found nothing worth changing."""
+    out = []
+    for line in _unfence(reply).splitlines():
+        line = line.strip()
+        if not line.startswith("-"):
+            continue
+        text = line.lstrip("- ").strip()
+        if not text or text.lower().startswith("nothing worth changing"):
+            continue
+        out.append(text)
+    return out[:6]
+
+
 def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
                   api_key: Optional[str] = None, model: Optional[str] = None,
-                  timeout: int = 600):
-    """Yields text as the model writes it.
+                  timeout: int = 600, attempts: int = RETRY_ATTEMPTS):
+    """Yields ("chunk", text) as the model writes, and ("status", text) while waiting.
 
     Server-sent events rather than one blocking call, because a page takes a minute or
     two to write and watching it appear is most of the point.
@@ -1410,18 +1543,51 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
     url = (_ENDPOINT.format(model=model).replace(":generateContent",
                                                  ":streamGenerateContent")
            + "?alt=sse")
-    req = urllib.request.Request(
-        url, data=body,
-        headers={"Content-Type": "application/json",
-                 "x-goog-api-key": _api_key(api_key)},
-        method="POST")
-    try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:600]
-        raise EnhancementError(f"Gemini returned {e.code}: {detail}") from e
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise EnhancementError(f"Could not reach Gemini: {e}") from e
+    key = _api_key(api_key)
+
+    # Opening the stream gets the same retries as any other call. It did not, and a
+    # single 503 -- the most common answer this API gives -- ended the run with a
+    # traceback while the non-streaming path beside it quietly retried and succeeded.
+    # Only the connection is retried: once chunks have been handed to the caller there
+    # is no way to start again without duplicating what it has already shown.
+    resp = None
+    last = None
+    for attempt in range(1, max(1, attempts) + 1):
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json", "x-goog-api-key": key},
+            method="POST")
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            break
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:600]
+            last = EnhancementError(f"Gemini returned {e.code}: {detail}")
+            exhausted = e.code == 429 and ("per day" in detail
+                                           or "_requests, limit:" in detail)
+            if e.code not in RETRY_STATUSES or exhausted or attempt >= attempts:
+                raise last from e
+            wait = None
+            m = re.search(r'"retryDelay"\s*:\s*"([\d.]+)s"', detail)
+            if m:
+                try:
+                    wait = float(m.group(1))
+                except ValueError:
+                    wait = None
+            delay = wait or (RETRY_BACKOFF * (2 ** (attempt - 1)))
+            yield ("status", "The model is busy (%d). Waiting %.0fs, attempt %d of %d..."
+                   % (e.code, delay, attempt + 1, attempts))
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = EnhancementError(f"Could not reach Gemini: {e}")
+            if attempt >= attempts:
+                raise last from e
+            delay = RETRY_BACKOFF * (2 ** (attempt - 1))
+            yield ("status", "Connection failed. Waiting %.0fs, attempt %d of %d..."
+                   % (delay, attempt + 1, attempts))
+            time.sleep(delay)
+    if resp is None:
+        raise last or EnhancementError("Could not open the stream.")
 
     with resp:
         for raw in resp:
@@ -1439,11 +1605,17 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
                 for part in (cand.get("content") or {}).get("parts", []) or []:
                     text = part.get("text")
                     if text:
-                        yield text
+                        yield ("chunk", text)
+
+
+# How many times to render the finished page, show it to the model beside the original,
+# and let it correct itself. Each round is one request and about a minute.
+VERIFY_ROUNDS = 2
 
 
 def generate_from_document(doc, api_key: Optional[str] = None,
-                           model: Optional[str] = None, timeout: int = 600):
+                           model: Optional[str] = None, timeout: int = 600,
+                           verify: int = VERIFY_ROUNDS):
     """Streams a page written from the screenshot, then restores the real images.
 
     Yields ("chunk", text) as it goes and finally ("done", result-dict), so a caller can
@@ -1468,28 +1640,135 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         DocumentData(title=getattr(doc, "title", "page") or "page",
                      pageCount=len(flat.pages or []), pages=list(flat.pages or [])),
         editable=False, interactive=False)
-    _, assets = strip_assets(html)
-    asset_lines = describe_assets(assets, roles=asset_roles(html, assets))
+    _, all_assets = strip_assets(html)
+    roles = asset_roles(html, all_assets)
+
+    # Only offer pictures worth placing. The residual pass emits every scrap CSS could
+    # not explain, and on the Reddit page 21 of its 31 crops are slivers -- 19x5, 178x3,
+    # 148x4 -- which are antialiasing rims, not content. Handed all of them, the model
+    # reasonably ignores the noise, and the run then reports "15 of 31 images missing"
+    # as though half the page were lost. Dropping them shortens the prompt, leaves fewer
+    # markers to misplace, and makes the count mean something.
+    keep = [i for i, dims in enumerate(_asset_dims(all_assets))
+            if dims and min(dims) >= ASSET_MIN_SIDE and dims[0] * dims[1] >= ASSET_MIN_AREA]
+    assets = [all_assets[i] for i in keep]
+    asset_lines = describe_assets(assets,
+                                  roles={n: roles.get(i, "") for n, i in enumerate(keep)})
+    dropped = len(all_assets) - len(assets)
+    if dropped:
+        yield "status", ("Set aside %d fragment(s) too small to place; offering %d image(s)."
+                         % (dropped, len(assets)))
     prompt = build_generate_prompt(page_texts(flat), asset_lines)
 
     yield "status", ("Sending the screenshot, %d image(s) and %d line(s) of text..."
                      % (len(assets), len(page_texts(flat))))
 
     buf = []
-    for piece in stream_gemini(prompt, images=[shot], api_key=api_key,
-                               model=model, timeout=timeout):
+    for kind, piece in stream_gemini(prompt, images=[shot], api_key=api_key,
+                                     model=model, timeout=timeout):
+        if kind == "status":
+            yield "status", piece
+            continue
         buf.append(piece)
         yield "chunk", piece
 
     raw = _unfence("".join(buf))
     if "<" not in raw:
         raise EnhancementError("Gemini's reply does not look like HTML: " + raw[:200])
+
+    # ---- look at the result and correct it ----------------------------------------
+    #
+    # One shot at a whole page from a screenshot gets the shape roughly right and the
+    # details wrong, and the model has no way to know which is which: it never sees
+    # what it built. Rendering the page and handing it back beside the original is the
+    # correction it cannot otherwise make. Each round is announced, and so is every
+    # problem it reports finding, because a minute of silence reads as a hang.
+    all_issues: List[str] = []
+    rounds_done = 0
+    for attempt in range(1, max(0, verify) + 1):
+        current, _ = restore_assets(raw, assets)
+        yield "status", "Rendering your page to look at it (check %d of %d)..." % (
+            attempt, max(0, verify))
+        render = render_html(current)
+        if not render:
+            yield "status", "No headless browser available, so skipping the checks."
+            break
+
+        # Two calls rather than one. Asking for the critique and a twenty-thousand
+        # character document in a single reply got MALFORMED_RESP back from the API and
+        # the check never ran; separately, each answer is one shape and short enough to
+        # come back whole. It also reads better -- the findings appear before the fix.
+        yield "status", "Comparing it with the original screenshot..."
+        try:
+            critique = call_gemini(build_critique_prompt(), api_key=api_key,
+                                   model=model, timeout=timeout,
+                                   images=[shot, render])
+        except EnhancementError as e:
+            yield "status", "Check %d could not run - %s." % (
+                attempt, short_reason(e))
+            break
+
+        issues = parse_critique(critique)
+        for issue in issues:
+            yield "issue", issue
+        unused = missing_markers(raw, len(assets))
+        if not issues and not unused:
+            yield "status", "Check %d found nothing worth changing." % attempt
+            break
+
+        yield "status", "Applying %d fix(es)%s..." % (
+            len(issues), " and placing %d unused image(s)" % len(unused) if unused else "")
+        try:
+            fixed = _unfence(call_gemini(
+                build_fix_prompt(raw, issues, len(assets)), api_key=api_key,
+                model=model, timeout=timeout))
+        except EnhancementError as e:
+            yield "status", "Could not apply check %d - %s." % (
+                attempt, short_reason(e))
+            break
+        if not fixed or "<" not in fixed:
+            yield "status", "Nothing came back to apply from check %d." % attempt
+            break
+
+        # Same acceptance test as the rewrite path: a correction that costs content or
+        # turns controls into plain markup is not a correction.
+        before_words, after_words = _visible_words(raw), _visible_words(fixed)
+        word_loss = sum((before_words - after_words).values())
+        word_gain = sum((after_words - before_words).values())
+        missing_before = len(missing_markers(raw, len(assets)))
+        missing_after = len(missing_markers(fixed, len(assets)))
+        controls_lost = max(0, _count_controls(raw) - _count_controls(fixed))
+        refusals = []
+        if word_loss:
+            refusals.append("%d word(s) lost" % word_loss)
+        if word_gain > REFINE_MAX_WORD_GAIN:
+            refusals.append("%d word(s) invented" % word_gain)
+        if missing_after > missing_before:
+            refusals.append("%d more image(s) dropped" % (missing_after - missing_before))
+        if controls_lost:
+            refusals.append("%d control(s) flattened" % controls_lost)
+        if refusals:
+            yield "status", "Discarded check %d: it would have %s." % (
+                attempt, ", ".join(refusals))
+            break
+
+        raw = fixed
+        rounds_done += 1
+        all_issues.extend(issues)
+        recovered = missing_before - missing_after
+        yield "status", ("Applied check %d: %d fix(es)%s." % (
+            attempt, len(issues),
+            ", %d image(s) put back" % recovered if recovered > 0 else ""))
+        yield "revision", {"html": restore_assets(raw, assets)[0]}
+
     final, missing = restore_assets(raw, assets)
     yield "done", {
         "html": final,
         "model": model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL,
         "assets_total": len(assets),
         "assets_missing": missing,
+        "verify_rounds": rounds_done,
+        "issues": all_issues,
         "chars": len(final),
     }
 
