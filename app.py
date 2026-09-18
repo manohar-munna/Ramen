@@ -285,7 +285,10 @@ async def generate_live(ws: WebSocket):
                     verify=int(request.get("verify", enhancer.VERIFY_ROUNDS))):
                 loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
         except enhancer.EnhancementError as e:
-            loop.call_soon_threadsafe(queue.put_nowait, ("error", str(e)))
+            # The socket's error goes straight into an alert, so it gets the readable
+            # form. str(e) put a wall of JSON in front of the user.
+            loop.call_soon_threadsafe(
+                queue.put_nowait, ("error", enhancer.short_reason(e)))
         except Exception as e:
             logger.exception("live generation failed")
             loop.call_soon_threadsafe(
@@ -369,7 +372,7 @@ def enhance_document(req: EnhanceRequest):
         return result
     except enhancer.EnhancementError as e:
         # The model or the key is the problem, not the request. 502 says so.
-        raise HTTPException(status_code=502, detail=str(e))
+        raise HTTPException(status_code=502, detail=enhancer.short_reason(e))
     except ValidationError as e:
         raise HTTPException(status_code=400,
                             detail=f"That document did not validate: {e}")

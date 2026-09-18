@@ -1000,22 +1000,44 @@ def short_reason(err: Exception) -> str:
     Parse it and take the message.
     """
     text = str(err)
-    brace = text.find("{")
-    if brace >= 0:
-        try:
-            body = json.loads(text[brace:text.rindex("}") + 1])
-            err_obj = body.get("error") or {}
-            msg = str(err_obj.get("message") or "").replace("\n", " ").strip()
-            code = err_obj.get("code")
-            if code == 429 or "quota" in msg.lower():
-                return "the daily free-tier allowance for this model is used up"
-            if code == 503:
-                return "the model is busy"
-            if msg:
-                return msg[:120]
-        except Exception:
-            pass
-    return text.splitlines()[0][:120]
+
+    # The body is clipped to 600 characters upstream, so it is usually invalid JSON by
+    # the time it gets here -- which made json.loads fail and the whole thing fall back
+    # to "Gemini returned 429: {", the exact output this function exists to prevent.
+    # Read the fields out of the text directly and do not depend on it parsing.
+    def field(name):
+        key = '"%s"' % name
+        at = text.find(key)
+        if at < 0:
+            return ""
+        at = text.find(":", at + len(key))
+        if at < 0:
+            return ""
+        rest = text[at + 1:].lstrip()
+        if rest.startswith('"'):
+            out, i = [], 1
+            while i < len(rest) and rest[i] != '"':
+                if rest[i] == "\\" and i + 1 < len(rest):
+                    out.append(" " if rest[i + 1] == "n" else rest[i + 1])
+                    i += 2
+                    continue
+                out.append(rest[i])
+                i += 1
+            return "".join(out).strip()
+        return rest.split(",")[0].split("}")[0].strip()
+
+    msg = field("message")
+    code = field("code")
+    low = msg.lower()
+    if code == "429" or "quota" in low or "rate limit" in low:
+        per_day = "per day" in low or "free_tier_requests" in low
+        return ("this model's free-tier allowance is used up"
+                + (" for today" if per_day else " for the moment"))
+    if code == "503" or "high demand" in low:
+        return "the model is busy"
+    if msg:
+        return msg[:140]
+    return text.splitlines()[0][:140]
 
 
 def _api_key(explicit: Optional[str] = None) -> str:
@@ -1397,9 +1419,14 @@ Start with `<!DOCTYPE html>`.
 """
 
 
-# A real graphic is at least this big. Below it, a crop is a rim or a stray pixel run.
-ASSET_MIN_SIDE = 20
-ASSET_MIN_AREA = 900
+# Set from looking at the crops rather than guessing. Laid out as a contact sheet, the
+# genuine rubbish on the Reddit page is unmistakable and all of one kind: 178x3, 148x4,
+# 19x5, 44x7 -- antialiasing rims, every one under eight pixels on its short side.
+# Above that line sit real things, including a 13x17 share icon and a 14x11 plus icon
+# that an earlier threshold of 20 discarded, after which the model quite correctly
+# reported the icons as missing and could do nothing about it.
+ASSET_MIN_SIDE = 8
+ASSET_MIN_AREA = 100
 
 
 def _asset_dims(assets: List[str]) -> List[Optional[Tuple[int, int]]]:
