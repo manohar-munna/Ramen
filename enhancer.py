@@ -1795,6 +1795,10 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
         if chosen != (model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL):
             yield ("status", "Using %s instead." % chosen)
 
+    # What the stream saw, so that "no HTML came back" can say why. Without this the
+    # failure was a bare message with nothing after the colon and no way to tell a
+    # safety block from a token limit from a model that only thought and never wrote.
+    seen = {"events": 0, "finish": "", "blocked": "", "thoughts": 0, "chars": 0}
     with resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -1807,11 +1811,40 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
                 chunk = json.loads(payload)
             except ValueError:
                 continue
+            seen["events"] += 1
+            feedback = chunk.get("promptFeedback") or {}
+            if feedback.get("blockReason"):
+                seen["blocked"] = str(feedback["blockReason"])
             for cand in chunk.get("candidates", []):
+                if cand.get("finishReason"):
+                    seen["finish"] = str(cand["finishReason"])
                 for part in (cand.get("content") or {}).get("parts", []) or []:
                     text = part.get("text")
-                    if text:
-                        yield ("chunk", text)
+                    if not text:
+                        continue
+                    # A thinking model streams its reasoning as ordinary text parts
+                    # flagged as thoughts. Letting those through would paste the
+                    # model's deliberation into the page.
+                    if part.get("thought"):
+                        seen["thoughts"] += len(text)
+                        continue
+                    seen["chars"] += len(text)
+                    yield ("chunk", text)
+
+    if not seen["chars"]:
+        why = []
+        if seen["blocked"]:
+            why.append("the request was blocked (%s)" % seen["blocked"])
+        if seen["finish"] and seen["finish"] != "STOP":
+            why.append("it stopped early (%s)" % seen["finish"])
+        if seen["thoughts"]:
+            why.append("it produced %d characters of reasoning and no page"
+                       % seen["thoughts"])
+        if not seen["events"]:
+            why.append("the stream carried no events at all")
+        raise EnhancementError(
+            "%s wrote nothing: %s." % (chosen or "The model",
+                                       "; ".join(why) or "no reason was given"))
 
 
 # How many times to render the finished page, show it to the model beside the original,
@@ -1869,18 +1902,45 @@ def generate_from_document(doc, api_key: Optional[str] = None,
     yield "status", ("Sending the screenshot, %d image(s) and %d line(s) of text..."
                      % (len(assets), len(page_texts(flat))))
 
+    # A model that writes nothing is not a dead end while others remain. It happens --
+    # a lite model spending its whole budget on reasoning, a stop before the first
+    # token -- and it used to end the run with an error that had nothing after the
+    # colon. Nothing has been shown to the caller at that point, so starting again on
+    # the next model costs only the request.
     buf = []
-    for kind, piece in stream_gemini(prompt, images=[shot], api_key=api_key,
-                                     model=model, timeout=timeout):
-        if kind == "status":
-            yield "status", piece
+    tried: List[str] = []
+    for candidate in models_to_try(model):
+        if candidate in tried:
             continue
-        buf.append(piece)
-        yield "chunk", piece
+        tried.append(candidate)
+        buf = []
+        try:
+            for kind, piece in stream_gemini(prompt, images=[shot], api_key=api_key,
+                                             model=candidate, timeout=timeout):
+                if kind == "status":
+                    yield "status", piece
+                    continue
+                buf.append(piece)
+                yield "chunk", piece
+        except EnhancementError as e:
+            if buf:
+                raise                      # partly written; cannot start over cleanly
+            remaining = [m for m in models_to_try(model) if m not in tried]
+            if not remaining:
+                raise
+            yield "status", "%s. Trying %s..." % (short_reason(e), remaining[0])
+            continue
+        if buf:
+            break
+    if not buf:
+        raise EnhancementError("No model produced a page.")
 
     raw = _unfence("".join(buf))
     if "<" not in raw:
-        raise EnhancementError("Gemini's reply does not look like HTML: " + raw[:200])
+        used = _LAST_MODEL[0] or model or DEFAULT_MODEL
+        detail = raw.strip()[:200] or "(nothing at all)"
+        raise EnhancementError(
+            "%s did not return HTML. It said: %s" % (used, detail))
 
     # ---- look at the result and correct it ----------------------------------------
     #
