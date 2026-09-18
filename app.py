@@ -5,7 +5,8 @@ import json
 import base64
 import asyncio
 from typing import Dict, Any, Optional, List
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import (FastAPI, UploadFile, File, Form, HTTPException,
+                     BackgroundTasks, WebSocket, WebSocketDisconnect)
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -250,6 +251,75 @@ def export_document(req: ExportRequest):
             )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Export failed: {str(e)}")
+
+@app.websocket("/ws/generate")
+async def generate_live(ws: WebSocket):
+    """Writes a page from the screenshot and streams it as it is written.
+
+    A socket rather than a request because the interesting part is the middle: the page
+    assembles over a minute or two and watching it happen is most of the value. Each
+    chunk is forwarded the moment it arrives, so the editor can paint a live preview.
+    """
+    await ws.accept()
+    try:
+        request = await ws.receive_json()
+    except Exception:
+        await ws.close(code=1003)
+        return
+
+    doc_raw = request.get("document")
+    if not doc_raw:
+        await ws.send_json({"type": "error", "detail": "Send {'document': ...}."})
+        await ws.close()
+        return
+
+    loop = asyncio.get_running_loop()
+    queue: "asyncio.Queue" = asyncio.Queue()
+
+    def produce():
+        """Runs the blocking stream on a worker thread and feeds the queue."""
+        try:
+            doc = DocumentData.model_validate(doc_raw)
+            for kind, payload in enhancer.generate_from_document(
+                    doc, model=request.get("model")):
+                loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
+        except enhancer.EnhancementError as e:
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", str(e)))
+        except Exception as e:
+            logger.exception("live generation failed")
+            loop.call_soon_threadsafe(
+                queue.put_nowait, ("error", f"{type(e).__name__}: {e}"))
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, ("eof", None))
+
+    await ws.send_json({"type": "status", "detail": "Reading the screenshot..."})
+    loop.run_in_executor(None, produce)
+
+    try:
+        while True:
+            kind, payload = await queue.get()
+            if kind == "eof":
+                break
+            if kind == "status":
+                await ws.send_json({"type": "status", "detail": payload})
+            elif kind == "chunk":
+                await ws.send_json({"type": "chunk", "text": payload})
+            elif kind == "done":
+                # The finished page carries megabytes of restored image data, so it goes
+                # as its own message rather than through the chunk stream.
+                await ws.send_json({"type": "done", **payload})
+            elif kind == "error":
+                await ws.send_json({"type": "error", "detail": payload})
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        logger.exception("live generation socket failed")
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
 
 @app.get("/api/enhance/status")
 def enhance_status():

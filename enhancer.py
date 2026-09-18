@@ -1308,6 +1308,191 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
     }
 
 
+
+# ============================================================================
+# Building the page from the screenshot, streamed
+# ============================================================================
+#
+# A different job from `enhance_html`, and worth having beside it. That one hands the
+# model the reconstruction and asks for it to be rebuilt, which anchors the result to
+# whatever the engine made of the page -- including its mistakes. This asks for the page
+# to be written from the screenshot, the way screenshot-to-code does it, and streams the
+# answer so the page can be watched assembling itself.
+#
+# What it keeps from Ramen rather than from that project: the images are real. Where
+# screenshot-to-code fills in placehold.co boxes and describes what ought to go in them,
+# the markers here resolve to the artwork the engine actually cut out of the screenshot.
+# The text is real too -- OCR measured it, so the model is given the strings instead of
+# being asked to read them off a picture, which is where transcription errors come from.
+
+GENERATE_PROMPT = """\
+You are an expert front-end developer. You are given a screenshot of a web page and you
+write a single self-contained HTML file that looks exactly like it.
+
+- Match the screenshot closely: background colours, text colour, font size and weight,
+  spacing, alignment, borders, radii, shadows.
+- Write the FULL code. Never write a comment in place of content -- no "<!-- repeat for
+  each item -->", no "<!-- other nav links here -->". If the screenshot shows nine cards,
+  write nine cards.
+- Use semantic HTML: header, nav, main, section, footer, h1-h6, p, ul/li, button, a.
+- Lay it out with flexbox and grid so it reflows. Make it usable down to 480px.
+- Add hover and focus states on everything interactive, and short transitions
+  (150-300ms). Disable them under `@media (prefers-reduced-motion: reduce)`.
+- Put all CSS in one <style> block in the head. Use CSS custom properties for the
+  palette. Plain CSS, no framework, no CDN, no external requests of any kind.
+
+THE TEXT
+Use these strings, exactly as written, for the page's text. They were measured from the
+screenshot, so they are more reliable than reading the picture -- including where a word
+looks wrong: several are genuinely cut off behind something in the design, and must stay
+cut off. Do not correct, translate, complete or invent any of them.
+
+%(texts)s
+
+THE IMAGES
+Every picture in this page has already been extracted for you. Use these markers as the
+`src` of an `<img>` -- write the marker exactly, it is replaced with the real image
+afterwards. Each line gives the marker, the size it was in the original, its main
+colours, and what kind of thing it is. Use all %(n_assets)d of them, and do not invent
+any others or link to any external image.
+
+%(assets)s
+
+Return the complete HTML document and nothing else. No explanation, no markdown fences.
+Start with `<!DOCTYPE html>`.
+"""
+
+
+def page_texts(doc) -> List[str]:
+    """Every string the engine read, in reading order, deduplicated."""
+    out, seen = [], set()
+    for page in (getattr(doc, "pages", None) or []):
+        rows = []
+        for e in (page.elements or []):
+            text = (getattr(e, "text", None) or "").strip()
+            if text and e.type in ("text", "rect"):
+                b = e.bbox or [0, 0, 0, 0]
+                rows.append((round(float(b[1]) / 12.0), float(b[0]), text))
+        for _, _, text in sorted(rows):
+            key = text.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(text)
+    return out
+
+
+def build_generate_prompt(texts: List[str], asset_lines: List[str]) -> str:
+    return GENERATE_PROMPT % {
+        "texts": "\n".join("- " + t.replace("\n", " ") for t in texts) or "(none)",
+        "assets": "\n".join(asset_lines) or "(none)",
+        "n_assets": len(asset_lines),
+    }
+
+
+def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
+                  api_key: Optional[str] = None, model: Optional[str] = None,
+                  timeout: int = 600):
+    """Yields text as the model writes it.
+
+    Server-sent events rather than one blocking call, because a page takes a minute or
+    two to write and watching it appear is most of the point.
+    """
+    model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
+    parts: List[Dict[str, Any]] = [{"text": prompt}]
+    for shot in (images or []):
+        if shot:
+            parts.append({"inline_data": {"mime_type": shot[0], "data": shot[1]}})
+    body = json.dumps({
+        "contents": [{"parts": parts}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 65536},
+    }).encode("utf-8")
+
+    url = (_ENDPOINT.format(model=model).replace(":generateContent",
+                                                 ":streamGenerateContent")
+           + "?alt=sse")
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": "application/json",
+                 "x-goog-api-key": _api_key(api_key)},
+        method="POST")
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:600]
+        raise EnhancementError(f"Gemini returned {e.code}: {detail}") from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise EnhancementError(f"Could not reach Gemini: {e}") from e
+
+    with resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(payload)
+            except ValueError:
+                continue
+            for cand in chunk.get("candidates", []):
+                for part in (cand.get("content") or {}).get("parts", []) or []:
+                    text = part.get("text")
+                    if text:
+                        yield text
+
+
+def generate_from_document(doc, api_key: Optional[str] = None,
+                           model: Optional[str] = None, timeout: int = 600):
+    """Streams a page written from the screenshot, then restores the real images.
+
+    Yields ("chunk", text) as it goes and finally ("done", result-dict), so a caller can
+    show the page building and still get the finished article with its assets in place.
+    """
+    from engine import DocumentData, HTMLRenderer
+
+    shot = reference_from_document(doc)
+    if not shot:
+        raise EnhancementError(
+            "This document has no original screenshot to work from.")
+
+    # Preparation takes half a minute before a single character arrives, because
+    # composing the images renders the page twice to check the composite is faithful.
+    # Saying so beats a silent stare: the first version showed "Reading the
+    # screenshot..." for thirty seconds and looked hung.
+    yield "status", "Composing the extracted images..."
+
+    # The engine's own render is only used to harvest the assets; the model never sees it.
+    flat = flatten_document(doc)
+    html = HTMLRenderer.render_document(
+        DocumentData(title=getattr(doc, "title", "page") or "page",
+                     pageCount=len(flat.pages or []), pages=list(flat.pages or [])),
+        editable=False, interactive=False)
+    _, assets = strip_assets(html)
+    asset_lines = describe_assets(assets, roles=asset_roles(html, assets))
+    prompt = build_generate_prompt(page_texts(flat), asset_lines)
+
+    yield "status", ("Sending the screenshot, %d image(s) and %d line(s) of text..."
+                     % (len(assets), len(page_texts(flat))))
+
+    buf = []
+    for piece in stream_gemini(prompt, images=[shot], api_key=api_key,
+                               model=model, timeout=timeout):
+        buf.append(piece)
+        yield "chunk", piece
+
+    raw = _unfence("".join(buf))
+    if "<" not in raw:
+        raise EnhancementError("Gemini's reply does not look like HTML: " + raw[:200])
+    final, missing = restore_assets(raw, assets)
+    yield "done", {
+        "html": final,
+        "model": model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL,
+        "assets_total": len(assets),
+        "assets_missing": missing,
+        "chars": len(final),
+    }
+
 # ---------------------------------------------------------------- command line
 
 def _main(argv: Optional[List[str]] = None) -> int:

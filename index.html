@@ -1338,6 +1338,32 @@ html, body {
     justify-content: flex-end;
 }
 
+
+.live-build {
+    position: fixed; inset: 0; z-index: 1200;
+    background: var(--bg-primary, #14161a);
+    display: flex; flex-direction: column;
+}
+.live-build[hidden] { display: none; }
+.live-build-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,.12);
+    background: rgba(0,0,0,.25); flex: 0 0 auto;
+}
+.live-build-title { font-weight: 600; font-size: 13px; }
+.live-build-status { font-size: 12px; opacity: .75; font-variant-numeric: tabular-nums; }
+.live-build-spacer { flex: 1 1 auto; }
+.live-build-body { flex: 1 1 auto; position: relative; overflow: hidden; }
+.live-build-frame {
+    width: 100%; height: 100%; border: 0; background: #fff;
+}
+.live-build-source {
+    position: absolute; inset: 0; margin: 0; padding: 14px; overflow: auto;
+    background: #0d0f12; color: #cbd3de; font: 12px/1.55 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word;
+}
+.live-build-source[hidden] { display: none; }
+
 </style>
     <!-- html2canvas for client-side visual fidelity comparison -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -1708,7 +1734,23 @@ html, body {
         </div>
     </div>
 
-    <script>
+    <!-- Live build overlay: the page writing itself, beside the code producing it. -->
+<div id="live-build" class="live-build" hidden>
+  <div class="live-build-bar">
+    <span class="live-build-title">Building from the screenshot</span>
+    <span id="live-build-status" class="live-build-status">connecting...</span>
+    <span class="live-build-spacer"></span>
+    <button id="live-build-code" class="btn-toggle">Code</button>
+    <button id="live-build-open" class="btn-toggle" disabled>Open in a tab</button>
+    <button id="live-build-close" class="btn-icon-subtle" title="Close">&times;</button>
+  </div>
+  <div class="live-build-body">
+    <iframe id="live-build-frame" class="live-build-frame" title="Live preview"></iframe>
+    <pre id="live-build-source" class="live-build-source" hidden></pre>
+  </div>
+</div>
+
+<script>
 /**
  * RAMEN: Precision PDF-to-HTML Reconstruction & Editor
  * Desktop-first, deterministic 2D-coordinate document editor.
@@ -1741,6 +1783,13 @@ const elements = {
     btnCompareMode: document.getElementById('btn-compare-mode'),
     btnPageCode: document.getElementById('btn-page-code'),
     btnEnhance: document.getElementById('btn-enhance'),
+    liveBuild: document.getElementById('live-build'),
+    liveBuildFrame: document.getElementById('live-build-frame'),
+    liveBuildSource: document.getElementById('live-build-source'),
+    liveBuildStatus: document.getElementById('live-build-status'),
+    liveBuildCode: document.getElementById('live-build-code'),
+    liveBuildOpen: document.getElementById('live-build-open'),
+    liveBuildClose: document.getElementById('live-build-close'),
     btnInspect: document.getElementById('btn-inspect'),
     inspectLayer: document.getElementById('inspect-layer'),
     inspectBox: document.getElementById('inspect-box'),
@@ -1895,7 +1944,7 @@ function setupEventListeners() {
     
     // Enhancement pass
     if (elements.btnEnhance) {
-        elements.btnEnhance.addEventListener('click', enhanceDocument);
+        elements.btnEnhance.addEventListener('click', buildFromScreenshot);
         refreshEnhanceAvailability();
     }
 
@@ -2920,6 +2969,109 @@ async function refreshEnhanceAvailability() {
     }
 }
 
+// Build the page from the screenshot and show it assembling. The stream is rendered
+// into an iframe as it arrives, so what you watch is the page writing itself rather
+// than a spinner that eventually produces one.
+let liveBuildSocket = null;
+
+function closeLiveBuild() {
+    if (liveBuildSocket) { try { liveBuildSocket.close(); } catch (e) {} liveBuildSocket = null; }
+    elements.liveBuild.hidden = true;
+    elements.liveBuildFrame.srcdoc = '';
+    elements.liveBuildSource.textContent = '';
+    elements.liveBuildSource.hidden = true;
+    elements.liveBuildOpen.disabled = true;
+    elements.btnEnhance.disabled = false;
+}
+
+async function buildFromScreenshot() {
+    if (!state.doc) { alert('Please open a PDF or image first.'); return; }
+    const page = state.doc.pages[state.currentPageIndex] || state.doc.pages[0];
+    if (!page || !page.originalImageSrc) {
+        alert('This document has no original screenshot to build from.');
+        return;
+    }
+
+    elements.btnEnhance.disabled = true;
+    elements.liveBuild.hidden = false;
+    elements.liveBuildSource.textContent = '';
+    elements.liveBuildFrame.srcdoc =
+        '<style>body{margin:0;font:14px system-ui;color:#8b95a5;display:grid;' +
+        'place-items:center;height:100vh}</style><p>waiting for the first markup...</p>';
+    elements.liveBuildStatus.textContent = 'connecting...';
+    elements.liveBuildOpen.disabled = true;
+
+    let finalHtml = null;
+    let buffer = '';
+    let painted = 0;
+    const started = Date.now();
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/ws/generate`);
+    liveBuildSocket = ws;
+
+    ws.onopen = () => {
+        elements.liveBuildStatus.textContent = 'sending the screenshot...';
+        ws.send(JSON.stringify({ document: state.doc }));
+    };
+
+    ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'status') {
+            elements.liveBuildStatus.textContent = msg.detail;
+        } else if (msg.type === 'chunk') {
+            buffer += msg.text;
+            elements.liveBuildSource.textContent = buffer;
+            elements.liveBuildSource.scrollTop = elements.liveBuildSource.scrollHeight;
+            // Repaint on a budget. Writing srcdoc reloads the frame, so doing it per
+            // chunk makes the preview flicker and starves the socket.
+            const now = Date.now();
+            if (now - painted > 400) {
+                painted = now;
+                // An unterminated tag at the cut point renders as garbage, so trim back
+                // to the last complete one before handing it to the frame.
+                const safe = buffer.slice(0, Math.max(buffer.lastIndexOf('>') + 1, 0));
+                elements.liveBuildFrame.srcdoc = safe;
+                const secs = ((now - started) / 1000).toFixed(0);
+                elements.liveBuildStatus.textContent =
+                    `writing... ${buffer.length.toLocaleString()} characters, ${secs}s`;
+            }
+        } else if (msg.type === 'done') {
+            finalHtml = msg.html;
+            elements.liveBuildFrame.srcdoc = finalHtml;
+            elements.liveBuildOpen.disabled = false;
+            const lost = (msg.assets_missing || []).length;
+            elements.liveBuildStatus.textContent =
+                `done in ${((Date.now() - started) / 1000).toFixed(0)}s - ${msg.model}, ` +
+                (lost ? `${lost} of ${msg.assets_total} image(s) missing`
+                      : `all ${msg.assets_total} images in place`);
+        } else if (msg.type === 'error') {
+            elements.liveBuildStatus.textContent = 'failed';
+            alert('Could not build the page: ' + msg.detail);
+        }
+    };
+
+    ws.onerror = () => { elements.liveBuildStatus.textContent = 'connection failed'; };
+    ws.onclose = () => {
+        liveBuildSocket = null;
+        elements.btnEnhance.disabled = false;
+        if (!finalHtml && elements.liveBuildStatus.textContent.startsWith('writing')) {
+            elements.liveBuildStatus.textContent = 'the stream ended early';
+        }
+    };
+
+    elements.liveBuildOpen.onclick = () => {
+        if (!finalHtml) return;
+        const url = URL.createObjectURL(new Blob([finalHtml], { type: 'text/html' }));
+        window.open(url, '_blank');
+    };
+    elements.liveBuildCode.onclick = () => {
+        elements.liveBuildSource.hidden = !elements.liveBuildSource.hidden;
+        elements.liveBuildCode.classList.toggle('active', !elements.liveBuildSource.hidden);
+    };
+    elements.liveBuildClose.onclick = closeLiveBuild;
+}
+
 async function enhanceDocument() {
     if (!state.doc) {
         alert('Please open a PDF or image first.');
@@ -3303,6 +3455,8 @@ ${BASE_DOC_CSS}
 </head>
 <body class="reconstructed-doc">
 ${pageHtml}
+
+
 </body>
 </html>`;
 }
@@ -3513,5 +3667,6 @@ async function triggerModelVerification() {
 window.addEventListener('DOMContentLoaded', init);
 
 </script>
+
 </body>
 </html>
