@@ -49,9 +49,17 @@ DEFAULT_MODEL = "gemini-3-flash-preview"
 # endpoint while returning 404 to any key made after it was retired, pro models 429 on
 # the free tier, and gemini-flash-latest returned 503 to a full page four times running
 # while answering a one-line prompt instantly. So try several rather than trusting one.
-FALLBACK_MODELS = ("gemini-3-flash-preview", "gemini-flash-latest", "gemini-3.5-flash")
+# Tried in turn when the requested one has nothing left on any key. Measured as
+# reachable and answering; gemini-flash-latest is deliberately absent, having returned
+# 503 to a full page four times running while answering a one-line prompt instantly.
+FALLBACK_MODELS = ("gemini-3.5-flash", "gemini-3.6-flash", "gemini-3-flash-preview")
 _ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/models/"
              "{model}:generateContent")
+
+
+# The model that last answered, so callers can report what actually did the work
+# rather than what was asked for.
+_LAST_MODEL = [""]
 
 
 class EnhancementError(RuntimeError):
@@ -992,6 +1000,30 @@ def is_configured() -> bool:
 
 # ---------------------------------------------------------------- the call
 
+def redact_keys(text: str) -> str:
+    """Blanks anything shaped like a credential.
+
+    The API quotes the key back inside its own error text -- "Consumer
+    'api_key:AIzaSy...' has been suspended" -- so any message printed, logged or shown
+    to a user carries a live secret unless it is taken out first. Found by reading the
+    output of the key checker, which had just put two of them on screen.
+    """
+    out = []
+    i = 0
+    while i < len(text):
+        if text.startswith("AIza", i) or text.startswith("AQ.", i):
+            j = i
+            while j < len(text) and (text[j].isalnum() or text[j] in "._-"):
+                j += 1
+            if j - i >= 20:
+                out.append(text[i:i + 6] + "...[redacted]")
+                i = j
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def short_reason(err: Exception) -> str:
     """A one-line reason fit for a status bar.
 
@@ -1036,17 +1068,84 @@ def short_reason(err: Exception) -> str:
     if code == "503" or "high demand" in low:
         return "the model is busy"
     if msg:
-        return msg[:140]
-    return text.splitlines()[0][:140]
+        return redact_keys(msg)[:160]
+    return redact_keys(text.splitlines()[0])[:160]
+
+
+# What has already been found not to work, remembered for the life of the process so a
+# run does not spend forty seconds rediscovering it on every call. Keyed by (key, model)
+# because the free tier counts per model: the same credential can be spent on one and
+# fine on the next, which is exactly what happened -- one key with nothing left for
+# gemini-3-flash and a full allowance on gemini-3.5-flash.
+_SPENT: Dict[Tuple[str, str], str] = {}
+# A rejected credential is rejected everywhere, so it is remembered without a model.
+_DEAD_KEYS: Dict[str, str] = {}
+
+
+def api_keys(explicit: Optional[str] = None) -> List[str]:
+    """Every credential available, in the order they should be tried."""
+    if explicit:
+        return [explicit]
+    load_dotenv()
+    out: List[str] = []
+    for source in ("GEMINI_API_KEYS", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        for part in re.split(r"[,\s]+", os.environ.get(source, "") or ""):
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
+def live_keys(model: str = "", explicit: Optional[str] = None) -> List[str]:
+    """Keys that might still work for this model, in order."""
+    keys = [k for k in api_keys(explicit) if k not in _DEAD_KEYS]
+    fresh = [k for k in keys if (k, model) not in _SPENT]
+    # If everything looks spent, try them anyway rather than refusing outright: a
+    # per-minute ceiling clears on its own and the marks may simply be stale.
+    return fresh or keys or api_keys(explicit)
+
+
+def mark_spent(key: str, model: str, reason: str) -> None:
+    """Records that this key has nothing left for this model."""
+    _SPENT[(key, model)] = reason
+
+
+def mark_dead(key: str, reason: str) -> None:
+    """Records that this credential is not accepted at all, for any model."""
+    _DEAD_KEYS[key] = reason
+
+
+def models_to_try(model: Optional[str] = None) -> List[str]:
+    """The requested model first, then the fallbacks, without repeats."""
+    first = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
+    out = [first]
+    for m in FALLBACK_MODELS:
+        if m not in out:
+            out.append(m)
+    return out
+
+
+def key_label(key: str) -> str:
+    """Enough of a key to tell two apart in a log, and no more."""
+    return key[:6] + "..." + key[-4:] if len(key) > 12 else "key"
+
+
+def _key_verdict(code: int, detail: str) -> str:
+    """"dead" if the credential is refused outright, "spent" if it is merely used up."""
+    if code in (401, 403):
+        return "dead"
+    if code == 429:
+        return "spent"
+    return ""
 
 
 def _api_key(explicit: Optional[str] = None) -> str:
-    load_dotenv()
-    key = explicit or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    keys = live_keys("", explicit)
+    key = keys[0] if keys else None
     if not key:
         raise EnhancementError(
-            "No API key. Put GEMINI_API_KEY=... in a .env file at the project root, "
-            "or set it in the environment.")
+            "No API key. Put GEMINI_API_KEYS=key1,key2,... in a .env file at the "
+            "project root, or set GEMINI_API_KEY in the environment.")
     return key
 
 
@@ -1101,7 +1200,6 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
     against a skeleton of sixteen thousand, which is cheap for the only description of
     the page that is not second-hand.
     """
-    model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
     parts: List[Dict[str, Any]] = [{"text": prompt}]
     for shot in ([image] if image else []) + list(images or []):
         if shot:
@@ -1116,19 +1214,53 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
         },
     }).encode("utf-8")
 
-    key = _api_key(api_key)
-    for attempt in range(1, max(1, attempts) + 1):
-        try:
-            payload = _post(model, body, key, timeout)
+    # Walk the credentials and the models before walking the clock. A spent allowance
+    # is not a transient failure -- waiting forty seconds and asking again only wastes
+    # the time -- so a 429 moves to the next key, and when every key is spent for this
+    # model it moves to the next model. Only a busy server earns a wait. Before this,
+    # one exhausted model ended the run outright while the same key had a full allowance
+    # on the next one along.
+    payload = None
+    last_error: Optional[EnhancementError] = None
+    used_model = None
+    for model_name in models_to_try(model):
+        keys = live_keys(model_name, api_key)
+        for key in keys:
+            give_up_on_key = False
+            for attempt in range(1, max(1, attempts) + 1):
+                try:
+                    payload = _post(model_name, body, key, timeout)
+                    used_model = model_name
+                    break
+                except _KeyProblem as kp:
+                    last_error = kp.error
+                    if kp.verdict == "dead":
+                        mark_dead(key, kp.reason)
+                    else:
+                        mark_spent(key, model_name, kp.reason)
+                    if on_retry:
+                        on_retry(0, 0, "%s on %s: %s" % (
+                            key_label(key), model_name, kp.reason), 0)
+                    give_up_on_key = True
+                    break
+                except _Transient as t:
+                    last_error = t.error
+                    if attempt >= attempts:
+                        give_up_on_key = True
+                        break
+                    # The server knows better than a doubling guess when it says so.
+                    delay = t.retry_after or (RETRY_BACKOFF * (2 ** (attempt - 1)))
+                    if on_retry:
+                        on_retry(attempt, attempts, t.code or "a timeout", delay)
+                    time.sleep(delay)
+            if payload is not None or not give_up_on_key:
+                break
+        if payload is not None:
             break
-        except _Transient as t:
-            if attempt >= attempts:
-                raise t.error
-            # The server knows better than a doubling guess when it says so.
-            delay = t.retry_after or (RETRY_BACKOFF * (2 ** (attempt - 1)))
-            if on_retry:
-                on_retry(attempt, attempts, t.code or "a timeout", delay)
-            time.sleep(delay)
+    if payload is None:
+        raise last_error or EnhancementError("No key or model could answer.")
+    if used_model:
+        _LAST_MODEL[0] = used_model
 
     candidates = payload.get("candidates") or []
     if not candidates:
@@ -1150,6 +1282,13 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
 class _Transient(Exception):
     def __init__(self, code, error, retry_after=None):
         self.code, self.error, self.retry_after = code, error, retry_after
+
+
+class _KeyProblem(Exception):
+    """This credential will not work here; another one, or another model, might."""
+
+    def __init__(self, error, reason, verdict="spent"):
+        self.error, self.reason, self.verdict = error, reason, verdict
 
 
 def _post(model: str, body: bytes, key: str, timeout: int) -> dict:
@@ -1182,7 +1321,11 @@ def _post(model: str, body: bytes, key: str, timeout: int) -> dict:
                         "them and works on flash.")
         else:
             hint = ""
-        err = EnhancementError(f"Gemini returned {e.code}: {detail}{hint}")
+        err = EnhancementError(
+            f"Gemini returned {e.code}: {redact_keys(detail)}{hint}")
+        verdict = _key_verdict(e.code, detail)
+        if verdict:
+            raise _KeyProblem(err, short_reason(err), verdict) from e
         # A daily allowance does not come back in forty seconds, so backing off against
         # it only wastes the caller's time before failing anyway.
         exhausted = e.code == 429 and ("per day" in detail or "_requests, limit:" in detail)
@@ -1557,7 +1700,6 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
     Server-sent events rather than one blocking call, because a page takes a minute or
     two to write and watching it appear is most of the point.
     """
-    model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
     parts: List[Dict[str, Any]] = [{"text": prompt}]
     for shot in (images or []):
         if shot:
@@ -1567,54 +1709,84 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 65536},
     }).encode("utf-8")
 
-    url = (_ENDPOINT.format(model=model).replace(":generateContent",
-                                                 ":streamGenerateContent")
-           + "?alt=sse")
-    key = _api_key(api_key)
-
-    # Opening the stream gets the same retries as any other call. It did not, and a
-    # single 503 -- the most common answer this API gives -- ended the run with a
-    # traceback while the non-streaming path beside it quietly retried and succeeded.
-    # Only the connection is retried: once chunks have been handed to the caller there
-    # is no way to start again without duplicating what it has already shown.
+    def stream_url(name):
+        return (_ENDPOINT.format(model=name).replace(":generateContent",
+                                                     ":streamGenerateContent")
+                + "?alt=sse")
+    # Opening the stream gets the same treatment as any other call: walk the keys, then
+    # the models, and wait only for a busy server. It had none of that, and a single 503
+    # -- the most common answer this API gives -- ended the run with a traceback. Only
+    # the connection is retried; once chunks have reached the caller there is no
+    # starting again without repeating what it has already shown.
     resp = None
     last = None
-    for attempt in range(1, max(1, attempts) + 1):
-        req = urllib.request.Request(
-            url, data=body,
-            headers={"Content-Type": "application/json", "x-goog-api-key": key},
-            method="POST")
-        try:
-            resp = urllib.request.urlopen(req, timeout=timeout)
-            break
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:600]
-            last = EnhancementError(f"Gemini returned {e.code}: {detail}")
-            exhausted = e.code == 429 and ("per day" in detail
-                                           or "_requests, limit:" in detail)
-            if e.code not in RETRY_STATUSES or exhausted or attempt >= attempts:
-                raise last from e
-            wait = None
-            m = re.search(r'"retryDelay"\s*:\s*"([\d.]+)s"', detail)
-            if m:
+    chosen = None
+    for model_name in models_to_try(model):
+        keys = live_keys(model_name, api_key)
+        if not keys:
+            continue
+        for key in keys:
+            give_up_on_key = False
+            for attempt in range(1, max(1, attempts) + 1):
+                req = urllib.request.Request(
+                    stream_url(model_name), data=body,
+                    headers={"Content-Type": "application/json",
+                             "x-goog-api-key": key},
+                    method="POST")
                 try:
-                    wait = float(m.group(1))
-                except ValueError:
+                    resp = urllib.request.urlopen(req, timeout=timeout)
+                    chosen = model_name
+                    break
+                except urllib.error.HTTPError as e:
+                    detail = redact_keys(e.read().decode("utf-8", "replace")[:600])
+                    last = EnhancementError(
+                        f"Gemini returned {e.code}: {detail}")
+                    verdict = _key_verdict(e.code, detail)
+                    if verdict:
+                        if verdict == "dead":
+                            mark_dead(key, short_reason(last))
+                        else:
+                            mark_spent(key, model_name, short_reason(last))
+                        yield ("status", "%s on %s: %s. Trying the next one..."
+                               % (key_label(key), model_name, short_reason(last)))
+                        give_up_on_key = True
+                        break
+                    if e.code not in RETRY_STATUSES or attempt >= attempts:
+                        give_up_on_key = True
+                        break
                     wait = None
-            delay = wait or (RETRY_BACKOFF * (2 ** (attempt - 1)))
-            yield ("status", "The model is busy (%d). Waiting %.0fs, attempt %d of %d..."
-                   % (e.code, delay, attempt + 1, attempts))
-            time.sleep(delay)
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            last = EnhancementError(f"Could not reach Gemini: {e}")
-            if attempt >= attempts:
-                raise last from e
-            delay = RETRY_BACKOFF * (2 ** (attempt - 1))
-            yield ("status", "Connection failed. Waiting %.0fs, attempt %d of %d..."
-                   % (delay, attempt + 1, attempts))
-            time.sleep(delay)
+                    marker = '"retryDelay"'
+                    at = detail.find(marker)
+                    if at >= 0:
+                        for piece in detail[at + len(marker):].split('"'):
+                            body_num = piece[:-1] if piece.endswith("s") else ""
+                            if body_num.replace(".", "", 1).isdigit():
+                                wait = float(body_num)
+                                break
+                    delay = wait or (RETRY_BACKOFF * (2 ** (attempt - 1)))
+                    yield ("status",
+                           "%s is busy (%d). Waiting %.0fs, attempt %d of %d..."
+                           % (model_name, e.code, delay, attempt + 1, attempts))
+                    time.sleep(delay)
+                except (urllib.error.URLError, TimeoutError, OSError) as e:
+                    last = EnhancementError(f"Could not reach Gemini: {e}")
+                    if attempt >= attempts:
+                        give_up_on_key = True
+                        break
+                    delay = RETRY_BACKOFF * (2 ** (attempt - 1))
+                    yield ("status", "Connection failed. Waiting %.0fs, attempt %d of %d..."
+                           % (delay, attempt + 1, attempts))
+                    time.sleep(delay)
+            if resp is not None or not give_up_on_key:
+                break
+        if resp is not None:
+            break
     if resp is None:
-        raise last or EnhancementError("Could not open the stream.")
+        raise last or EnhancementError("No key or model could open the stream.")
+    if chosen:
+        _LAST_MODEL[0] = chosen
+        if chosen != (model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL):
+            yield ("status", "Using %s instead." % chosen)
 
     with resp:
         for raw in resp:
@@ -1791,7 +1963,7 @@ def generate_from_document(doc, api_key: Optional[str] = None,
     final, missing = restore_assets(raw, assets)
     yield "done", {
         "html": final,
-        "model": model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL,
+        "model": _LAST_MODEL[0] or model or DEFAULT_MODEL,
         "assets_total": len(assets),
         "assets_missing": missing,
         "verify_rounds": rounds_done,
