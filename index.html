@@ -1362,10 +1362,38 @@ html, body {
     overflow: hidden; text-overflow: ellipsis; max-width: 22vw;
 }
 .live-build-spacer { flex: 1 1 auto; }
-.live-build-body { flex: 1 1 auto; position: relative; overflow: hidden; }
-.live-build-frame {
-    width: 100%; height: 100%; border: 0; background: #fff;
+.live-build-body {
+    flex: 1 1 auto; position: relative; overflow: hidden;
+    display: flex; gap: 1px; background: rgba(255,255,255,.10);
 }
+.lb-pane { display: flex; flex-direction: column; min-width: 0; background: #14161a; }
+.lb-pane[hidden] { display: none; }
+.lb-pane-head {
+    flex: 0 0 auto; padding: 5px 10px; font-size: 11px; letter-spacing: .04em;
+    text-transform: uppercase; opacity: .6; background: rgba(0,0,0,.25);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lb-pane-body { flex: 1 1 auto; position: relative; overflow: auto; background: #fff; }
+.lb-pane-body iframe {
+    width: 100%; height: 100%; border: 0; background: #fff;
+    transform-origin: top left;
+}
+/* In the comparison the frames are laid out at the original page width and shrunk to
+   fit, so all three show the same thing at the same scale. Left to their own devices a
+   fixed-width reconstruction shows its top-left corner and a responsive page shows its
+   phone layout, which compares nothing to anything. */
+.live-build-body.mode-compare .lb-pane-body { overflow: hidden; }
+.live-build-body.mode-compare .lb-pane-body iframe { height: 2600px; }
+.lb-pane-original .lb-pane-body { overflow: auto; background: #0d0f12; }
+.lb-pane-original img { width: 100%; display: block; }
+
+/* While it writes: the design small on the left, the page being built beside it. */
+.live-build-body.mode-building .lb-pane-original { flex: 0 0 300px; }
+.live-build-body.mode-building .lb-pane-built    { flex: 1 1 auto; }
+
+/* Afterwards: the three of them at equal width, to be compared. */
+.live-build-body.mode-compare .lb-pane { flex: 1 1 0; }
+.live-build-frame { width: 100%; height: 100%; border: 0; background: #fff; }
 .live-build-source {
     position: absolute; inset: 0; margin: 0; padding: 14px; overflow: auto;
     background: #0d0f12; color: #cbd3de; font: 12px/1.55 ui-monospace, Menlo, Consolas, monospace;
@@ -1750,13 +1778,32 @@ html, body {
     <span id="live-build-status" class="live-build-status">connecting...</span>
     <span id="live-build-issues" class="live-build-issues"></span>
     <span class="live-build-spacer"></span>
+    <button id="live-build-compare" class="btn-toggle" disabled
+            title="Original, the engine's reconstruction and this page, side by side"
+            >Compare all three</button>
     <button id="live-build-code" class="btn-toggle">Code</button>
+    <button id="live-build-download" class="btn-toggle" disabled>Download</button>
     <button id="live-build-open" class="btn-toggle" disabled>Open in a tab</button>
     <button id="live-build-close" class="btn-icon-subtle" title="Close">&times;</button>
   </div>
-  <div class="live-build-body">
-    <iframe id="live-build-frame" class="live-build-frame" title="Live preview"></iframe>
-    <pre id="live-build-source" class="live-build-source" hidden></pre>
+  <div id="live-build-body" class="live-build-body mode-building">
+    <section class="lb-pane lb-pane-original">
+      <header class="lb-pane-head">Original screenshot</header>
+      <div class="lb-pane-body"><img id="lb-original-img" alt="the page being rebuilt"></div>
+    </section>
+    <section id="lb-pane-engine" class="lb-pane lb-pane-engine" hidden>
+      <header class="lb-pane-head">Reconstructed by the engine</header>
+      <div class="lb-pane-body">
+        <iframe id="lb-engine-frame" title="Engine reconstruction"></iframe>
+      </div>
+    </section>
+    <section class="lb-pane lb-pane-built">
+      <header id="lb-built-head" class="lb-pane-head">Being written now</header>
+      <div class="lb-pane-body">
+        <iframe id="live-build-frame" class="live-build-frame" title="Live preview"></iframe>
+        <pre id="live-build-source" class="live-build-source" hidden></pre>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -1798,6 +1845,13 @@ const elements = {
     liveBuildSource: document.getElementById('live-build-source'),
     liveBuildStatus: document.getElementById('live-build-status'),
     liveBuildIssues: document.getElementById('live-build-issues'),
+    liveBuildBody: document.getElementById('live-build-body'),
+    liveBuildCompare: document.getElementById('live-build-compare'),
+    liveBuildDownload: document.getElementById('live-build-download'),
+    lbOriginalImg: document.getElementById('lb-original-img'),
+    lbPaneEngine: document.getElementById('lb-pane-engine'),
+    lbEngineFrame: document.getElementById('lb-engine-frame'),
+    lbBuiltHead: document.getElementById('lb-built-head'),
     liveBuildCode: document.getElementById('live-build-code'),
     liveBuildOpen: document.getElementById('live-build-open'),
     liveBuildClose: document.getElementById('live-build-close'),
@@ -1956,6 +2010,7 @@ function setupEventListeners() {
     // Enhancement pass
     if (elements.btnEnhance) {
         elements.btnEnhance.addEventListener('click', buildFromScreenshot);
+        wireLiveBuildControls();
         refreshEnhanceAvailability();
     }
 
@@ -2984,6 +3039,9 @@ async function refreshEnhanceAvailability() {
 // into an iframe as it arrives, so what you watch is the page writing itself rather
 // than a spinner that eventually produces one.
 let liveBuildSocket = null;
+// The page most recently written, so the toolbar can act on it without the handlers
+// having to be re-bound each run.
+let latestBuiltHtml = null;
 
 // A flat grey square, inline, so a marker that has not been resolved yet costs no
 // request and still occupies the space the picture will take.
@@ -3000,7 +3058,70 @@ function closeLiveBuild() {
     elements.liveBuildSource.hidden = true;
     elements.liveBuildIssues.textContent = '';
     elements.liveBuildOpen.disabled = true;
+    elements.liveBuildDownload.disabled = true;
+    elements.liveBuildCompare.disabled = true;
+    elements.liveBuildCompare.classList.remove('active');
+    elements.liveBuildBody.classList.remove('mode-compare');
+    elements.liveBuildBody.classList.add('mode-building');
+    elements.lbPaneEngine.hidden = true;
+    elements.lbEngineFrame.srcdoc = '';
+    elements.lbOriginalImg.removeAttribute('src');
+    elements.lbBuiltHead.textContent = 'Being written now';
     elements.btnEnhance.disabled = false;
+}
+
+// The middle pane of the comparison: what the engine alone produced, rendered from the
+// same document. Asked of the server rather than rebuilt here, so it is exactly the file
+// the Export button would give you.
+// Render each frame at the width the page was captured at, then shrink it to the pane.
+// Without this the comparison is three different scales side by side.
+function fitComparisonPanes() {
+    const body = elements.liveBuildBody;
+    if (!body.classList.contains('mode-compare')) {
+        [elements.lbEngineFrame, elements.liveBuildFrame].forEach(f => {
+            f.style.width = '100%';
+            f.style.transform = '';
+        });
+        return;
+    }
+    const page = state.doc && (state.doc.pages[state.currentPageIndex] || state.doc.pages[0]);
+    const pageWidth = (page && page.width) || 1400;
+    const pageHeight = (page && page.height) || 1000;
+    [elements.lbEngineFrame, elements.liveBuildFrame].forEach(frame => {
+        const pane = frame.parentElement;
+        if (!pane || !pane.clientWidth) return;
+        const scale = pane.clientWidth / pageWidth;
+        frame.style.width = pageWidth + 'px';
+        // The reconstruction is exactly as tall as the page it came from. The written
+        // one reflows and is usually taller, so it gets room to be as long as it likes
+        // rather than a band of empty frame under it.
+        frame.style.height = (frame === elements.lbEngineFrame
+            ? pageHeight : Math.max(pageHeight * 3, 3000)) + 'px';
+        frame.style.transform = `scale(${scale})`;
+    });
+}
+
+window.addEventListener('resize', () => {
+    if (elements.liveBuild && !elements.liveBuild.hidden) fitComparisonPanes();
+});
+
+async function loadEngineReconstruction() {
+    if (!state.doc || elements.lbEngineFrame.srcdoc) return;
+    try {
+        const res = await fetch('/api/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ document: state.doc, format: 'html' })
+        });
+        if (!res.ok) throw new Error('export failed');
+        elements.lbEngineFrame.srcdoc = await res.text();
+        elements.lbEngineFrame.onload = fitComparisonPanes;
+    } catch (e) {
+        elements.lbEngineFrame.srcdoc =
+            '<style>body{margin:0;font:13px system-ui;color:#8b95a5;display:grid;' +
+            'place-items:center;height:100vh}</style>' +
+            '<p>the engine reconstruction could not be loaded</p>';
+    }
 }
 
 async function buildFromScreenshot() {
@@ -3013,6 +3134,14 @@ async function buildFromScreenshot() {
 
     elements.btnEnhance.disabled = true;
     elements.liveBuild.hidden = false;
+    // The design sits beside the page the whole time it is being written, so there is
+    // something to judge it against while it happens rather than only afterwards.
+    elements.lbOriginalImg.src = page.originalImageSrc;
+    elements.liveBuildBody.classList.add('mode-building');
+    elements.liveBuildBody.classList.remove('mode-compare');
+    elements.lbPaneEngine.hidden = true;
+    elements.lbBuiltHead.textContent = 'Being written now';
+    elements.liveBuildCompare.classList.remove('active');
     elements.liveBuildSource.textContent = '';
     elements.liveBuildFrame.srcdoc =
         '<style>body{margin:0;font:14px system-ui;color:#8b95a5;display:grid;' +
@@ -3020,8 +3149,11 @@ async function buildFromScreenshot() {
     elements.liveBuildStatus.textContent = 'connecting...';
     elements.liveBuildIssues.textContent = '';
     elements.liveBuildOpen.disabled = true;
+    elements.liveBuildDownload.disabled = true;
+    elements.liveBuildCompare.disabled = true;
 
     let finalHtml = null;
+    latestBuiltHtml = null;
     let buffer = '';
     let painted = 0;
     const started = Date.now();
@@ -3073,12 +3205,18 @@ async function buildFromScreenshot() {
         } else if (msg.type === 'revision') {
             // A corrected page arrived; show it and keep going.
             finalHtml = msg.html;
+            latestBuiltHtml = msg.html;
             elements.liveBuildFrame.srcdoc = finalHtml;
             elements.liveBuildOpen.disabled = false;
         } else if (msg.type === 'done') {
             finalHtml = msg.html;
+            latestBuiltHtml = msg.html;
             elements.liveBuildFrame.srcdoc = finalHtml;
             elements.liveBuildOpen.disabled = false;
+            elements.liveBuildDownload.disabled = false;
+            elements.liveBuildCompare.disabled = false;
+            elements.lbBuiltHead.textContent = 'Written from the screenshot';
+            loadEngineReconstruction();
             const lost = (msg.assets_missing || []).length;
             const checks = msg.verify_rounds || 0;
             elements.liveBuildStatus.textContent =
@@ -3101,15 +3239,52 @@ async function buildFromScreenshot() {
         }
     };
 
-    elements.liveBuildOpen.onclick = () => {
-        if (!finalHtml) return;
-        const url = URL.createObjectURL(new Blob([finalHtml], { type: 'text/html' }));
-        window.open(url, '_blank');
+}
+
+// Bound once at startup rather than per run. Wiring them inside the build meant a
+// toolbar that did nothing until a page had been generated in this particular visit,
+// and nothing again after the overlay was closed and reopened.
+function wireLiveBuildControls() {
+    elements.liveBuildCompare.onclick = () => {
+        const comparing = elements.liveBuildBody.classList.toggle('mode-compare');
+        elements.liveBuildBody.classList.toggle('mode-building', !comparing);
+        elements.lbPaneEngine.hidden = !comparing;
+        elements.liveBuildCompare.classList.toggle('active', comparing);
+        elements.liveBuildCompare.textContent = comparing ? 'Back to the build'
+                                                          : 'Compare all three';
+        if (comparing) loadEngineReconstruction();
+        // After the layout has settled, or the panes still have their old widths.
+        requestAnimationFrame(() => requestAnimationFrame(fitComparisonPanes));
     };
+
+    elements.liveBuildDownload.onclick = () => {
+        if (!latestBuiltHtml) return;
+        const name = ((state.doc && state.doc.title) || 'page').toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'page';
+        const url = URL.createObjectURL(new Blob([latestBuiltHtml], { type: 'text/html' }));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${name}.generated.html`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Revoked on a delay: revoking at once can cancel the download in some browsers
+        // before they have read the blob.
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+    };
+
+    elements.liveBuildOpen.onclick = () => {
+        if (!latestBuiltHtml) return;
+        window.open(URL.createObjectURL(
+            new Blob([latestBuiltHtml], { type: 'text/html' })), '_blank');
+    };
+
     elements.liveBuildCode.onclick = () => {
         elements.liveBuildSource.hidden = !elements.liveBuildSource.hidden;
-        elements.liveBuildCode.classList.toggle('active', !elements.liveBuildSource.hidden);
+        elements.liveBuildCode.classList.toggle('active',
+                                               !elements.liveBuildSource.hidden);
     };
+
     elements.liveBuildClose.onclick = closeLiveBuild;
 }
 
