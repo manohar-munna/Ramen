@@ -49,10 +49,17 @@ DEFAULT_MODEL = "gemini-3-flash-preview"
 # endpoint while returning 404 to any key made after it was retired, pro models 429 on
 # the free tier, and gemini-flash-latest returned 503 to a full page four times running
 # while answering a one-line prompt instantly. So try several rather than trusting one.
-# Tried in turn when the requested one has nothing left on any key. Measured as
-# reachable and answering; gemini-flash-latest is deliberately absent, having returned
-# 503 to a full page four times running while answering a one-line prompt instantly.
-FALLBACK_MODELS = ("gemini-3.5-flash", "gemini-3.6-flash", "gemini-3-flash-preview")
+# Tried in turn when the requested one has nothing left on any key. Ordered by how good
+# the page comes out, not by speed: the flash models first, then the lite ones, which
+# are weaker but hold a separate allowance. That last part is the whole point -- with
+# every flash model spent for the day a run used to fail outright, while four lite
+# models sat there answering in a second. gemini-flash-latest is deliberately absent,
+# having returned 503 to a full page four times running while answering a one-line
+# prompt instantly.
+FALLBACK_MODELS = (
+    "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview",
+    "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite",
+)
 _ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/models/"
              "{model}:generateContent")
 
