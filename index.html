@@ -3070,9 +3070,6 @@ function closeLiveBuild() {
     elements.btnEnhance.disabled = false;
 }
 
-// The middle pane of the comparison: what the engine alone produced, rendered from the
-// same document. Asked of the server rather than rebuilt here, so it is exactly the file
-// the Export button would give you.
 // Render each frame at the width the page was captured at, then shrink it to the pane.
 // Without this the comparison is three different scales side by side.
 function fitComparisonPanes() {
@@ -3105,6 +3102,9 @@ window.addEventListener('resize', () => {
     if (elements.liveBuild && !elements.liveBuild.hidden) fitComparisonPanes();
 });
 
+// The middle pane of the comparison: what the engine alone produced, rendered from the
+// same document. Asked of the server rather than rebuilt here, so it is exactly the file
+// the Export button would give you.
 async function loadEngineReconstruction() {
     if (!state.doc || elements.lbEngineFrame.srcdoc) return;
     try {
@@ -3140,6 +3140,9 @@ async function buildFromScreenshot() {
     elements.liveBuildBody.classList.add('mode-building');
     elements.liveBuildBody.classList.remove('mode-compare');
     elements.lbPaneEngine.hidden = true;
+    // Cleared here as well as on close: loadEngineReconstruction skips the fetch when
+    // the frame already holds something, and that something belongs to the last run.
+    elements.lbEngineFrame.srcdoc = '';
     elements.lbBuiltHead.textContent = 'Being written now';
     elements.liveBuildCompare.classList.remove('active');
     elements.liveBuildSource.textContent = '';
@@ -3168,7 +3171,14 @@ async function buildFromScreenshot() {
     };
 
     ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
+        // A frame that will not parse used to throw inside the handler, where nothing
+        // catches it: the overlay simply stopped updating and said nothing about why.
+        let msg;
+        try { msg = JSON.parse(ev.data); }
+        catch (e) {
+            elements.liveBuildStatus.textContent = 'a message from the server was unreadable';
+            return;
+        }
         if (msg.type === 'status') {
             elements.liveBuildStatus.textContent = msg.detail;
         } else if (msg.type === 'chunk') {
@@ -3286,52 +3296,6 @@ function wireLiveBuildControls() {
     };
 
     elements.liveBuildClose.onclick = closeLiveBuild;
-}
-
-async function enhanceDocument() {
-    if (!state.doc) {
-        alert('Please open a PDF or image first.');
-        return;
-    }
-    const btn = elements.btnEnhance;
-    // innerHTML, not textContent: the label sits next to an inline SVG icon, and
-    // swapping the text would delete the icon and never bring it back.
-    const label = btn.innerHTML;
-    btn.disabled = true;
-    btn.textContent = 'Enhancing...';
-    setStatus('Rewriting the page through Gemini. This can take a minute...');
-    try {
-        const response = await fetch('/api/enhance', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ document: state.doc })
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.detail || 'Enhancement failed');
-
-        // Open it rather than replacing the canvas: the reconstruction is the measured
-        // artefact and the rewrite is a separate thing to compare against it.
-        const blob = new Blob([payload.html], { type: 'text/html' });
-        const url = URL.createObjectURL(blob);
-        window.open(url, '_blank');
-
-        const lost = (payload.assets_missing || []).length;
-        setStatus(lost
-            ? `Enhanced by ${payload.model} - warning: ${lost} image(s) were dropped by the model.`
-            : `Enhanced by ${payload.model}, all ${payload.assets_total} images preserved.`);
-        if (lost) {
-            alert('The model dropped ' + lost + ' of ' + payload.assets_total
-                + ' images. The rewrite opened in a new tab but is missing content.'
-                + ' Re-running often fixes it.');
-        }
-    } catch (e) {
-        setStatus('Enhancement failed.');
-        alert('Enhancement failed: ' + e.message);
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = label;
-        refreshEnhanceAvailability();
-    }
 }
 
 async function exportDocument(format) {
