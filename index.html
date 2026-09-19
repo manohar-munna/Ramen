@@ -621,6 +621,11 @@ html, body {
     user-select: none;
 }
 
+/* The floating panel would otherwise sit on top of the page it describes. Padding
+   rather than width: the viewport element keeps its size, so nothing about the canvas
+   is resized by a selection -- the page just re-centres in the room that is left. */
+.canvas-viewport.with-panel { padding-right: 332px; }
+
 /* Auto margins rather than justify-content: centre. They do the same thing when the
    page is smaller than the window and, unlike centring, they leave the left and top
    edges reachable when it is bigger -- centred flex overflow cannot be scrolled back
@@ -630,6 +635,13 @@ html, body {
     margin: auto;
     flex: 0 0 auto;
 }
+
+/* The zoom is deliberately not transitioned. It is two properties describing one
+   quantity -- the scale on the wrapper and the size of this box -- and easing them
+   separately lets them disagree while both are in flight, which draws a page that is
+   a different size from the room reserved for it. Under a pinch or a held button the
+   zoom is already continuous, so there is nothing for an ease to add.
+*/
 
 .canvas-wrapper {
     position: relative;
@@ -832,7 +844,24 @@ html, body {
     background-color: rgba(37, 99, 235, 0.05);
     pointer-events: none;
     z-index: 999;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity var(--dur) var(--ease), visibility var(--dur);
 }
+
+.selection-box.is-on { opacity: 1; visibility: visible; }
+
+/* The selection chrome lives inside the layer the zoom scales, so at 40% its label is
+   unreadable and its handles are two pixels across. --inv-zoom is the current zoom
+   inverted; these scale about their own centres, so they keep their positions and
+   get their size back. */
+.selection-label,
+.resize-handle,
+#inspect-tip { transform: scale(var(--inv-zoom, 1)); }
+
+.resize-handle { transform-origin: center; }
+.selection-label { transform-origin: bottom left; }
+#inspect-tip { transform-origin: top left; }
 
 .selection-label {
     position: absolute;
@@ -870,17 +899,47 @@ html, body {
 .resize-handle.w  { top: calc(50% - 3.5px); left: -4px; cursor: ew-resize; }
 .resize-handle.e  { top: calc(50% - 3.5px); right: -4px; cursor: ew-resize; }
 
-/* Right Sidebar: Contextual Properties Panel */
+/* Right Sidebar: Contextual Properties Panel
+
+   It floats over the canvas rather than sitting beside it. As a flex sibling it took
+   300px out of the viewport every time something was selected, so the page it was
+   describing was resized and pushed off-centre by the act of clicking on it -- and
+   since the fit is computed from the viewport width, the page no longer fitted.
+   Floating, the canvas never changes size and nothing moves underneath you. */
 .sidebar-properties {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
     width: 300px;
     background-color: var(--bg-chrome);
     border-left: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-lg);
     display: flex;
     flex-direction: column;
     user-select: none;
-    flex-shrink: 0;
     overflow-y: auto;
     z-index: 50;
+    /* Inert and unreachable until it is opened: hidden with opacity alone it would
+       still swallow clicks meant for the page underneath, and still be a tab stop. */
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateX(10px);
+    transition: opacity var(--dur-slow) var(--ease),
+                transform var(--dur-slow) var(--ease),
+                visibility var(--dur-slow);
+}
+
+.sidebar-properties.is-open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .sidebar-properties { transition-duration: .01ms; transform: none; }
 }
 
 .panel-header {
@@ -1962,7 +2021,7 @@ html, body {
                 </div>
 
                 <!-- Interactive Selection & Transform Gizmo -->
-                <div id="selection-box" class="selection-box" style="display: none;">
+                <div id="selection-box" class="selection-box">
                     <div class="resize-handle n" data-handle="n"></div>
                     <div class="resize-handle s" data-handle="s"></div>
                     <div class="resize-handle e" data-handle="e"></div>
@@ -1979,7 +2038,7 @@ html, body {
         </main>
 
         <!-- Right Contextual Properties Panel (Only visible when an element is selected) -->
-        <aside id="properties-panel" class="sidebar-properties" style="display: none;">
+        <aside id="properties-panel" class="sidebar-properties" aria-hidden="true">
             <div class="panel-header">
                 <span id="panel-elem-type" class="panel-type-title">ELEMENT PROPERTIES</span>
                 <button id="btn-close-properties" class="btn-icon-subtle" title="Close Panel"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
@@ -2931,13 +2990,26 @@ function selectElement(elemId) {
     state.selectedElementId = elemId;
     updateSelectionBox(elem);
     renderPropertiesPanel(elem);
-    elements.propertiesPanel.style.display = 'flex';
+    elements.propertiesPanel.classList.add('is-open');
+    elements.propertiesPanel.setAttribute('aria-hidden', 'false');
+    setPanelRoom(true);
+}
+
+// Keeps the page out from under the panel. A view that was fitted is refitted to the
+// narrower space; one somebody chose is left exactly as they set it.
+function setPanelRoom(open) {
+    const vp = elements.canvasViewport;
+    if (vp.classList.contains('with-panel') === open) return;
+    vp.classList.toggle('with-panel', open);
+    if (state.zoomIsFitted) zoomToFit();
 }
 
 function deselectElement() {
     state.selectedElementId = null;
-    elements.selectionBox.style.display = 'none';
-    elements.propertiesPanel.style.display = 'none';
+    elements.selectionBox.classList.remove('is-on');
+    elements.propertiesPanel.classList.remove('is-open');
+    elements.propertiesPanel.setAttribute('aria-hidden', 'true');
+    setPanelRoom(false);
 }
 
 function updateSelectionBox(elem) {
@@ -2946,7 +3018,7 @@ function updateSelectionBox(elem) {
     const w = elem.bbox[2] - elem.bbox[0];
     const h = elem.bbox[3] - elem.bbox[1];
     
-    elements.selectionBox.style.display = 'block';
+    elements.selectionBox.classList.add('is-on');
     elements.selectionBox.style.left = `${x0}px`;
     elements.selectionBox.style.top = `${y0}px`;
     elements.selectionBox.style.width = `${w}px`;
@@ -3455,23 +3527,29 @@ function updateZoom() {
     const page = state.doc && state.doc.pages[state.currentPageIndex];
     elements.canvasFit.classList.toggle('has-page', !!page);
     if (page) {
-        elements.canvasFit.style.width = `${Math.round(page.width * z)}px`;
-        elements.canvasFit.style.height = `${Math.round(page.height * z)}px`;
+        // Floor, not round. Rounding up put the box a pixel past the room available,
+        // which raised the vertical scrollbar, which took eleven pixels of width, which
+        // raised the horizontal one -- two scrollbars for a page that fitted.
+        elements.canvasFit.style.width = `${Math.floor(page.width * z)}px`;
+        elements.canvasFit.style.height = `${Math.floor(page.height * z)}px`;
     } else {
         elements.canvasFit.style.width = '';
         elements.canvasFit.style.height = '';
     }
     // Chrome inside the scaled layer is scaled back, so it stays its own size.
-    elements.inspectTip.style.transform = `scale(${1 / z})`;
+    elements.canvasWrapper.style.setProperty('--inv-zoom', String(1 / z));
     elements.zoomLevelText.textContent = `${Math.round(z * 100)}%`;
 }
 
-// The padding the viewport keeps around the page, both sides.
-const CANVAS_GUTTER = 64;
-
 function fitZoomFor(page) {
-    const availW = elements.canvasViewport.clientWidth - CANVAS_GUTTER;
-    const availH = elements.canvasViewport.clientHeight - CANVAS_GUTTER;
+    // Measured rather than assumed: the viewport's padding changes when the properties
+    // panel opens, and a fit computed from a constant would put the page back under it.
+    const cs = getComputedStyle(elements.canvasViewport);
+    const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+    const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+    // A pixel spare on each axis, so a subpixel page size cannot tip into a scrollbar.
+    const availW = elements.canvasViewport.clientWidth - padX - 1;
+    const availH = elements.canvasViewport.clientHeight - padY - 1;
     if (availW <= 0 || availH <= 0 || !page.width || !page.height) return 1;
     // Whichever dimension runs out first, and never enlarged past its own size: a
     // reconstruction blown up beyond 100% is just a blurrier version of itself.
