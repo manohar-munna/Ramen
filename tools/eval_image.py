@@ -8,7 +8,6 @@ Usage:  python tools/eval_image.py <image> [<image> ...]
 """
 import glob
 import os
-import subprocess
 import sys
 
 import numpy as np
@@ -17,21 +16,11 @@ from skimage.metrics import structural_similarity as ssim
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import ImageReconstructor, HTMLRenderer, DocumentData  # noqa: E402
+from _chrome import find_chrome, screenshot  # noqa: E402
 
-CHROME_CANDIDATES = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-]
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # scratch/ is gitignored -- renders and composites are build output, not source.
 OUT_DIR = os.path.join(REPO_ROOT, "scratch", "image_eval")
-
-
-def find_chrome():
-    for p in CHROME_CANDIDATES:
-        if os.path.exists(p):
-            return p
-    raise RuntimeError("Chrome not found; checked: %s" % CHROME_CANDIDATES)
 
 
 def evaluate(image_path, chrome):
@@ -59,13 +48,7 @@ def evaluate(image_path, chrome):
 
     # 3. Screenshot at 1:1 (image px == CSS px for the image path)
     shot_path = os.path.abspath(os.path.join(OUT_DIR, name + "_recon.png"))
-    subprocess.run([
-        chrome, "--headless", "--disable-gpu", "--hide-scrollbars",
-        "--force-device-scale-factor=1",
-        "--window-size=%d,%d" % (int(page.width), int(page.height)),
-        "--screenshot=" + shot_path,
-        "file:///" + html_path.replace("\\", "/"),
-    ], check=True, capture_output=True)
+    screenshot(chrome, html_path, shot_path, page.width, page.height)
 
     # 4. Compare
     im_orig = Image.open(image_path).convert("RGB")

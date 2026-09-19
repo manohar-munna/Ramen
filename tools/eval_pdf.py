@@ -2,17 +2,17 @@
 
 Usage:  python tools/eval_pdf.py
 """
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import os
-import subprocess
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pymupdf
 import numpy as np
 from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 from engine import DigitalExtractor, HTMLRenderer, DocumentData
+from _chrome import find_chrome, screenshot
 
-CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+CHROME = find_chrome()
 pdf_path = "benchmarks/pdfs/reconstruction-20-pages.pdf"
 doc = pymupdf.open(pdf_path)
 
@@ -43,20 +43,9 @@ for p_idx in range(len(doc)):
         
     # 3. Headless Chrome screenshot
     recon_img_path = os.path.abspath(f"scratch/pdf_eval/eval_recon_p{page_num}.png")
-    file_url = "file:///" + html_path.replace("\\", "/")
-    scale = 150.0 / 72.0
-    cmd = [
-        CHROME_PATH,
-        "--headless",
-        "--disable-gpu",
-        "--hide-scrollbars",
-        f"--force-device-scale-factor={scale}",
-        f"--window-size={int(round(page.rect.width))},{int(round(page.rect.height))}",
-        f"--screenshot={recon_img_path}",
-        file_url
-    ]
-    subprocess.run(cmd, check=True)
-    
+    screenshot(CHROME, html_path, recon_img_path,
+               page.rect.width, page.rect.height, scale=150.0 / 72.0)
+
     # 4. Compute SSIM
     im1 = Image.open(actual_img_path).convert("L")
     im2 = Image.open(recon_img_path).convert("L")

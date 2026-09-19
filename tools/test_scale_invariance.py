@@ -9,7 +9,6 @@ Usage:  python tools/test_scale_invariance.py [factor ...]   (default 0.6 1.0 1.
 """
 import glob
 import os
-import subprocess
 import sys
 
 import numpy as np
@@ -19,19 +18,9 @@ from skimage.metrics import structural_similarity as ssim
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 from engine import ImageReconstructor, HTMLRenderer, DocumentData  # noqa: E402
+from _chrome import find_chrome, screenshot  # noqa: E402
 
 OUT = os.path.join(REPO_ROOT, "scratch", "scale_test")
-CHROME_CANDIDATES = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-]
-
-
-def find_chrome():
-    for p in CHROME_CANDIDATES:
-        if os.path.exists(p):
-            return p
-    raise RuntimeError("Chrome not found")
 
 
 def score(image_path, chrome, tag):
@@ -44,11 +33,7 @@ def score(image_path, chrome, tag):
     # Distinct from the resampled source: writing both to one path made the
     # screenshot overwrite its own input, and every page scored a perfect 100%.
     sp = os.path.abspath(os.path.join(OUT, tag + "_recon.png"))
-    subprocess.run([chrome, "--headless", "--disable-gpu", "--hide-scrollbars",
-                    "--force-device-scale-factor=1",
-                    "--window-size=%d,%d" % (int(page.width), int(page.height)),
-                    "--screenshot=" + sp, "file:///" + hp.replace("\\", "/")],
-                   check=True, capture_output=True)
+    screenshot(chrome, hp, sp, page.width, page.height)
     a = Image.open(image_path).convert("L")
     b = Image.open(sp).convert("L")
     w, h = min(a.width, b.width), min(a.height, b.height)

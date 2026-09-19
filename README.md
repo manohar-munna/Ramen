@@ -92,7 +92,9 @@ Ramen/
 │   ├── audit_components.py      # Component accuracy against ground truth
 │   ├── test_scale_invariance.py # Same page at several capture sizes
 │   ├── audit_enhanced.py        # What a rewrite did to the content it was given
-│   └── enhance_all.py           # Enhance every reference and score it; resumable
+│   ├── enhance_all.py           # Enhance every reference and score it; resumable
+│   ├── check_keys.py            # Which API keys still work, without printing them
+│   └── _chrome.py               # Finding Chrome and photographing a page with it
 └── mlkit/                       # Trained UI detector — a side experiment, not wired in
 ```
 

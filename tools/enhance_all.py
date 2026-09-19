@@ -19,9 +19,9 @@ sys.path.insert(0, os.getcwd())
 
 import enhancer                                          # noqa: E402
 from engine import DocumentData, HTMLRenderer, ImageReconstructor   # noqa: E402
+from _chrome import find_chrome, screenshot                          # noqa: E402
 
 OUT = os.path.join("scratch", "enhance_all")
-CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 
 def reconstruct(path, name):
@@ -49,13 +49,8 @@ def render(html_path, png_path, width=1400, height=2400):
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(settled)
     try:
-        subprocess.run([CHROME, "--headless", "--disable-gpu", "--hide-scrollbars",
-                        "--force-device-scale-factor=1",
-                        "--window-size=%d,%d" % (width, height),
-                        "--virtual-time-budget=8000",
-                        "--screenshot=" + os.path.abspath(png_path),
-                        "file:///" + os.path.abspath(tmp).replace("\\", "/")],
-                       check=True, capture_output=True, timeout=180)
+        screenshot(find_chrome(), tmp, png_path, width, height,
+                   extra=["--virtual-time-budget=8000"])
         return True
     except Exception:
         return False

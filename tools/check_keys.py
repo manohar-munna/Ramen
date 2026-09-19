@@ -20,10 +20,6 @@ import enhancer  # noqa: E402
 LIST_URL = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
 
 
-def mask(key: str) -> str:
-    return key[:6] + "..." + key[-4:] if len(key) > 12 else "(short)"
-
-
 def accepted(key: str, timeout: int = 45):
     """Whether the API recognises this credential at all."""
     req = urllib.request.Request(LIST_URL, headers={"x-goog-api-key": key})
@@ -64,14 +60,14 @@ def main():
     for i, key in enumerate(keys, 1):
         ok, why = accepted(key)
         if not ok:
-            print("%d. %-18s rejected outright - %s" % (i, mask(key), why))
+            print("%d. %-18s rejected outright - %s" % (i, enhancer.key_label(key), why))
             continue
         ok2, why2 = has_allowance(key, args.model)
         if ok2:
             usable.append(key)
-            print("%d. %-18s WORKS" % (i, mask(key)))
+            print("%d. %-18s WORKS" % (i, enhancer.key_label(key)))
         else:
-            print("%d. %-18s accepted, but %s" % (i, mask(key), why2))
+            print("%d. %-18s accepted, but %s" % (i, enhancer.key_label(key), why2))
 
     print("\n%d of %d key(s) can generate on %s." % (len(usable), len(keys), args.model))
     if usable:
