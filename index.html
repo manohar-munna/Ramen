@@ -1339,6 +1339,47 @@ html, body {
 }
 
 
+/* Snackbars -------------------------------------------------------------------
+   A native alert() stops the page dead, steals focus, cannot be styled and says
+   "localhost:8000 says". These stack in the corner, announce themselves, and let the
+   work carry on underneath. */
+.snackbars {
+    position: fixed; z-index: 400; bottom: 52px; right: 18px;
+    display: flex; flex-direction: column-reverse; gap: 10px;
+    max-width: min(420px, calc(100vw - 36px)); pointer-events: none;
+}
+.snackbar {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 12px 14px; border-radius: 10px;
+    background: var(--bg-chrome); color: var(--text-primary);
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid var(--accent-blue);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+    font-size: 13px; line-height: 1.45; pointer-events: auto;
+    animation: snack-in .22s cubic-bezier(.2, .8, .3, 1);
+}
+.snackbar.leaving { animation: snack-out .18s ease-in forwards; }
+.snackbar.error   { border-left-color: var(--accent-red); }
+.snackbar.success { border-left-color: var(--accent-green); }
+.snackbar-icon { flex: 0 0 auto; width: 18px; height: 18px; margin-top: 1px; }
+.snackbar.info .snackbar-icon    { color: var(--accent-blue); }
+.snackbar.error .snackbar-icon   { color: var(--accent-red); }
+.snackbar.success .snackbar-icon { color: var(--accent-green); }
+.snackbar-text { flex: 1 1 auto; min-width: 0; word-wrap: break-word; }
+.snackbar-title { display: block; font-weight: 600; margin-bottom: 2px; }
+.snackbar-close {
+    flex: 0 0 auto; width: 22px; height: 22px; padding: 0;
+    border: 0; border-radius: 6px; background: transparent; cursor: pointer;
+    color: var(--text-muted); font-size: 15px; line-height: 1;
+    transition: background .15s ease, color .15s ease;
+}
+.snackbar-close:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
+@keyframes snack-in  { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+@keyframes snack-out { to   { opacity: 0; transform: translateX(12px); } }
+@media (prefers-reduced-motion: reduce) {
+    .snackbar, .snackbar.leaving { animation: none; }
+}
+
 .live-build {
     position: fixed; inset: 0; z-index: 1200;
     background: var(--bg-primary, #14161a);
@@ -1807,6 +1848,9 @@ html, body {
   </div>
 </div>
 
+<!-- Snackbars. Live region so a screen reader hears what the eye is shown. -->
+<div id="snackbars" class="snackbars" role="status" aria-live="polite"></div>
+
 <script>
 /**
  * RAMEN: Precision PDF-to-HTML Reconstruction & Editor
@@ -1845,6 +1889,7 @@ const elements = {
     liveBuildSource: document.getElementById('live-build-source'),
     liveBuildStatus: document.getElementById('live-build-status'),
     liveBuildIssues: document.getElementById('live-build-issues'),
+    snackbars: document.getElementById('snackbars'),
     liveBuildBody: document.getElementById('live-build-body'),
     liveBuildCompare: document.getElementById('live-build-compare'),
     liveBuildDownload: document.getElementById('live-build-download'),
@@ -2019,7 +2064,7 @@ function setupEventListeners() {
     if (elements.btnPageCode) {
         elements.btnPageCode.addEventListener('click', () => {
             if (!state.doc || !state.doc.pages[state.currentPageIndex]) {
-                alert('Please open a PDF document first.');
+                notify('Open a PDF or image first.', 'info');
                 return;
             }
             openFidelityModal();
@@ -2092,7 +2137,7 @@ async function uploadSampleDirectly() {
         await uploadAndConvert(f);
     } catch (err) {
         hideProcessingModal();
-        alert('Could not load sample: ' + err.message);
+        notify(err.message, 'error', { title: 'The sample would not load' });
     }
 }
 
@@ -2137,7 +2182,7 @@ async function uploadAndConvert(file) {
         
     } catch (error) {
         hideProcessingModal();
-        alert('Error converting PDF: ' + error.message);
+        notify(error.message, 'error', { title: 'That document could not be converted' });
     }
 }
 
@@ -3008,6 +3053,59 @@ function updateThumbnailActiveState() {
     });
 }
 
+// Everything that used to be an alert(). Returns the node so a caller can replace
+// its own message later rather than stacking a second one on top.
+const SNACK_ICONS = {
+    info: '<circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/>'
+        + '<circle cx="12" cy="7.5" r="1" fill="currentColor" stroke="none"/>',
+    success: '<circle cx="12" cy="12" r="9"/><polyline points="8.5 12.4 11 15 15.5 9.5"/>',
+    error: '<path d="M10.3 3.9 2.6 17.1A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.9L13.7 3.9a2 2 0 0 0-3.4 0z"/>'
+         + '<line x1="12" y1="9" x2="12" y2="13.5"/>'
+         + '<circle cx="12" cy="16.8" r="1" fill="currentColor" stroke="none"/>',
+};
+
+function notify(message, kind = 'info', { title = '', timeout } = {}) {
+    const host = elements.snackbars;
+    if (!host) return null;
+    if (timeout === undefined) timeout = kind === 'error' ? 8000 : 4500;
+
+    const el = document.createElement('div');
+    el.className = 'snackbar ' + kind;
+    const svg = '<svg class="snackbar-icon" viewBox="0 0 24 24" fill="none" '
+        + 'stroke="currentColor" stroke-width="1.7" stroke-linecap="round" '
+        + 'stroke-linejoin="round" aria-hidden="true">' + SNACK_ICONS[kind] + '</svg>';
+    el.innerHTML = svg + '<span class="snackbar-text"></span>'
+        + '<button class="snackbar-close" aria-label="Dismiss">&times;</button>';
+    const text = el.querySelector('.snackbar-text');
+    if (title) {
+        const t = document.createElement('strong');
+        t.className = 'snackbar-title';
+        t.textContent = title;
+        text.appendChild(t);
+    }
+    text.appendChild(document.createTextNode(message));
+
+    let timer = null;
+    const dismiss = () => {
+        if (timer) clearTimeout(timer);
+        if (!el.isConnected) return;
+        el.classList.add('leaving');
+        el.addEventListener('animationend', () => el.remove(), { once: true });
+        // Belt and braces: with animations off there is no animationend to wait for.
+        setTimeout(() => el.remove(), 400);
+    };
+    el.querySelector('.snackbar-close').addEventListener('click', dismiss);
+    // Reading a long message should not race a timer.
+    el.addEventListener('mouseenter', () => { if (timer) clearTimeout(timer); });
+    el.addEventListener('mouseleave', () => { timer = setTimeout(dismiss, 2000); });
+
+    host.appendChild(el);
+    // Older ones fall off the bottom rather than filling the screen.
+    while (host.childElementCount > 4) host.firstElementChild.remove();
+    if (timeout) timer = setTimeout(dismiss, timeout);
+    return el;
+}
+
 function setStatus(msg) {
     elements.statusInfoText.textContent = msg;
 }
@@ -3125,10 +3223,10 @@ async function loadEngineReconstruction() {
 }
 
 async function buildFromScreenshot() {
-    if (!state.doc) { alert('Please open a PDF or image first.'); return; }
+    if (!state.doc) { notify('Open a PDF or image first.', 'info'); return; }
     const page = state.doc.pages[state.currentPageIndex] || state.doc.pages[0];
     if (!page || !page.originalImageSrc) {
-        alert('This document has no original screenshot to build from.');
+        notify('This document has no original screenshot to build from.', 'info');
         return;
     }
 
@@ -3236,7 +3334,7 @@ async function buildFromScreenshot() {
                       : `all ${msg.assets_total} images in place`);
         } else if (msg.type === 'error') {
             elements.liveBuildStatus.textContent = 'failed';
-            alert('Could not build the page: ' + msg.detail);
+            notify(msg.detail, 'error', { title: 'The page could not be built' });
         }
     };
 
@@ -3300,7 +3398,7 @@ function wireLiveBuildControls() {
 
 async function exportDocument(format) {
     if (!state.doc) {
-        alert('Please open a PDF document first.');
+        notify('Open a PDF or image first.', 'info');
         return;
     }
     
@@ -3335,7 +3433,7 @@ async function exportDocument(format) {
         
         setStatus(`Exported ${format.toUpperCase()} successfully.`);
     } catch (err) {
-        alert('Export error: ' + err.message);
+        notify(err.message, 'error', { title: 'Export failed' });
         setStatus('Export failed.');
     }
 }
@@ -3368,7 +3466,7 @@ function resetFidelityResults() {
 
 async function openFidelityModal() {
     if (!state.doc || !state.doc.pages[state.currentPageIndex]) {
-        alert('Please load a document first.');
+        notify('Open a PDF or image first.', 'info');
         return;
     }
 
@@ -3836,10 +3934,11 @@ function renderModelComponents(data) {
 async function triggerModelVerification() {
     try {
         await fetch('/api/models/download', { method: 'POST' });
-        alert('Model initialization initiated in the background. Refresh in a few moments to view status.');
+        notify('Downloading in the background. The status here updates as they arrive.',
+               'success', { title: 'Models requested' });
         openModelsModal();
     } catch (err) {
-        alert('Error: ' + err.message);
+        notify(err.message, 'error', { title: 'The models could not be requested' });
     }
 }
 
