@@ -966,6 +966,11 @@ html, body {
     z-index: 1000;
 }
 
+/* display:flex above beats the user agent's rule for [hidden], so a hidden backdrop
+   stayed on screen. Every other modal here is switched with an inline style, which is
+   why this had never come up. */
+.modal-backdrop[hidden] { display: none; }
+
 .modal-card {
     background-color: var(--bg-chrome);
     border: 1px solid var(--border-strong);
@@ -1000,23 +1005,18 @@ html, body {
 }
 
 /* Stages Progress List */
-.stages-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    margin-bottom: 20px;
-}
-
 .stage-item {
     display: flex;
     align-items: center;
     gap: 10px;
-    font-size: 13px;
+    padding: 5px 2px;
+    font-size: 12.5px;
     color: var(--text-muted);
+    transition: color .2s ease;
 }
 
 .stage-item.active {
-    color: var(--accent-blue);
+    color: var(--text-primary);
     font-weight: 600;
 }
 
@@ -1051,21 +1051,87 @@ html, body {
     .stage-item.active .si-dot { animation: none; }
 }
 
-.progress-bar-container {
-    width: 100%;
-    height: 6px;
-    background-color: var(--bg-surface);
-    border-radius: 3px;
-    overflow: hidden;
-    margin-bottom: 10px;
+/* The conversion dialog ------------------------------------------------------- */
+.modal-card-progress {
+    width: 380px;
+    padding: 26px 24px 20px;
+    text-align: center;
 }
 
-.progress-bar-fill {
-    width: 5%;
+.progress-hero {
+    position: relative;
+    width: 132px;
+    height: 132px;
+    margin: 0 auto 16px;
+}
+
+.progress-ring {
+    width: 100%;
     height: 100%;
-    background-color: var(--accent-blue);
-    border-radius: 3px;
-    transition: width 0.25s ease;
+    /* Zero is at three o'clock in SVG; a progress ring should start at the top. */
+    transform: rotate(-90deg);
+}
+
+.ring-track, .ring-value {
+    fill: none;
+    stroke-width: 8;
+    stroke-linecap: round;
+}
+
+.ring-track { stroke: var(--bg-viewport); }
+
+.ring-value {
+    stroke: var(--accent-blue);
+    /* 2 * pi * 52, to four figures. Set here so the ring is correct before any
+       script runs, rather than blank until the first update. */
+    stroke-dasharray: 326.7;
+    stroke-dashoffset: 326.7;
+    transition: stroke-dashoffset .45s cubic-bezier(.3, .8, .35, 1);
+}
+
+.progress-readout {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+}
+
+.progress-percent {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+}
+
+.progress-percent small { font-size: 15px; font-weight: 600; color: var(--text-muted); }
+
+.progress-stage {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+    color: var(--accent-blue);
+}
+
+.progress-heading {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.stages-list {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    text-align: left;
 }
 
 .processing-detail {
@@ -1809,45 +1875,27 @@ html, body {
         </div>
     </footer>
 
-    <!-- Real Multi-Stage Processing Modal -->
-    <div id="processing-modal" class="modal-backdrop" style="display: none;">
-        <div class="modal-card">
-            <div class="modal-header">
-                <h3>Processing Document</h3>
-            </div>
-            <div class="modal-body">
-                <div class="stages-list">
-                    <div class="stage-item" id="stage-read">
-                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
-                        <span class="stage-label">Reading PDF</span>
-                    </div>
-                    <div class="stage-item" id="stage-analyze">
-                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
-                        <span class="stage-label">Detecting page layout</span>
-                    </div>
-                    <div class="stage-item" id="stage-text">
-                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
-                        <span class="stage-label">Extracting text & typography</span>
-                    </div>
-                    <div class="stage-item" id="stage-tables">
-                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
-                        <span class="stage-label">Detecting tables & vector shapes</span>
-                    </div>
-                    <div class="stage-item" id="stage-reconstruct">
-                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
-                        <span class="stage-label" id="stage-reconstruct-label">Reconstructing pages</span>
-                    </div>
-                    <div class="stage-item" id="stage-finalize">
-                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
-                        <span class="stage-label">Finalizing HTML</span>
-                    </div>
+    <!-- What the conversion is doing, while it does it. -->
+    <div id="processing-modal" class="modal-backdrop" hidden>
+        <div class="modal-card modal-card-progress" role="dialog" aria-modal="true"
+             aria-labelledby="processing-heading">
+            <div class="progress-hero">
+                <!-- The ring is one circle with its dash offset animated: the stroke is
+                     its own circumference long, so the offset IS the remaining share. -->
+                <svg class="progress-ring" viewBox="0 0 120 120" aria-hidden="true">
+                    <circle class="ring-track" cx="60" cy="60" r="52"/>
+                    <circle id="progress-ring-value" class="ring-value" cx="60" cy="60" r="52"/>
+                </svg>
+                <div class="progress-readout">
+                    <span id="progress-percent" class="progress-percent">0<small>%</small></span>
+                    <span id="progress-stage" class="progress-stage">Starting</span>
                 </div>
+            </div>
 
-                <div class="progress-bar-container">
-                    <div id="real-progress-bar" class="progress-bar-fill"></div>
-                </div>
-                <div id="processing-detail-text" class="processing-detail">Initializing document pipeline...</div>
-            </div>
+            <h3 id="processing-heading" class="progress-heading">Reconstructing</h3>
+            <p id="processing-detail-text" class="processing-detail">Reading the file...</p>
+
+            <div id="stages-list" class="stages-list"></div>
         </div>
     </div>
 
@@ -2108,16 +2156,11 @@ const elements = {
     
     // Processing Modal
     processingModal: document.getElementById('processing-modal'),
-    realProgressBar: document.getElementById('real-progress-bar'),
     processingDetailText: document.getElementById('processing-detail-text'),
-    stageItems: {
-        read: document.getElementById('stage-read'),
-        analyze: document.getElementById('stage-analyze'),
-        text: document.getElementById('stage-text'),
-        tables: document.getElementById('stage-tables'),
-        reconstruct: document.getElementById('stage-reconstruct'),
-        finalize: document.getElementById('stage-finalize'),
-    },
+    stagesList: document.getElementById('stages-list'),
+    progressRingValue: document.getElementById('progress-ring-value'),
+    progressPercent: document.getElementById('progress-percent'),
+    progressStage: document.getElementById('progress-stage'),
     
     // Fidelity Modal
     fidelityModal: document.getElementById('fidelity-modal'),
@@ -2277,38 +2320,19 @@ async function handleFileSelected(e) {
     await uploadAndConvert(file);
 }
 
+// The bundled sample, fetched and then run through exactly the path a dropped file
+// takes. It used to post to /api/convert with a body built by createSampleFormData(),
+// a function that does not exist anywhere: the call threw on the first line, the catch
+// fetched the PDF properly, and the feature worked only through its own error handler.
+// When the ReferenceError did not happen first, the server converted the sample twice
+// and the answer to the first one was never read.
 async function loadSampleReport() {
-    showProcessingModal();
-    updateStage('read', 'Loading bundled sample PDF...', 15);
     try {
-        const resp = await fetch('/api/convert', {
-            method: 'POST',
-            body: createSampleFormData()
-        });
-        // If direct post with sample file isn't multipart from browser, fetch sample from server
-        // Let's fetch sample pdf blob and convert
-        const sampleResp = await fetch('/sample.pdf');
-        if (sampleResp.ok) {
-            const blob = await sampleResp.blob();
-            const file = new File([blob], 'sample_digital_report.pdf', { type: 'application/pdf' });
-            await uploadAndConvert(file);
-        } else {
-            // Direct convert request
-            uploadSampleDirectly();
-        }
-    } catch (err) {
-        uploadSampleDirectly();
-    }
-}
-
-async function uploadSampleDirectly() {
-    const formData = new FormData();
-    // Fetch blob
-    try {
-        const r = await fetch('/sample.pdf');
-        const b = await r.blob();
-        const f = new File([b], 'sample_digital_report.pdf', { type: 'application/pdf' });
-        await uploadAndConvert(f);
+        const resp = await fetch('/sample.pdf');
+        if (!resp.ok) throw new Error(`the server has no sample to give (${resp.status})`);
+        const blob = await resp.blob();
+        await uploadAndConvert(
+            new File([blob], 'sample_digital_report.pdf', { type: 'application/pdf' }));
     } catch (err) {
         hideProcessingModal();
         notify(err.message, 'error', { title: 'The sample would not load' });
@@ -2316,21 +2340,43 @@ async function uploadSampleDirectly() {
 }
 
 async function uploadAndConvert(file) {
-    showProcessingModal();
-    resetStages();
-    updateStage('read', `Reading PDF: ${file.name}...`, 10);
-    
+    const isImage = /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(file.name || '');
+    // The caller names the job so it can watch it from the first moment. Asking for
+    // the id in the response would mean waiting for the whole conversion to learn how
+    // the conversion was going.
+    const jobId = 'job-' + Math.random().toString(36).slice(2, 10);
+
+    showProcessingModal(isImage ? 'image' : 'pdf');
+    updateStage('read', `Sending ${file.name}...`, 4, 'Reading the file');
+
     const formData = new FormData();
     formData.append('file', file);
-    
+    formData.append('jobId', jobId);
+
+    // What the server is doing, as it does it. Every stage used to be announced in a
+    // single tick after the response had already arrived -- the dialog sat at 25% for
+    // the whole conversion and then jumped to 100 with six ticks at once.
+    let watching = true;
+    const watch = async () => {
+        while (watching) {
+            await new Promise(r => setTimeout(r, 350));
+            if (!watching) return;
+            try {
+                const res = await fetch(`/api/progress/${jobId}`);
+                if (!res.ok) continue;
+                const p = await res.json();
+                if (!watching || p.completed) return;
+                updateStage(p.key || 'read', p.detail, p.percent, p.stage);
+            } catch (e) {
+                // A dropped poll says nothing about the conversion; the next one will.
+            }
+        }
+    };
+    watch();
+
     try {
-        updateStage('analyze', 'Detecting digital geometry & page boundaries...', 25);
-        
-        const response = await fetch('/api/convert', {
-            method: 'POST',
-            body: formData
-        });
-        
+        const response = await fetch('/api/convert', { method: 'POST', body: formData });
+
         if (!response.ok) {
             let errorMsg = 'Conversion failed';
             try {
@@ -2341,55 +2387,105 @@ async function uploadAndConvert(file) {
             }
             throw new Error(errorMsg);
         }
-        
-        updateStage('text', 'Extracting native text, fonts, character coordinates...', 50);
-        updateStage('tables', 'Recognizing tables & vector paths...', 75);
-        updateStage('reconstruct', 'Constructing 2D coordinate canvas...', 90);
-        updateStage('finalize', 'Rendering high-fidelity editable HTML...', 100);
-        
+
         const data = await response.json();
-        
+        watching = false;
+        finishStages();
+        const n = data.document.pages.length;
+        elements.processingDetailText.textContent =
+            n === 1 ? 'One page reconstructed.' : `${n} pages reconstructed.`;
+        // Long enough to see the ring close, short enough not to be a wait.
         setTimeout(() => {
             hideProcessingModal();
             loadDocument(data.document, data.analysis);
-        }, 400);
-        
+        }, 550);
+
     } catch (error) {
+        watching = false;
         hideProcessingModal();
         notify(error.message, 'error', { title: 'That document could not be converted' });
     }
 }
 
-function showProcessingModal() {
-    elements.processingModal.style.display = 'flex';
+// The phases a conversion really goes through, which are not the same for the two
+// paths: an image has no page loop, and a digital PDF has no OCR. The keys match what
+// /api/progress reports, so what is shown is what the server said, not a guess.
+const STAGE_PLANS = {
+    pdf: [
+        ['read', 'Reading the file'],
+        ['analyze', 'Reading the document'],
+        ['pages', 'Reading the pages'],
+        ['finalize', 'Assembling the page'],
+    ],
+    image: [
+        ['read', 'Reading the file'],
+        ['analyze', 'Reading the picture'],
+        ['finalize', 'Assembling the page'],
+    ],
+};
+
+// 2 * pi * 52, the radius the ring is drawn at.
+const RING_LENGTH = 326.7;
+const STAGE_MARK =
+    '<span class="stage-status-icon" aria-hidden="true">'
+    + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    + 'stroke-linecap="round" stroke-linejoin="round">'
+    + '<circle class="si-ring" cx="12" cy="12" r="8"/>'
+    + '<circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/>'
+    + '<polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/>'
+    + '</svg></span>';
+
+let stageOrder = [];
+
+function showProcessingModal(kind) {
+    stageOrder = (STAGE_PLANS[kind] || STAGE_PLANS.pdf).map(([key]) => key);
+    elements.stagesList.textContent = '';
+    (STAGE_PLANS[kind] || STAGE_PLANS.pdf).forEach(([key, label]) => {
+        const row = document.createElement('div');
+        row.className = 'stage-item';
+        row.dataset.stage = key;
+        row.innerHTML = STAGE_MARK + '<span class="stage-label"></span>';
+        row.querySelector('.stage-label').textContent = label;
+        elements.stagesList.appendChild(row);
+    });
+    setProgress(0);
+    elements.progressStage.textContent = 'Starting';
+    elements.processingDetailText.textContent = 'Sending the file...';
+    elements.processingModal.hidden = false;
 }
 
 function hideProcessingModal() {
-    elements.processingModal.style.display = 'none';
+    elements.processingModal.hidden = true;
 }
 
-function resetStages() {
-    Object.values(elements.stageItems).forEach(el => {
-        el.className = 'stage-item';
+// The ring's stroke is exactly its own circumference long, so how much of the dash is
+// pushed out of view is how much is left to do.
+function setProgress(percent) {
+    const p = Math.max(0, Math.min(100, percent || 0));
+    elements.progressRingValue.style.strokeDashoffset =
+        (RING_LENGTH * (1 - p / 100)).toFixed(1);
+    elements.progressPercent.innerHTML =
+        Math.round(p) + '<small>%</small>';
+}
+
+function updateStage(stageKey, detailText, percent, stageName) {
+    const reached = stageOrder.indexOf(stageKey);
+    elements.stagesList.querySelectorAll('.stage-item').forEach(row => {
+        const at = stageOrder.indexOf(row.dataset.stage);
+        row.className = 'stage-item'
+            + (at < reached && reached >= 0 ? ' completed'
+               : at === reached ? ' active' : '');
     });
-    elements.realProgressBar.style.width = '5%';
-    elements.processingDetailText.textContent = 'Initializing...';
+    if (detailText) elements.processingDetailText.textContent = detailText;
+    if (stageName) elements.progressStage.textContent = stageName;
+    setProgress(percent);
 }
 
-function updateStage(stageKey, detailText, percent) {
-    const stageEl = elements.stageItems[stageKey];
-    if (stageEl) {
-        // Mark previous as completed
-        const keys = Object.keys(elements.stageItems);
-        const currentIndex = keys.indexOf(stageKey);
-        for (let i = 0; i < currentIndex; i++) {
-            const prev = elements.stageItems[keys[i]];
-            prev.className = 'stage-item completed';
-        }
-        stageEl.className = 'stage-item active';
-    }
-    elements.processingDetailText.textContent = detailText;
-    elements.realProgressBar.style.width = `${percent}%`;
+function finishStages() {
+    elements.stagesList.querySelectorAll('.stage-item')
+        .forEach(row => { row.className = 'stage-item completed'; });
+    elements.progressStage.textContent = 'Done';
+    setProgress(100);
 }
 
 // ==========================================================================

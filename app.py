@@ -3,7 +3,7 @@ import uuid
 import base64
 import asyncio
 from typing import Dict, Any, Optional, List, Tuple
-from fastapi import (FastAPI, UploadFile, File, HTTPException,
+from fastapi import (FastAPI, UploadFile, File, Form, HTTPException,
                      BackgroundTasks, WebSocket, WebSocketDisconnect)
 from fastapi.responses import Response, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -70,18 +70,45 @@ class EnhanceRequest(BaseModel):
     # Render the result and let the model compare it with the original, this many times.
     refine: Optional[int] = None
 
+# The phases a conversion actually goes through, as short keys the editor can match
+# against without parsing prose. The two paths differ, and saying so is the point: an
+# image has no page loop and a digital PDF has no OCR.
+STAGE_READ = "read"
+STAGE_ANALYZE = "analyze"
+STAGE_PAGES = "pages"
+STAGE_FINALIZE = "finalize"
+
+
 def update_job_stage(job_id: str, stage: str, detail: str, percent: int,
-                     completed: bool = False, error: Optional[str] = None):
+                     completed: bool = False, error: Optional[str] = None,
+                     key: str = ""):
     while len(JOB_PROGRESS) >= JOB_HISTORY and job_id not in JOB_PROGRESS:
         JOB_PROGRESS.pop(next(iter(JOB_PROGRESS)))
     JOB_PROGRESS[job_id] = {
         "jobId": job_id,
         "stage": stage,
+        "key": key,
         "detail": detail,
         "percent": percent,
         "completed": completed,
         "error": error
     }
+
+
+_ID_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+
+
+def job_id_from(requested: Optional[str]) -> str:
+    """The caller's job id if it is one, otherwise a fresh one.
+
+    The caller chooses it so it can watch the conversion from the first moment. It
+    only ever keys an in-memory dict, but it is also part of a path, so anything that
+    is not a plain identifier is thrown away rather than sanitised into something
+    surprising.
+    """
+    if requested and len(requested) <= 40 and set(requested) <= _ID_OK:
+        return requested
+    return f"job-{uuid.uuid4().hex[:8]}"
 
 @app.get("/")
 def get_index():
@@ -129,11 +156,13 @@ def _reconstruct(file_path: str, filename: str,
     doc_title = os.path.splitext(filename)[0]
 
     if is_image:
-        update_job_stage(job_id, "Layered Visual Engine",
-                         "Analyzing image resolution, color palette, typography & shapes...", 25)
+        update_job_stage(job_id, "Reading the picture",
+                         "Colours, typography, shapes and photographic regions...", 25,
+                         key=STAGE_ANALYZE)
         p_data = ImageReconstructor.reconstruct_image(file_path, asset_dir=asset_dir)
-        update_job_stage(job_id, "Finalizing HTML",
-                         "Assembling 2D coordinate canvas and intermediate JSON...", 90)
+        update_job_stage(job_id, "Assembling the page",
+                         "Placing every element at its measured coordinates...", 90,
+                         key=STAGE_FINALIZE)
         analysis = {
             "pageCount": 1,
             "isScannedDoc": True,
@@ -146,8 +175,8 @@ def _reconstruct(file_path: str, filename: str,
             metadata={"filename": filename, "isImage": True, "analysis": analysis}
         ), analysis
 
-    update_job_stage(job_id, "Analyzing Document Structure",
-                     "Detecting digital objects vs scanned pages...", 15)
+    update_job_stage(job_id, "Reading the document",
+                     "Telling digital pages from scanned ones...", 15, key=STAGE_ANALYZE)
     analysis = PDFAnalyzer.analyze_document(file_path)
     page_count = analysis["pageCount"]
     reconstructed_pages: List[PageData] = []
@@ -161,22 +190,23 @@ def _reconstruct(file_path: str, filename: str,
             pct = int(20 + (p_idx / max(page_count, 1)) * 70)
             if analysis["pages"][p_idx]["isScanned"]:
                 update_job_stage(
-                    job_id, "Layout & OCR Analysis",
-                    f"Processing scanned page {p_num} of {page_count} "
-                    f"(PP-DocLayout / OCR / Table)...", pct)
+                    job_id, "Reading the pages",
+                    f"Page {p_num} of {page_count}: scanned, so layout and OCR...",
+                    pct, key=STAGE_PAGES)
                 p_data = ScannedExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
             else:
                 update_job_stage(
-                    job_id, "Native Extraction",
-                    f"Extracting digital geometry, fonts, tables & vectors for "
-                    f"page {p_num} of {page_count}...", pct)
+                    job_id, "Reading the pages",
+                    f"Page {p_num} of {page_count}: geometry, fonts, tables, vectors...",
+                    pct, key=STAGE_PAGES)
                 p_data = DigitalExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
             reconstructed_pages.append(p_data)
     finally:
         doc.close()
 
-    update_job_stage(job_id, "Finalizing HTML",
-                     "Assembling 2D coordinate canvas and intermediate JSON...", 95)
+    update_job_stage(job_id, "Assembling the page",
+                     "Placing every element at its measured coordinates...", 95,
+                     key=STAGE_FINALIZE)
     return DocumentData(
         title=doc_title,
         pageCount=page_count,
@@ -186,12 +216,14 @@ def _reconstruct(file_path: str, filename: str,
 
 
 @app.post("/api/convert")
-async def convert_pdf(file: UploadFile = File(...)):
-    job_id = f"job-{uuid.uuid4().hex[:8]}"
+async def convert_pdf(file: UploadFile = File(...),
+                      jobId: Optional[str] = Form(None)):
+    job_id = job_id_from(jobId)
     filename = file.filename or "upload"
     file_path = os.path.join(CACHE_DIR, f"{job_id}_{filename}")
 
-    update_job_stage(job_id, "Reading PDF", f"Receiving {filename}...", 5)
+    update_job_stage(job_id, "Reading the file", f"Receiving {filename}...", 5,
+                     key=STAGE_READ)
 
     contents = await file.read()
     with open(file_path, "wb") as f:
@@ -203,8 +235,7 @@ async def convert_pdf(file: UploadFile = File(...)):
     try:
         final_doc, analysis = await asyncio.to_thread(
             _reconstruct, file_path, filename, job_id, asset_dir)
-        update_job_stage(job_id, "Completed", "Document successfully reconstructed!",
-                         100, completed=True)
+        update_job_stage(job_id, "Done", "Reconstructed.", 100, completed=True)
         return {
             "jobId": job_id,
             "document": final_doc.model_dump(),
