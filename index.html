@@ -2458,9 +2458,12 @@ function setupEventListeners() {
     elements.btnCloseProperties.addEventListener('click', deselectElement);
     
     // Zoom Controls
-    elements.btnZoomIn.addEventListener('click', () => setZoom(state.zoom + 0.15));
-    elements.btnZoomOut.addEventListener('click', () => setZoom(state.zoom - 0.15));
+    holdToZoom(elements.btnZoomIn, 1);
+    holdToZoom(elements.btnZoomOut, -1);
     elements.btnZoomFit.addEventListener('click', zoomToFit);
+    // Not passive: a pinch has to be stopped from zooming the whole browser window.
+    elements.canvasViewport.addEventListener('wheel', handleCanvasWheel,
+                                             { passive: false });
     
     // Page Navigation
     elements.btnPrevPage.addEventListener('click', () => goToPage(state.currentPageIndex - 1));
@@ -3554,6 +3557,92 @@ function fitZoomFor(page) {
     // Whichever dimension runs out first, and never enlarged past its own size: a
     // reconstruction blown up beyond 100% is just a blurrier version of itself.
     return Math.min(availW / page.width, availH / page.height, 1);
+}
+
+// Zooming about a point, so what is under the pointer stays under the pointer.
+// Zooming about the top-left instead sends whatever you were looking at off the edge
+// and leaves you hunting for it with the scrollbars.
+function zoomAround(next, clientX, clientY) {
+    const vp = elements.canvasViewport;
+    const before = elements.canvasFit.getBoundingClientRect();
+    const prev = state.zoom;
+    // Where the cursor is within the page, in the page's own pixels.
+    const px = (clientX - before.left) / prev;
+    const py = (clientY - before.top) / prev;
+
+    setZoom(next);
+    if (state.zoom === prev) return;
+
+    // The box has resized and the auto margins have re-centred it; put that same point
+    // back under the cursor. Read after setZoom, so this is the settled geometry.
+    const after = elements.canvasFit.getBoundingClientRect();
+    vp.scrollLeft += (after.left + px * state.zoom) - clientX;
+    vp.scrollTop += (after.top + py * state.zoom) - clientY;
+}
+
+// A trackpad pinch arrives as a wheel event with ctrlKey set, which is also what
+// ctrl+wheel sends on a mouse. Anything else is an ordinary scroll and is left alone.
+function handleCanvasWheel(e) {
+    if (!e.ctrlKey && !e.metaKey) return;
+    if (!state.doc) return;
+    e.preventDefault();
+    // Exponential, so a given gesture changes the zoom by the same proportion wherever
+    // it starts: going 25% -> 50% should take the same effort as 100% -> 200%.
+    zoomAround(state.zoom * Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
+}
+
+// One step per click, and a continuous ramp while the button is held down. It used to
+// be a single fixed step per click, so getting from a fitted page to a legible one was
+// a dozen separate clicks.
+const ZOOM_CLICK_STEP = 1.15;     // one press
+const ZOOM_HOLD_RATE = 2.4;       // multiplied by this per second while held
+const ZOOM_HOLD_DELAY = 280;      // ms before a press becomes a hold
+const ZOOM_HOLD_TICK = 16;        // ms between steps of the ramp
+
+function holdToZoom(button, direction) {
+    let startTimer = null;
+    let ramp = null;
+    let last = 0;
+
+    const step = factor => {
+        const r = elements.canvasViewport.getBoundingClientRect();
+        // No cursor to zoom about, so hold the middle of the view still.
+        zoomAround(state.zoom * (direction > 0 ? factor : 1 / factor),
+                   r.left + r.width / 2, r.top + r.height / 2);
+    };
+
+    const stop = () => {
+        if (startTimer) { clearTimeout(startTimer); startTimer = null; }
+        if (ramp) { clearInterval(ramp); ramp = null; }
+    };
+
+    button.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        // Captured so that releasing anywhere ends the ramp; without it, dragging off
+        // the button leaves the zoom running by itself. Capture can be refused for a
+        // pointer the element does not own, and the window listener covers that.
+        try { button.setPointerCapture(e.pointerId); } catch (err) { /* not fatal */ }
+        step(ZOOM_CLICK_STEP);
+        startTimer = setTimeout(() => {
+            last = performance.now();
+            ramp = setInterval(() => {
+                // Derived from elapsed time rather than counted in ticks. A per-tick
+                // factor runs at the speed of the display -- twice as fast on a 120Hz
+                // screen as on a 60Hz one, for the same press.
+                const now = performance.now();
+                const dt = Math.min(now - last, 250);
+                last = now;
+                step(Math.pow(ZOOM_HOLD_RATE, dt / 1000));
+            }, ZOOM_HOLD_TICK);
+        }, ZOOM_HOLD_DELAY);
+    });
+
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(
+        type => button.addEventListener(type, stop));
+    // A release that lands outside the button, when capture was refused.
+    window.addEventListener('pointerup', stop);
+    // A held button with the window switched away would otherwise keep going.
+    window.addEventListener('blur', stop);
 }
 
 function zoomToFit() {
