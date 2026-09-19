@@ -13,7 +13,6 @@ Usage:  python mlkit/train.py --epochs 40
 """
 import argparse
 import os
-import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

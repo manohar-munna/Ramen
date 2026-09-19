@@ -19,7 +19,7 @@ import sys
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from taxonomy import CLASSES, CLASS_ID, GEN_CLASSES, hf_id_to_ours  # noqa: E402
+from taxonomy import CLASSES, GEN_CLASSES, hf_id_to_ours  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HF_DIR = os.path.join(REPO_ROOT, "datasets", "ui-elements-hf")
