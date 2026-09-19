@@ -91,13 +91,20 @@ html, body {
 
 /* ==========================================================================
    Top Application Bar
+
+   Seven buttons in a row, each with an icon and a label, is a ribbon: nothing in it
+   is easier to find than anything else. What is here now is grouped by what the
+   thing is for -- open the document, look at it three ways, rewrite it, take it away
+   -- and only the last of those is styled as the primary action.
    ========================================================================== */
 .top-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 52px;
-    padding: 0 16px;
+    gap: 16px;
+    flex: 0 0 auto;
+    height: 56px;
+    padding: 0 14px;
     background-color: var(--bg-chrome);
     border-bottom: 1px solid var(--border-subtle);
     z-index: 100;
@@ -106,71 +113,133 @@ html, body {
 .top-bar-left {
     display: flex;
     align-items: center;
-    gap: 20px;
+    gap: 14px;
+    min-width: 0;
 }
 
 .app-branding {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
+    flex: 0 0 auto;
 }
 
-.app-logo {
-    width: 20px;
-    height: 20px;
-    color: var(--accent-blue);
+/* A mark rather than a bare glyph: it holds the blue, so the wordmark does not have
+   to shout to be seen. */
+.app-mark {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    background: var(--accent-blue);
+    color: var(--text-on-accent);
+    box-shadow: 0 1px 2px rgba(37, 99, 235, .35);
 }
+
+.app-mark svg { width: 17px; height: 17px; }
 
 .app-title {
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
+    font-size: 15px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
     color: var(--text-primary);
-}
-
-.app-badge {
-    font-size: 10px;
-    font-weight: 600;
-    padding: 2px 6px;
-    background-color: var(--bg-surface);
-    color: var(--accent-blue);
-    border-radius: 4px;
-    letter-spacing: 0.04em;
 }
 
 .document-meta {
     display: flex;
     align-items: center;
-    gap: 10px;
-    border-left: 1px solid var(--border-strong);
-    padding-left: 16px;
+    gap: 8px;
+    min-width: 0;
+    border-left: 1px solid var(--border-subtle);
+    padding-left: 14px;
 }
 
 .doc-title-text {
     font-size: 13px;
     font-weight: 500;
     color: var(--text-secondary);
-    max-width: 320px;
+    max-width: 280px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .doc-type-tag {
-    font-size: 10px;
+    flex: 0 0 auto;
+    font-size: 11px;
     font-weight: 600;
-    padding: 2px 8px;
+    padding: 3px 9px;
     background-color: var(--accent-green-subtle);
     color: var(--accent-green);
     border: 1px solid transparent;
-    border-radius: 12px;
+    border-radius: 99px;
+}
+
+.doc-type-tag[hidden] { display: none; }
+
+.doc-type-tag.is-scanned {
+    background-color: var(--accent-amber-subtle);
+    color: var(--accent-amber);
+}
+
+.model-error { color: var(--accent-red); font-size: 12px; }
+
+/* Below this the document name is the first thing worth losing: the file is named in
+   the page thumbnail and the status bar too. */
+@media (max-width: 900px) {
+    .document-meta { display: none; }
 }
 
 .top-bar-actions {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
+    flex: 0 0 auto;
 }
+
+/* The three view toggles, as one control. */
+.segmented {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: 9px;
+}
+
+.seg-btn {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background-color .15s ease, color .15s ease;
+}
+
+.seg-btn svg { width: 16px; height: 16px; }
+
+.seg-btn:hover {
+    background: var(--bg-chrome);
+    color: var(--text-primary);
+    box-shadow: var(--shadow-sm);
+}
+
+.seg-btn.active {
+    background: var(--bg-chrome);
+    color: var(--accent-blue);
+    box-shadow: var(--shadow-sm);
+}
+
+.seg-btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; background: none; }
+
+.caret { width: 13px; height: 13px; opacity: .85; margin-left: -1px; }
 
 /* Button System */
 .btn {
@@ -218,13 +287,23 @@ html, body {
 }
 
 .btn-icon-only {
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    padding: 0;
     background: transparent;
     border: 1px solid var(--border-strong);
     color: var(--text-secondary);
-    padding: 6px;
-    border-radius: 6px;
+    border-radius: 9px;
     cursor: pointer;
+    transition: background-color .15s ease, color .15s ease, border-color .15s ease;
 }
+
+/* Without a size the icon collapsed to the width of its own padding: the settings
+   button rendered 14px wide and looked like a clipped edge. */
+.btn-icon-only svg { width: 17px; height: 17px; }
 
 .btn-icon-only:hover {
     background-color: var(--bg-surface);
@@ -248,13 +327,9 @@ html, body {
 }
 
 .btn-icon {
-    width: 14px;
-    height: 14px;
-}
-
-.caret-down {
-    font-size: 8px;
-    margin-left: 2px;
+    flex: 0 0 auto;
+    width: 15px;
+    height: 15px;
 }
 
 /* Dropdown */
@@ -1487,95 +1562,106 @@ html, body {
     <header class="top-bar">
         <div class="top-bar-left">
             <div class="app-branding">
-                <svg class="app-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                    <polyline points="14 2 14 8 20 8"></polyline>
-                    <line x1="16" y1="13" x2="8" y2="13"></line>
-                    <line x1="16" y1="17" x2="8" y2="17"></line>
-                    <polyline points="10 9 9 9 8 9"></polyline>
-                </svg>
-                <span class="app-title">RAMEN</span>
-                <span class="app-badge">PDF &rarr; HTML</span>
+                <span class="app-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/>
+                        <path d="M13 3v6h6"/>
+                        <path d="M9 13.5h6M9 17h4"/>
+                    </svg>
+                </span>
+                <span class="app-title">Ramen</span>
             </div>
             <div class="document-meta">
                 <span id="doc-name-display" class="doc-title-text">No document loaded</span>
-                <span id="doc-type-badge" class="doc-type-tag" style="display: none;">Digital PDF</span>
+                <span id="doc-type-badge" class="doc-type-tag" hidden>Digital PDF</span>
             </div>
         </div>
 
         <div class="top-bar-actions">
-            <input type="file" id="pdf-file-input" accept=".pdf, .png, .jpg, .jpeg, .webp, image/*, application/pdf" style="display: none;">
-            <button id="btn-open-pdf" class="btn btn-secondary">
-                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                    <polyline points="17 8 12 3 7 8"></polyline>
-                    <line x1="12" y1="3" x2="12" y2="15"></line>
+            <input type="file" id="pdf-file-input" accept=".pdf, .png, .jpg, .jpeg, .webp, image/*, application/pdf" hidden>
+            <button id="btn-open-pdf" class="btn btn-secondary" title="Open a PDF or image (O)">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v3a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-3"/>
+                    <path d="M12 15V3"/><path d="M7.5 7.5 12 3l4.5 4.5"/>
                 </svg>
-                Open PDF / Image
+                Open
             </button>
 
-            <button id="btn-compare-mode" class="btn btn-secondary" title="Compare Reconstructed HTML vs Original PDF">
-                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <rect x="2" y="3" width="20" height="18" rx="2"></rect>
-                    <line x1="12" y1="3" x2="12" y2="21"></line>
-                </svg>
-                Fidelity Diff
-            </button>
-
-            <button id="btn-inspect" class="btn btn-secondary" title="Inspect elements (I)">
-                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M3 3h7v7H3z"></path>
-                    <path d="M13 13l8 8"></path>
-                    <path d="M13 13h4v4"></path>
-                </svg>
-                Inspect
-            </button>
-            <button id="btn-page-code" class="btn btn-secondary" title="View HTML and CSS of current page">
-                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="16 18 22 12 16 6"></polyline>
-                    <polyline points="8 6 2 12 8 18"></polyline>
-                </svg>
-                Page Code
-            </button>
+            <!-- Three ways of looking at the same page, so they sit together and read
+                 as one control rather than three unrelated buttons. -->
+            <div class="segmented" role="group" aria-label="Ways of viewing this page">
+                <button id="btn-inspect" class="seg-btn" aria-label="Inspect elements"
+                        title="Inspect elements (I)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4 4h7v7H4z"/><path d="M13.5 13.5 21 21"/>
+                        <path d="M13.5 13.5H18v4.5"/>
+                    </svg>
+                </button>
+                <button id="btn-page-code" class="seg-btn" aria-label="HTML and CSS of this page"
+                        title="HTML and CSS of this page">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="m15.5 7 5 5-5 5"/><path d="m8.5 17-5-5 5-5"/>
+                    </svg>
+                </button>
+                <button id="btn-compare-mode" class="seg-btn" aria-label="Compare with the original"
+                        title="Compare the reconstruction with the original">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="4" width="18" height="16" rx="2.5"/>
+                        <path d="M12 4v16"/>
+                    </svg>
+                </button>
+            </div>
 
             <button id="btn-enhance" class="btn btn-secondary"
-                    title="Rewrite this page with flowing layout and transitions (Gemini)">
-                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M12 3l1.9 5.8L20 10.7l-5.1 3.4L15.5 20 12 16.8 8.5 20l.6-5.9L4 10.7l6.1-1.9z"></path>
+                    title="Rewrite this page with flowing layout and transitions">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 3.5 13.7 9l5.5 1.7-5.5 1.7L12 18l-1.7-5.6L4.8 10.7 10.3 9z"/>
+                    <path d="M18.5 3.5v3M20 5h-3"/>
                 </svg>
                 Enhance
             </button>
 
             <div class="dropdown-container">
-                <button id="btn-export-dropdown" class="btn btn-primary">
-                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="7 10 12 15 17 10"></polyline>
-                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                <button id="btn-export-dropdown" class="btn btn-primary" aria-haspopup="true"
+                        aria-expanded="false">
+                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v3a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-3"/>
+                        <path d="M12 3v12"/><path d="M7.5 10.5 12 15l4.5-4.5"/>
                     </svg>
                     Export
-                    <span class="caret-down">&blacktriangledown;</span>
+                    <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
+                         aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
                 </button>
                 <div id="export-menu" class="dropdown-menu">
                     <button class="dropdown-item" data-export="zip">
-                        <strong>HTML + Assets ZIP</strong>
+                        <strong>HTML + assets, zipped</strong>
                         <small>index.html, styles.css, images, document.json</small>
                     </button>
                     <button class="dropdown-item" data-export="html">
                         <strong>Standalone HTML</strong>
-                        <small>Single self-contained HTML page</small>
+                        <small>One self-contained file</small>
                     </button>
                     <button class="dropdown-item" data-export="json">
                         <strong>Intermediate JSON</strong>
-                        <small>Source of truth 2D coordinates & styles</small>
+                        <small>The measured coordinates and styles</small>
                     </button>
                 </div>
             </div>
 
-            <button id="btn-model-settings" class="btn btn-icon-only" title="Local Model Status & Settings">
-                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="3"></circle>
-                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            <button id="btn-model-settings" class="btn-icon-only" aria-label="Local model status"
+                    title="Local model status">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3.2"/>
+                    <path d="M19.1 14.4a1.5 1.5 0 0 0 .3 1.7l.1.1a1.9 1.9 0 1 1-2.7 2.7l-.1-.1a1.5 1.5 0 0 0-2.6 1.1v.2a1.9 1.9 0 0 1-3.8 0v-.1a1.5 1.5 0 0 0-2.6-1.1l-.1.1a1.9 1.9 0 1 1-2.7-2.7l.1-.1a1.5 1.5 0 0 0-1.1-2.6h-.2a1.9 1.9 0 0 1 0-3.8h.1a1.5 1.5 0 0 0 1.1-2.6l-.1-.1a1.9 1.9 0 1 1 2.7-2.7l.1.1a1.5 1.5 0 0 0 1.7.3h.1a1.5 1.5 0 0 0 .9-1.4v-.2a1.9 1.9 0 0 1 3.8 0v.1a1.5 1.5 0 0 0 2.6 1.1l.1-.1a1.9 1.9 0 1 1 2.7 2.7l-.1.1a1.5 1.5 0 0 0 1.1 2.6h.2a1.9 1.9 0 0 1 0 3.8h-.1a1.5 1.5 0 0 0-1.4.9z"/>
                 </svg>
             </button>
         </div>
@@ -2055,20 +2141,28 @@ function setupEventListeners() {
     elements.btnLoadSample.addEventListener('click', loadSampleReport);
     
     // Export Dropdown
+    // aria-expanded has to follow the menu, or the button tells a screen reader the
+    // opposite of what the eye sees.
+    const setExportMenu = (open) => {
+        elements.exportMenu.classList.toggle('show', open);
+        elements.btnExportDropdown.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+
     elements.btnExportDropdown.addEventListener('click', (e) => {
         e.stopPropagation();
-        elements.exportMenu.classList.toggle('show');
+        setExportMenu(!elements.exportMenu.classList.contains('show'));
     });
-    
-    document.addEventListener('click', () => {
-        elements.exportMenu.classList.remove('show');
+
+    document.addEventListener('click', () => setExportMenu(false));
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') setExportMenu(false);
     });
     
     document.querySelectorAll('.dropdown-item').forEach(item => {
         item.addEventListener('click', (e) => {
             const format = e.currentTarget.getAttribute('data-export');
             exportDocument(format);
-            elements.exportMenu.classList.remove('show');
+            setExportMenu(false);
         });
     });
     
@@ -2270,10 +2364,11 @@ function loadDocument(docData, analysis) {
     elements.docNameDisplay.textContent = docData.title || 'Untitled Document';
     
     const isScanned = docData.pages[0]?.isScanned || false;
-    elements.docTypeBadge.style.display = 'inline-block';
-    elements.docTypeBadge.textContent = isScanned ? 'Scanned PDF (OCR/Layout)' : 'Digital PDF (Native)';
-    elements.docTypeBadge.style.borderColor = isScanned ? '#eab308' : 'rgba(16, 185, 129, 0.3)';
-    elements.docTypeBadge.style.color = isScanned ? '#facc15' : '#34d399';
+    elements.docTypeBadge.hidden = false;
+    elements.docTypeBadge.textContent = isScanned ? 'Scanned, read by OCR' : 'Digital PDF';
+    // A class, not inline hex: the badge used to paint itself dark-theme amber and
+    // green from here, which no change to the token set could reach.
+    elements.docTypeBadge.classList.toggle('is-scanned', !!isScanned);
     
     renderThumbnails();
     renderCurrentPage();
@@ -3942,7 +4037,14 @@ async function openModelsModal() {
             renderModelComponents(data);
         }
     } catch (err) {
-        elements.modelComponentsList.innerHTML = `<div style="color:#ef4444;font-size:12px;">Error checking status: ${err.message}</div>`;
+        // textContent, not innerHTML: the message comes from an exception and is not
+        // markup. There is no escaping helper here and inventing one for a single
+        // string is worse than not needing one.
+        elements.modelComponentsList.textContent = '';
+        const warn = document.createElement('div');
+        warn.className = 'model-error';
+        warn.textContent = 'Could not read the model status: ' + err.message;
+        elements.modelComponentsList.appendChild(warn);
     }
 }
 
