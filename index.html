@@ -48,6 +48,10 @@
     --shadow-lg: 0 18px 44px rgba(16, 24, 40, 0.16);
     --shadow-page: 0 1px 3px rgba(16, 24, 40, 0.10), 0 12px 32px rgba(16, 24, 40, 0.10);
     --scrim: rgba(16, 24, 40, 0.45);
+    /* One curve and two durations, so nothing moves at its own private speed. */
+    --ease: cubic-bezier(.2, .8, .3, 1);
+    --dur: .16s;
+    --dur-slow: .28s;
     --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
@@ -87,6 +91,114 @@ html, body {
     flex-direction: column;
     width: 100vw;
     height: 100vh;
+}
+
+/* Interaction ------------------------------------------------------------------
+   Nothing here had a pressed state or a focus ring: a click gave no acknowledgement
+   and a keyboard user got whatever the browser decided, which on a white background
+   was often nothing. Every control now lifts a little under the pointer, sinks when
+   held, and shows where the keyboard is.
+
+   :focus-visible rather than :focus, so the ring appears for the keyboard and not
+   around every button the mouse happens to touch. */
+.btn,
+.btn-toggle,
+.btn-control,
+.btn-control-subtle,
+.btn-icon-only,
+.btn-icon-subtle,
+.seg-btn,
+.dropdown-item,
+.thumbnail-card,
+.code-tab-btn,
+.snackbar-close {
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.btn,
+.btn-control,
+.btn-control-subtle,
+.btn-icon-only,
+.btn-icon-subtle,
+.seg-btn,
+.btn-toggle {
+    transition: background-color var(--dur) var(--ease),
+                border-color var(--dur) var(--ease),
+                color var(--dur) var(--ease),
+                box-shadow var(--dur) var(--ease),
+                transform var(--dur) var(--ease);
+}
+
+.btn:hover:not(:disabled),
+.btn-icon-only:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+/* The press has to undo the lift and go past it, or holding a button looks the same
+   as hovering it. Faster than the lift: releasing should feel immediate. */
+.btn:active:not(:disabled),
+.btn-icon-only:active:not(:disabled) {
+    transform: translateY(0);
+    box-shadow: none;
+    transition-duration: .05s;
+}
+
+.btn-control:active:not(:disabled),
+.btn-icon-subtle:active,
+.btn-toggle:active,
+.seg-btn:active:not(:disabled),
+.snackbar-close:active { transform: scale(.94); transition-duration: .05s; }
+
+.btn-icon-only:hover:not(:disabled) { border-color: var(--border-strong); color: var(--accent-blue); }
+.btn-icon-subtle:hover { background-color: var(--bg-surface-hover); color: var(--text-primary); }
+.btn-control:hover:not(:disabled) { border-color: var(--border-focus); }
+
+.btn:disabled,
+.btn-control:disabled,
+.btn-icon-only:disabled,
+.btn-toggle:disabled {
+    opacity: .5;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.btn-toggle:hover:not(:disabled):not(.active) {
+    color: var(--text-primary);
+    background-color: var(--bg-surface-hover);
+}
+
+.dropdown-item,
+.thumbnail-card,
+.code-tab-btn {
+    transition: background-color var(--dur) var(--ease),
+                border-color var(--dur) var(--ease),
+                color var(--dur) var(--ease);
+}
+
+.thumbnail-card:active { transform: scale(.985); }
+
+:where(.btn, .btn-toggle, .btn-control, .btn-control-subtle, .btn-icon-only,
+       .btn-icon-subtle, .seg-btn, .dropdown-item, .thumbnail-card, .code-tab-btn,
+       .snackbar-close):focus-visible {
+    outline: 2px solid var(--accent-blue);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+/* Motion is decoration here; the colour changes carry the same information. */
+@media (prefers-reduced-motion: reduce) {
+    .btn, .btn-toggle, .btn-control, .btn-control-subtle, .btn-icon-only,
+    .btn-icon-subtle, .seg-btn, .dropdown-item, .thumbnail-card, .code-tab-btn {
+        transition-duration: .01ms;
+    }
+    .btn:hover, .btn-icon-only:hover, .btn:active, .btn-icon-only:active,
+    .btn-control:active, .btn-icon-subtle:active, .btn-toggle:active,
+    .seg-btn:active, .thumbnail-card:active, .snackbar-close:active {
+        transform: none;
+    }
 }
 
 /* ==========================================================================
@@ -220,7 +332,6 @@ html, body {
     background: transparent;
     color: var(--text-secondary);
     cursor: pointer;
-    transition: background-color .15s ease, color .15s ease;
 }
 
 .seg-btn svg { width: 16px; height: 16px; }
@@ -251,7 +362,6 @@ html, body {
     font-weight: 600;
     border-radius: 6px;
     cursor: pointer;
-    transition: background-color 0.15s ease, border-color 0.15s ease;
     user-select: none;
     border: 1px solid transparent;
 }
@@ -298,7 +408,6 @@ html, body {
     color: var(--text-secondary);
     border-radius: 9px;
     cursor: pointer;
-    transition: background-color .15s ease, color .15s ease, border-color .15s ease;
 }
 
 /* Without a size the icon collapsed to the width of its own padding: the settings
@@ -322,7 +431,6 @@ html, body {
     cursor: pointer;
     line-height: 1;
     border-radius: 7px;
-    transition: background-color .15s ease, color .15s ease;
 }
 
 /* Every icon that replaced a text glyph. One size, so a close cross and a chevron do
@@ -362,6 +470,15 @@ html, body {
 
 .dropdown-menu.show {
     display: block;
+    animation: menu-in .14s var(--ease);
+}
+
+@keyframes menu-in {
+    from { opacity: 0; transform: translateY(-4px) scale(.985); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dropdown-menu.show { animation: none; }
 }
 
 .dropdown-item {
@@ -906,7 +1023,6 @@ html, body {
     place-items: center;
     padding: 0;
     cursor: pointer;
-    transition: background-color .15s ease, color .15s ease, border-color .15s ease;
 }
 
 .btn-control:hover { color: var(--text-primary); }
@@ -1592,7 +1708,6 @@ html, body {
     flex: 0 0 auto; width: 22px; height: 22px; padding: 0;
     border: 0; border-radius: 6px; background: transparent; cursor: pointer;
     color: var(--text-muted); font-size: 15px; line-height: 1;
-    transition: background .15s ease, color .15s ease;
 }
 .snackbar-close:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
 @keyframes snack-in  { from { opacity: 0; transform: translateY(8px) scale(.98); } }
