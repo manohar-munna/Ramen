@@ -311,15 +311,24 @@ html, body {
 }
 
 .btn-icon-subtle {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
     background: transparent;
     border: none;
     color: var(--text-muted);
-    font-size: 18px;
     cursor: pointer;
     line-height: 1;
-    padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: 7px;
+    transition: background-color .15s ease, color .15s ease;
 }
+
+/* Every icon that replaced a text glyph. One size, so a close cross and a chevron do
+   not end up drawn at whatever the surrounding font-size happened to be. */
+.ico { width: 15px; height: 15px; }
+.btn-icon-subtle .ico { width: 16px; height: 16px; }
 
 .btn-icon-subtle:hover {
     color: var(--text-primary);
@@ -889,16 +898,18 @@ html, body {
 .btn-control {
     background-color: var(--bg-surface);
     border: 1px solid var(--border-strong);
-    color: var(--text-primary);
-    width: 24px;
-    height: 24px;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    color: var(--text-secondary);
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    display: grid;
+    place-items: center;
+    padding: 0;
     cursor: pointer;
-    font-weight: 600;
+    transition: background-color .15s ease, color .15s ease, border-color .15s ease;
 }
+
+.btn-control:hover { color: var(--text-primary); }
 
 .btn-control:hover {
     background-color: var(--bg-surface-hover);
@@ -1013,10 +1024,31 @@ html, body {
     color: var(--accent-green);
 }
 
+/* Three drawings in one marker; the stage's own class picks which is visible, so
+   nothing has to reach in and swap a character. */
 .stage-status-icon {
-    font-family: var(--font-mono);
-    width: 16px;
-    text-align: center;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    color: var(--text-muted);
+}
+
+.stage-status-icon svg { width: 18px; height: 18px; }
+.stage-status-icon .si-dot,
+.stage-status-icon .si-tick { display: none; }
+
+.stage-item.active .stage-status-icon { color: var(--accent-blue); }
+.stage-item.active .si-dot { display: block; animation: stage-pulse 1.4s ease-in-out infinite; }
+
+.stage-item.completed .stage-status-icon { color: var(--accent-green); }
+.stage-item.completed .si-tick { display: block; }
+.stage-item.completed .si-ring { opacity: .45; }
+
+@keyframes stage-pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) {
+    .stage-item.active .si-dot { animation: none; }
 }
 
 .progress-bar-container {
@@ -1261,7 +1293,12 @@ html, body {
 }
 
 .slider-divider-line::after {
-    content: "◀ ▶";
+    /* Two chevrons drawn rather than typed: the triangles rendered at whatever size
+       and weight the platform font felt like, and sat off-centre on Windows. */
+    content: "";
+    background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="22" height="12" viewBox="0 0 22 12" fill="none" stroke="%23ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 2-4 4 4 4"/><path d="m15 2 4 4-4 4"/></svg>');
+    background-repeat: no-repeat;
+    background-position: center;
     position: absolute;
     top: 50%;
     left: 50%;
@@ -1432,6 +1469,14 @@ html, body {
     padding: 2px 8px;
     border-radius: 12px;
 }
+
+.model-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.model-tag svg { width: 13px; height: 13px; }
 
 .model-tag.installed {
     background-color: var(--accent-green-subtle);
@@ -1732,7 +1777,7 @@ html, body {
         <aside id="properties-panel" class="sidebar-properties" style="display: none;">
             <div class="panel-header">
                 <span id="panel-elem-type" class="panel-type-title">ELEMENT PROPERTIES</span>
-                <button id="btn-close-properties" class="btn-icon-subtle" title="Close Panel">&times;</button>
+                <button id="btn-close-properties" class="btn-icon-subtle" title="Close Panel"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
             </div>
 
             <div class="panel-body" id="properties-content">
@@ -1746,9 +1791,9 @@ html, body {
     <footer class="bottom-bar">
         <div class="bottom-bar-left">
             <div class="zoom-controls">
-                <button id="btn-zoom-out" class="btn-control" title="Zoom Out">&minus;</button>
+                <button id="btn-zoom-out" class="btn-control" title="Zoom Out"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/></svg></button>
                 <span id="zoom-level-text" class="zoom-display">100%</span>
-                <button id="btn-zoom-in" class="btn-control" title="Zoom In">&plus;</button>
+                <button id="btn-zoom-in" class="btn-control" title="Zoom In"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
                 <button id="btn-zoom-fit" class="btn-control-subtle" title="Fit to Window">Fit Width</button>
             </div>
             <div class="divider-v"></div>
@@ -1757,9 +1802,9 @@ html, body {
 
         <div class="bottom-bar-right">
             <div class="page-navigation">
-                <button id="btn-prev-page" class="btn-control" title="Previous Page">&lt;</button>
+                <button id="btn-prev-page" class="btn-control" title="Previous Page"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg></button>
                 <span id="page-nav-text" class="page-display">Page 1 / 1</span>
-                <button id="btn-next-page" class="btn-control" title="Next Page">&gt;</button>
+                <button id="btn-next-page" class="btn-control" title="Next Page"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg></button>
             </div>
         </div>
     </footer>
@@ -1773,27 +1818,27 @@ html, body {
             <div class="modal-body">
                 <div class="stages-list">
                     <div class="stage-item" id="stage-read">
-                        <span class="stage-status-icon">○</span>
+                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
                         <span class="stage-label">Reading PDF</span>
                     </div>
                     <div class="stage-item" id="stage-analyze">
-                        <span class="stage-status-icon">○</span>
+                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
                         <span class="stage-label">Detecting page layout</span>
                     </div>
                     <div class="stage-item" id="stage-text">
-                        <span class="stage-status-icon">○</span>
+                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
                         <span class="stage-label">Extracting text & typography</span>
                     </div>
                     <div class="stage-item" id="stage-tables">
-                        <span class="stage-status-icon">○</span>
+                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
                         <span class="stage-label">Detecting tables & vector shapes</span>
                     </div>
                     <div class="stage-item" id="stage-reconstruct">
-                        <span class="stage-status-icon">○</span>
+                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
                         <span class="stage-label" id="stage-reconstruct-label">Reconstructing pages</span>
                     </div>
                     <div class="stage-item" id="stage-finalize">
-                        <span class="stage-status-icon">○</span>
+                        <span class="stage-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle class="si-ring" cx="12" cy="12" r="8"/><circle class="si-dot" cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><polyline class="si-tick" points="7.5 12.3 10.6 15.4 16.5 8.9"/></svg></span>
                         <span class="stage-label">Finalizing HTML</span>
                     </div>
                 </div>
@@ -1831,7 +1876,7 @@ html, body {
                         <button id="btn-view-slider" class="btn-toggle">Split Slider</button>
                         <button id="btn-view-heatmap" class="btn-toggle">Diff Heatmap</button>
                     </div>
-                    <button id="btn-close-fidelity" class="btn-icon-subtle">&times;</button>
+                    <button id="btn-close-fidelity" class="btn-icon-subtle"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
                 </div>
             </div>
 
@@ -1919,7 +1964,7 @@ html, body {
         <div class="modal-card">
             <div class="modal-header">
                 <h3>Local Model Components</h3>
-                <button id="btn-close-models" class="btn-icon-subtle">&times;</button>
+                <button id="btn-close-models" class="btn-icon-subtle"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
             </div>
             <div class="modal-body">
                 <p class="model-desc-p">All models operate completely offline with no LLM or cloud API dependency.</p>
@@ -1946,7 +1991,7 @@ html, body {
     <button id="live-build-code" class="btn-toggle">Code</button>
     <button id="live-build-download" class="btn-toggle" disabled>Download</button>
     <button id="live-build-open" class="btn-toggle" disabled>Open in a tab</button>
-    <button id="live-build-close" class="btn-icon-subtle" title="Close">&times;</button>
+    <button id="live-build-close" class="btn-icon-subtle" title="Close"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
   <div id="live-build-body" class="live-build-body mode-building">
     <section class="lb-pane lb-pane-original">
@@ -2326,7 +2371,6 @@ function hideProcessingModal() {
 function resetStages() {
     Object.values(elements.stageItems).forEach(el => {
         el.className = 'stage-item';
-        el.querySelector('.stage-status-icon').textContent = '○';
     });
     elements.realProgressBar.style.width = '5%';
     elements.processingDetailText.textContent = 'Initializing...';
@@ -2341,10 +2385,8 @@ function updateStage(stageKey, detailText, percent) {
         for (let i = 0; i < currentIndex; i++) {
             const prev = elements.stageItems[keys[i]];
             prev.className = 'stage-item completed';
-            prev.querySelector('.stage-status-icon').textContent = '✓';
         }
         stageEl.className = 'stage-item active';
-        stageEl.querySelector('.stage-status-icon').textContent = '●';
     }
     elements.processingDetailText.textContent = detailText;
     elements.realProgressBar.style.width = `${percent}%`;
@@ -3205,7 +3247,10 @@ function notify(message, kind = 'info', { title = '', timeout } = {}) {
         + 'stroke="currentColor" stroke-width="1.7" stroke-linecap="round" '
         + 'stroke-linejoin="round" aria-hidden="true">' + SNACK_ICONS[kind] + '</svg>';
     el.innerHTML = svg + '<span class="snackbar-text"></span>'
-        + '<button class="snackbar-close" aria-label="Dismiss">&times;</button>';
+        + '<button class="snackbar-close" aria-label="Dismiss">'
+        + '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        + 'stroke-width="2" stroke-linecap="round" aria-hidden="true">'
+        + '<path d="M6 6l12 12M18 6L6 18"/></svg></button>';
     const text = el.querySelector('.snackbar-text');
     if (title) {
         const t = document.createElement('strong');
@@ -4061,7 +4106,12 @@ function renderModelComponents(data) {
                 <small>${comp.description}</small>
             </div>
             <span class="model-tag ${isReady ? 'installed' : 'pending'}">
-                ${isReady ? '✓ Installed' : '○ Pending'}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    ${isReady ? '<polyline points="5 12.5 9.5 17 19 7"/>'
+                              : '<circle cx="12" cy="12" r="7.5"/><path d="M12 8.5V12l2.5 1.5"/>'}
+                </svg>
+                ${isReady ? 'Installed' : 'Pending'}
             </span>
         `;
         elements.modelComponentsList.appendChild(item);
