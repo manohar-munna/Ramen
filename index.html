@@ -2627,7 +2627,8 @@ function loadDocument(docData, analysis) {
     renderCurrentPage();
     updatePageNavigation();
     zoomToFit();
-    setStatus(`Loaded ${docData.pages.length} page(s) successfully.`);
+    const pages = docData.pages.length;
+    setStatus(pages === 1 ? 'One page loaded.' : `${pages} pages loaded.`);
 }
 
 function renderThumbnails() {
@@ -3716,7 +3717,8 @@ async function buildFromScreenshot() {
             elements.liveBuildStatus.textContent =
                 `done in ${((Date.now() - started) / 1000).toFixed(0)}s - ${msg.model}` +
                 (checks ? `, self-corrected ${checks}x` : '') + ', ' +
-                (lost ? `${lost} of ${msg.assets_total} image(s) missing`
+                (lost ? `${lost} of ${msg.assets_total} `
+                        + (lost === 1 ? 'image is missing' : 'images are missing')
                       : `all ${msg.assets_total} images in place`);
         } else if (msg.type === 'error') {
             elements.liveBuildStatus.textContent = 'failed';
