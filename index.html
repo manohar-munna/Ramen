@@ -10,24 +10,44 @@
    Desktop-First, Focused Professional Document Tool
    ========================================================================== */
 
+/* One place decides what every surface, line and label is made of. The chrome is
+   white and the ink is near-black; blue is kept for what you can act on, so an icon
+   being blue means something rather than being decoration.
+
+   The document is never themed. A reconstructed page is white with black ink because
+   that is what was measured off the original, and the editor's appearance has no
+   business changing the artefact it is showing you. */
 :root {
-    --bg-app: #090d16;
-    --bg-chrome: #0f172a;
-    --bg-surface: #1e293b;
-    --bg-surface-hover: #334155;
-    --bg-viewport: #334155;
-    --bg-input: #0b1120;
-    --border-subtle: #1e293b;
-    --border-strong: #334155;
-    --border-focus: #3b82f6;
-    --text-primary: #f8fafc;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
+    --bg-app: #f1f4f9;
+    --bg-chrome: #ffffff;
+    --bg-surface: #ffffff;
+    --bg-surface-hover: #eef2f8;
+    --bg-viewport: #e8ecf3;
+    --bg-input: #f5f7fb;
+    --bg-tint: #eff4ff;
+    --bg-code: #f7f9fc;
+    --border-subtle: #e7ebf1;
+    --border-strong: #d3dae4;
+    --border-focus: #2563eb;
+    --text-primary: #101828;
+    --text-secondary: #5a6676;
+    --text-muted: #8a95a5;
+    --text-on-accent: #ffffff;
     --accent-blue: #2563eb;
     --accent-blue-hover: #1d4ed8;
-    --accent-blue-subtle: rgba(37, 99, 235, 0.15);
-    --accent-green: #10b981;
-    --accent-red: #ef4444;
+    --accent-blue-subtle: rgba(37, 99, 235, 0.10);
+    --accent-green: #067a55;
+    --accent-green-subtle: rgba(6, 122, 85, 0.10);
+    --accent-amber: #b45309;
+    --accent-amber-subtle: rgba(180, 83, 9, 0.10);
+    --accent-red: #d92d20;
+    --accent-red-subtle: rgba(217, 45, 32, 0.10);
+    /* Depth the dark theme used to get from contrast alone. */
+    --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+    --shadow-md: 0 4px 14px rgba(16, 24, 40, 0.08);
+    --shadow-lg: 0 18px 44px rgba(16, 24, 40, 0.16);
+    --shadow-page: 0 1px 3px rgba(16, 24, 40, 0.10), 0 12px 32px rgba(16, 24, 40, 0.10);
+    --scrim: rgba(16, 24, 40, 0.45);
     --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
@@ -37,6 +57,20 @@
     margin: 0;
     padding: 0;
 }
+
+/* The platform default is a wide grey slab, which on a light layout reads as a seam
+   down the side of the window. Scoped to the chrome: a scrollbar inside a
+   reconstructed page belongs to that page. */
+.app-container ::-webkit-scrollbar { width: 11px; height: 11px; }
+.app-container ::-webkit-scrollbar-track { background: transparent; }
+.app-container ::-webkit-scrollbar-thumb {
+    background-color: var(--border-strong); border-radius: 99px;
+    border: 3px solid transparent; background-clip: content-box;
+}
+.app-container ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-muted); background-clip: content-box;
+}
+.app-container ::-webkit-scrollbar-corner { background: transparent; }
 
 html, body {
     width: 100%;
@@ -84,7 +118,7 @@ html, body {
 .app-logo {
     width: 20px;
     height: 20px;
-    color: #60a5fa;
+    color: var(--accent-blue);
 }
 
 .app-title {
@@ -99,7 +133,7 @@ html, body {
     font-weight: 600;
     padding: 2px 6px;
     background-color: var(--bg-surface);
-    color: #93c5fd;
+    color: var(--accent-blue);
     border-radius: 4px;
     letter-spacing: 0.04em;
 }
@@ -126,9 +160,9 @@ html, body {
     font-size: 10px;
     font-weight: 600;
     padding: 2px 8px;
-    background-color: rgba(16, 185, 129, 0.15);
-    color: #34d399;
-    border: 1px solid rgba(16, 185, 129, 0.3);
+    background-color: var(--accent-green-subtle);
+    color: var(--accent-green);
+    border: 1px solid transparent;
     border-radius: 12px;
 }
 
@@ -155,7 +189,7 @@ html, body {
 
 .btn-primary {
     background-color: var(--accent-blue);
-    color: #ffffff;
+    color: var(--text-on-accent);
     border-color: var(--accent-blue);
 }
 
@@ -237,7 +271,7 @@ html, body {
     background-color: var(--bg-chrome);
     border: 1px solid var(--border-strong);
     border-radius: 8px;
-    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow-lg);
     padding: 6px;
     z-index: 200;
 }
@@ -354,7 +388,7 @@ html, body {
     width: 140px;
     height: 198px;
     background-color: #ffffff;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-sm);
     border-radius: 3px;
     overflow: hidden;
     display: flex;
@@ -416,7 +450,7 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #60a5fa;
+    color: var(--accent-blue);
     margin-bottom: 16px;
 }
 
@@ -454,7 +488,7 @@ html, body {
 .pdf-page {
     position: relative;
     background-color: #ffffff;
-    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-page);
     overflow: hidden;
     user-select: text;
     -webkit-user-select: text;
@@ -566,7 +600,7 @@ html, body {
     border: 1px solid var(--border-strong); border-radius: 6px;
     padding: 5px 9px; white-space: nowrap;
     font: 500 11.5px/1.45 var(--font-mono);
-    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+    box-shadow: var(--shadow-lg);
 }
 #inspect-tip .t { color: #7cc4ff; }
 #inspect-tip .r { color: #fbbf24; }
@@ -586,7 +620,7 @@ html, body {
     top: -22px;
     left: -1px;
     background-color: var(--accent-blue);
-    color: #ffffff;
+    color: var(--text-on-accent);
     font-size: 9px;
     font-weight: 700;
     text-transform: uppercase;
@@ -601,7 +635,8 @@ html, body {
     position: absolute;
     width: 7px;
     height: 7px;
-    background-color: #ffffff;
+    background-color: var(--bg-chrome);
+    box-shadow: var(--shadow-sm);
     border: 1.5px solid var(--accent-blue);
     pointer-events: auto;
     border-radius: 1px;
@@ -837,7 +872,7 @@ html, body {
     left: 0;
     width: 100vw;
     height: 100vh;
-    background-color: rgba(0, 0, 0, 0.7);
+    background-color: var(--scrim);
     backdrop-filter: blur(4px);
     display: flex;
     align-items: center;
@@ -850,7 +885,7 @@ html, body {
     border: 1px solid var(--border-strong);
     border-radius: 10px;
     width: 440px;
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
 }
 
@@ -895,12 +930,12 @@ html, body {
 }
 
 .stage-item.active {
-    color: #60a5fa;
+    color: var(--accent-blue);
     font-weight: 600;
 }
 
 .stage-item.completed {
-    color: #34d399;
+    color: var(--accent-green);
 }
 
 .stage-status-icon {
@@ -967,7 +1002,7 @@ html, body {
 .metric-val {
     font-size: 14px;
     font-weight: 700;
-    color: #34d399;
+    color: var(--accent-green);
 }
 
 .fidelity-header-actions {
@@ -1004,7 +1039,7 @@ html, body {
     overflow: hidden;
     display: flex;
     padding: 16px;
-    background-color: #1e293b;
+    background-color: var(--bg-viewport);
 }
 
 .fidelity-split-container {
@@ -1018,7 +1053,7 @@ html, body {
     flex: 1;
     display: flex;
     flex-direction: column;
-    background-color: #0f172a;
+    background-color: var(--bg-chrome);
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
     overflow: hidden;
@@ -1040,14 +1075,14 @@ html, body {
     justify-content: center;
     align-items: flex-start;
     padding: 20px;
-    background-color: #334155;
+    background-color: var(--bg-viewport);
     position: relative;
 }
 
 #fidelity-orig-pane > img,
 #fidelity-orig-img {
     display: block;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-md);
     background-color: #ffffff;
     flex-shrink: 0;
     border-radius: 2px;
@@ -1057,7 +1092,7 @@ html, body {
     position: relative;
     overflow: hidden;
     background-color: #ffffff;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-md);
     flex-shrink: 0;
     border-radius: 2px;
 }
@@ -1083,12 +1118,12 @@ html, body {
     border-radius: 999px;
     padding: 7px 16px;
     font-size: 12px; font-weight: 500; color: var(--text-secondary);
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-md);
     z-index: 40;
 }
 .fidelity-status.is-error {
     border-color: var(--accent-red);
-    color: #fca5a5;
+    color: var(--accent-red);
 }
 .fidelity-status.is-error .fidelity-spinner { display: none; }
 .fidelity-spinner {
@@ -1114,7 +1149,7 @@ html, body {
 .slider-wrapper {
     position: relative;
     display: inline-block;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow-md);
     user-select: none;
 }
 
@@ -1130,7 +1165,7 @@ html, body {
     height: 100%;
     width: 50%;
     overflow: hidden;
-    border-right: 2px solid #3b82f6;
+    border-right: 2px solid var(--accent-blue);
 }
 
 .slider-recon {
@@ -1145,7 +1180,7 @@ html, body {
     left: 50%;
     height: 100%;
     width: 4px;
-    background-color: #3b82f6;
+    background-color: var(--accent-blue);
     cursor: ew-resize;
     transform: translateX(-50%);
 }
@@ -1156,8 +1191,8 @@ html, body {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    background-color: #2563eb;
-    color: #ffffff;
+    background-color: var(--accent-blue);
+    color: var(--text-on-accent);
     font-size: 9px;
     font-weight: 700;
     padding: 3px 6px;
@@ -1192,7 +1227,7 @@ html, body {
     flex: 1;
     display: flex;
     flex-direction: column;
-    background-color: #0f172a;
+    background-color: var(--bg-viewport);
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
     overflow: hidden;
@@ -1203,7 +1238,7 @@ html, body {
     flex: 1.25;
     display: flex;
     flex-direction: column;
-    background-color: #0b1120;
+    background-color: var(--bg-code);
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
     overflow: hidden;
@@ -1241,7 +1276,7 @@ html, body {
 }
 
 .code-tab-btn.active {
-    color: #ffffff;
+    color: var(--text-on-accent);
     background-color: var(--accent-blue);
     font-weight: 600;
 }
@@ -1264,7 +1299,7 @@ html, body {
 .code-editor-area {
     flex: 1;
     overflow: auto;
-    background-color: #070b14;
+    background-color: var(--bg-code);
     padding: 16px;
     position: relative;
 }
@@ -1274,7 +1309,7 @@ html, body {
     font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.6;
-    color: #e2e8f0;
+    color: var(--text-primary);
     white-space: pre-wrap;
     word-break: break-all;
     tab-size: 2;
@@ -1324,13 +1359,13 @@ html, body {
 }
 
 .model-tag.installed {
-    background-color: rgba(16, 185, 129, 0.2);
-    color: #34d399;
+    background-color: var(--accent-green-subtle);
+    color: var(--accent-green);
 }
 
 .model-tag.pending {
-    background-color: rgba(234, 179, 8, 0.2);
-    color: #facc15;
+    background-color: var(--accent-amber-subtle);
+    color: var(--accent-amber);
 }
 
 .model-actions {
@@ -1354,7 +1389,7 @@ html, body {
     background: var(--bg-chrome); color: var(--text-primary);
     border: 1px solid var(--border-strong);
     border-left: 3px solid var(--accent-blue);
-    box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+    box-shadow: var(--shadow-lg);
     font-size: 13px; line-height: 1.45; pointer-events: auto;
     animation: snack-in .22s cubic-bezier(.2, .8, .3, 1);
 }
@@ -1382,14 +1417,14 @@ html, body {
 
 .live-build {
     position: fixed; inset: 0; z-index: 1200;
-    background: var(--bg-primary, #14161a);
+    background: var(--bg-app);
     display: flex; flex-direction: column;
 }
 .live-build[hidden] { display: none; }
 .live-build-bar {
     display: flex; align-items: center; gap: 10px;
-    padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,.12);
-    background: rgba(0,0,0,.25); flex: 0 0 auto;
+    padding: 10px 14px; border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-chrome); flex: 0 0 auto;
 }
 .live-build-title { font-weight: 600; font-size: 13px; }
 .live-build-status { font-size: 12px; opacity: .75; font-variant-numeric: tabular-nums; }
@@ -1399,19 +1434,19 @@ html, body {
 }
 .live-build-issues span {
     padding: 2px 8px; border-radius: 10px; flex: 0 0 auto;
-    background: rgba(255,170,60,.16); color: #ffb648;
+    background: var(--accent-amber-subtle); color: var(--accent-amber);
     overflow: hidden; text-overflow: ellipsis; max-width: 22vw;
 }
 .live-build-spacer { flex: 1 1 auto; }
 .live-build-body {
     flex: 1 1 auto; position: relative; overflow: hidden;
-    display: flex; gap: 1px; background: rgba(255,255,255,.10);
+    display: flex; gap: 1px; background: var(--border-subtle);
 }
-.lb-pane { display: flex; flex-direction: column; min-width: 0; background: #14161a; }
+.lb-pane { display: flex; flex-direction: column; min-width: 0; background: var(--bg-chrome); }
 .lb-pane[hidden] { display: none; }
 .lb-pane-head {
     flex: 0 0 auto; padding: 5px 10px; font-size: 11px; letter-spacing: .04em;
-    text-transform: uppercase; opacity: .6; background: rgba(0,0,0,.25);
+    text-transform: uppercase; color: var(--text-muted); background: var(--bg-input);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .lb-pane-body { flex: 1 1 auto; position: relative; overflow: auto; background: #fff; }
@@ -1425,7 +1460,7 @@ html, body {
    phone layout, which compares nothing to anything. */
 .live-build-body.mode-compare .lb-pane-body { overflow: hidden; }
 .live-build-body.mode-compare .lb-pane-body iframe { height: 2600px; }
-.lb-pane-original .lb-pane-body { overflow: auto; background: #0d0f12; }
+.lb-pane-original .lb-pane-body { overflow: auto; background: var(--bg-viewport); }
 .lb-pane-original img { width: 100%; display: block; }
 
 /* While it writes: the design small on the left, the page being built beside it. */
@@ -1437,7 +1472,7 @@ html, body {
 .live-build-frame { width: 100%; height: 100%; border: 0; background: #fff; }
 .live-build-source {
     position: absolute; inset: 0; margin: 0; padding: 14px; overflow: auto;
-    background: #0d0f12; color: #cbd3de; font: 12px/1.55 ui-monospace, Menlo, Consolas, monospace;
+    background: var(--bg-code); color: var(--text-primary);
     white-space: pre-wrap; word-break: break-word;
 }
 .live-build-source[hidden] { display: none; }
