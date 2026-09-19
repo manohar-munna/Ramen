@@ -9,7 +9,7 @@ import base64
 import json
 import zipfile
 import logging
-from typing import List, Optional, Dict, Any, Union, Literal, Tuple
+from typing import List, Optional, Dict, Any, Literal, Tuple
 from pydantic import BaseModel, Field
 from PIL import Image
 import numpy as np
@@ -529,27 +529,6 @@ def keep_core_ink(ink: np.ndarray) -> np.ndarray:
             keep[lab == i] = 1
     return keep if keep.any() else ink
 
-def ink_top_offset(text: str, font_size: float, line_px: float, bold: bool) -> float:
-    """Distance from a text element's top edge down to the first line's ink.
-
-    A paragraph has to use the measured line pitch for its line-height, which overrides
-    the per-run value that pinned a single line's ink to its box. Solving the same CSS
-    inline box model for the offset instead lets the element's top be shifted to
-    compensate, so the first line still lands where it was measured.
-    """
-    clean = (text or '').strip()
-    font = _get_measure_font(bold) if clean else None
-    if font is None or font_size <= 0:
-        return 0.0
-    try:
-        ink = font.getbbox(clean)
-        ascent, descent = font.getmetrics()
-    except Exception:
-        return 0.0
-    scale = font_size / float(_MEASURE_REF_SIZE)
-    content = (ascent + descent) * scale
-    return (line_px - content) / 2.0 + ink[1] * scale
-
 def erase_text_from_crop(crop: np.ndarray, text_mask: np.ndarray,
                          textured: bool = False, scale: float = 1.0) -> np.ndarray:
     """Paints out masked text pixels so a raster crop can sit underneath live text.
@@ -999,7 +978,6 @@ class TableExtractor:
                 t_x1 = max(b[2] for b in cell_boxes)
                 t_y1 = max(b[3] for b in cell_boxes)
                 table_w = max(t_x1 - t_x0, 1.0)
-                table_h = max(t_y1 - t_y0, 1.0)
 
                 # Step 4: Compute active column widths & percentages
                 col_widths = []
@@ -1139,10 +1117,10 @@ class TableExtractor:
 
                 # Step 9: Build HTML
                 html_parts = [
-                    f'<table class="reconstructed-table" style="width: 100%; height: 100%; '
-                    f'table-layout: fixed; border-collapse: collapse; box-sizing: border-box; '
-                    f'font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Arial, sans-serif; '
-                    f'color: #000000;">'
+                    '<table class="reconstructed-table" style="width: 100%; height: 100%; '
+                    'table-layout: fixed; border-collapse: collapse; box-sizing: border-box; '
+                    'font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Arial, sans-serif; '
+                    'color: #000000;">'
                 ]
                 html_parts.append('  <colgroup>')
                 for pct in col_pcts:
@@ -1198,16 +1176,6 @@ class TableExtractor:
         except Exception as e:
             logger.warning(f"Table extraction error: {e}")
         return results
-
-    @staticmethod
-    def structure_v3_to_html(pred_html: str) -> str:
-        clean = pred_html.replace('<html>', '').replace('</html>', '').replace('<body>', '').replace('</body>', '').strip()
-        if not clean.startswith('<table'):
-            clean = f'<table class="reconstructed-table">{clean}</table>'
-        style_inject = 'style="width: 100%; height: 100%; border-collapse: collapse; font-family: inherit; font-size: 11px; line-height: 1.3;"'
-        if '<table' in clean and 'style=' not in clean:
-            clean = clean.replace('<table', f'<table {style_inject}', 1)
-        return clean
 
 # ==============================================================================
 # 7. DIGITAL EXTRACTOR
@@ -1567,29 +1535,15 @@ def photographic_mask(img: np.ndarray, text_ink: Optional[np.ndarray] = None,
     # joined mask would swallow it. `joined` bounds the area kept as pixels.
     return raw, joined
 
-def flat_fraction(img: np.ndarray, x: int, y: int, cw: int, ch: int) -> float:
-    """Share of a region whose pixels sit in perfectly uniform neighbourhoods.
-
-    Interface is built from flat fills, so most of its area has zero local variance --
-    the exceptions are edges and glyphs. A photograph has almost none, however smooth it
-    looks, because sensor and compression noise leave every neighbourhood slightly
-    uneven. This separates the two where texture statistics alone cannot.
-    """
-    patch = img[y:y+ch, x:x+cw]
-    if patch.size == 0:
-        return 0.0
-    g = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    mean = cv2.boxFilter(g, -1, (5, 5), normalize=True)
-    sq = cv2.boxFilter(g * g, -1, (5, 5), normalize=True)
-    var = np.clip(sq - mean * mean, 0.0, None)
-    return float(np.count_nonzero(var < 0.6)) / float(var.size)
-
 FLAT_VARIANCE = 0.05        # a CSS fill is bit-identical; a photograph never quite is
 
-def photographic_regions(mask: np.ndarray, page_area: float, img: Optional[np.ndarray] = None,
+def photographic_regions(mask: np.ndarray, page_area: float,
                          min_frac: float = PHOTO_MIN_REGION) -> List[Tuple[int, int, int, int]]:
     """Connected photographic areas large enough to be worth keeping as pixels.
 
+    The mask has already decided what is photographic; this only discards the specks.
+    A region smaller than a favicon is noise in the mask rather than a picture, and
+    keeping it as pixels costs an asset for something nobody would call an image.
     """
     n, lab, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
     out = []
@@ -2730,7 +2684,7 @@ def _in_wrapped_block(r: Dict[str, Any], pool: List[Dict[str, Any]]) -> bool:
     return False
 
 def detect_sibling_groups(runs: List[Dict[str, Any]], img, text_ink,
-                          page_w: float, page_h: float) -> List[Dict[str, Any]]:
+                          page_h: float) -> List[Dict[str, Any]]:
     """Finds repeated elements and classifies them as a set rather than one at a time.
 
     Four evenly spaced labels in a row is overwhelming evidence of a nav; a single one
@@ -3001,7 +2955,7 @@ class ImageReconstructor:
         img = cv2.imread(file_path)
         if img is None:
             raise ValueError(f"Unable to read image at {file_path}")
-        return ImageReconstructor.reconstruct_image_from_cv2(img, asset_dir=asset_dir, source_file=file_path)
+        return ImageReconstructor.reconstruct_image_from_cv2(img, asset_dir=asset_dir)
 
     @staticmethod
     def _extract_text_runs(img: np.ndarray) -> Tuple[List[Dict[str, Any]], np.ndarray]:
@@ -3204,7 +3158,7 @@ class ImageReconstructor:
 
     @staticmethod
     def _extract_residual_art(img, w, h, mean_bg, text_mask, paintable,
-                              asset_dir, surface_ids=None, depths=None,
+                              asset_dir, surface_ids=None,
                               explained=None, scale=1.0,
                               masks=None) -> List[DocumentElement]:
         """Rasterises whatever no surface or text run explained.
@@ -3396,7 +3350,6 @@ class ImageReconstructor:
         img: np.ndarray,
         asset_dir: Optional[str] = None,
         page_num: int = 1,
-        source_file: Optional[str] = None
     ) -> PageData:
         h, w = img.shape[:2]
         # Pixel thresholds below describe features of a rendered page, not of this file,
@@ -3420,7 +3373,7 @@ class ImageReconstructor:
         dilated_ink = cv2.dilate((text_mask > 0).astype(np.uint8), _K3,
                                  iterations=max(1, int(round(2 * scale))))
         photo_raw, photo_joined = photographic_mask(img, dilated_ink, scale=scale)
-        photo_boxes = photographic_regions(photo_joined, float(w * h), img=img)
+        photo_boxes = photographic_regions(photo_joined, float(w * h))
 
         # 5. Flat fills -> candidate CSS surfaces
         surfaces = detect_surfaces(img, page_bg_hex, text_ink=dilated_ink,
@@ -3456,7 +3409,7 @@ class ImageReconstructor:
         # Repeated elements are classified as a set. A member's own box grows to take in
         # its leading icon, because an icon and its label are one control, not two.
         text_ink_mask = (text_mask > 0).astype(np.uint8)
-        sibling_groups = detect_sibling_groups(text_runs, img, text_ink_mask, w, h)
+        sibling_groups = detect_sibling_groups(text_runs, img, text_ink_mask, h)
         for g in sibling_groups:
             if g['role'] == 'group-item':
                 # Repetition alone only buys consistency among members that have no
@@ -3487,15 +3440,8 @@ class ImageReconstructor:
 
         # 6. Emit surfaces as real boxes, absorbing a button's label into the button
         surface_ids: Dict[int, str] = {}
-        depths: Dict[int, int] = {}
         for s in sorted(paintable, key=lambda s: -(s.width * s.height)):
             role, tag, conf = roles[id(s)]
-            depth = 0
-            p = s.parent
-            while p is not None:
-                depth += 1
-                p = p.parent
-            depths[id(s)] = depth
 
             eid = next_id(role if role in ('button', 'badge', 'card', 'input') else 'surface')
             surface_ids[id(s)] = eid
@@ -3746,7 +3692,7 @@ class ImageReconstructor:
 
         # 8. Residual artwork: everything no surface or text explained stays as pixels
         elements.extend(ImageReconstructor._extract_residual_art(
-            img, w, h, mean_bg, text_mask, paintable, asset_dir, surface_ids, depths,
+            img, w, h, mean_bg, text_mask, paintable, asset_dir, surface_ids,
             explained=photo_joined if photo_boxes else None, scale=scale,
             masks=paint_masks
         ))
@@ -3783,7 +3729,7 @@ class ScannedExtractor:
                 cv_img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if cv_img is not None and cv_img.shape[0] > 100 and cv_img.shape[1] > 100:
                     return ImageReconstructor.reconstruct_image_from_cv2(
-                        cv_img, asset_dir=asset_dir, page_num=page_num + 1, source_file=getattr(doc, 'name', None)
+                        cv_img, asset_dir=asset_dir, page_num=page_num + 1
                     )
             except Exception as e:
                 logger.warning(f"Could not extract direct image from scanned PDF page: {e}")
@@ -3793,7 +3739,7 @@ class ScannedExtractor:
         img_bytes = pix.tobytes("png")
         cv_img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
         return ImageReconstructor.reconstruct_image_from_cv2(
-            cv_img, asset_dir=asset_dir, page_num=page_num + 1, source_file=getattr(doc, 'name', None)
+            cv_img, asset_dir=asset_dir, page_num=page_num + 1
         )
 
 # ==============================================================================
