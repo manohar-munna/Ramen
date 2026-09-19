@@ -137,9 +137,7 @@ def restore_assets(html: str, assets: List[str]) -> Tuple[str, List[int]]:
     return _PLACEHOLDER_RE.sub(swap, html), missing
 
 
-_ELEMENT_RE = re.compile(r"<[^>]*data:image/[^>]*>")
 _ROLE_RE = re.compile(r'data-role="([^"]+)"')
-_BOX_RE = re.compile(r"width:\s*([\d.]+)px;\s*height:\s*([\d.]+)px")
 
 # Describe what the engine actually recorded, not what it might imply. "backdrop" here
 # means only "a photographic or gradient region kept as pixels" -- calling it a section
@@ -1084,9 +1082,13 @@ def short_reason(err: Exception) -> str:
 # because the free tier counts per model: the same credential can be spent on one and
 # fine on the next, which is exactly what happened -- one key with nothing left for
 # gemini-3-flash and a full allowance on gemini-3.5-flash.
-_SPENT: Dict[Tuple[str, str], str] = {}
+_SPENT: Dict[Tuple[str, str], Tuple[float, str]] = {}
 # A rejected credential is rejected everywhere, so it is remembered without a model.
 _DEAD_KEYS: Dict[str, str] = {}
+# How long a spent mark is believed. The allowance it describes resets daily and this
+# server is expected to stay up across the reset, so a mark kept for the life of the
+# process eventually describes a quota that came back hours ago.
+SPENT_TTL = 3600.0
 
 
 def api_keys(explicit: Optional[str] = None) -> List[str]:
@@ -1106,15 +1108,17 @@ def api_keys(explicit: Optional[str] = None) -> List[str]:
 def live_keys(model: str = "", explicit: Optional[str] = None) -> List[str]:
     """Keys that might still work for this model, in order."""
     keys = [k for k in api_keys(explicit) if k not in _DEAD_KEYS]
-    fresh = [k for k in keys if (k, model) not in _SPENT]
+    now = time.time()
+    fresh = [k for k in keys
+             if now - _SPENT.get((k, model), (0.0, ""))[0] > SPENT_TTL]
     # If everything looks spent, try them anyway rather than refusing outright: a
     # per-minute ceiling clears on its own and the marks may simply be stale.
     return fresh or keys or api_keys(explicit)
 
 
 def mark_spent(key: str, model: str, reason: str) -> None:
-    """Records that this key has nothing left for this model."""
-    _SPENT[(key, model)] = reason
+    """Records that this key has nothing left for this model, and when."""
+    _SPENT[(key, model)] = (time.time(), reason)
 
 
 def mark_dead(key: str, reason: str) -> None:
@@ -1137,11 +1141,23 @@ def key_label(key: str) -> str:
     return key[:6] + "..." + key[-4:] if len(key) > 12 else "key"
 
 
+def _daily_allowance_gone(detail: str) -> bool:
+    """Whether a 429 is the day's allowance rather than a ceiling on the minute."""
+    return "per day" in detail or "_requests, limit:" in detail
+
+
 def _key_verdict(code: int, detail: str) -> str:
-    """"dead" if the credential is refused outright, "spent" if it is merely used up."""
+    """"dead" if the credential is refused outright, "spent" if it is used up.
+
+    A 429 is not one thing, and the body says which. The day's allowance being gone
+    is worth remembering: nothing brings it back before the reset, and the run should
+    move to another key. A ceiling on the minute clears in seconds, and treating that
+    as spent abandoned a working key over a limit that had already lifted. Empty means
+    neither -- retry this one rather than giving up on it.
+    """
     if code in (401, 403):
         return "dead"
-    if code == 429:
+    if code == 429 and _daily_allowance_gone(detail):
         return "spent"
     return ""
 
@@ -1317,7 +1333,7 @@ def _post(model: str, body: bytes, key: str, timeout: int) -> dict:
                     "404. Run `python enhancer.py --list-models` to see what this key can "
                     "actually call, then set GEMINI_MODEL in .env.")
         elif e.code == 429:
-            if "per day" in detail or "_requests, limit:" in detail:
+            if _daily_allowance_gone(detail):
                 hint = (sep + "The free tier's daily request allowance for this model is "
                         "gone; no amount of retrying will help until it resets. Try "
                         "another model (python enhancer.py --list-models) or enable "
@@ -1333,10 +1349,9 @@ def _post(model: str, body: bytes, key: str, timeout: int) -> dict:
         verdict = _key_verdict(e.code, detail)
         if verdict:
             raise _KeyProblem(err, short_reason(err), verdict) from e
-        # A daily allowance does not come back in forty seconds, so backing off against
-        # it only wastes the caller's time before failing anyway.
-        exhausted = e.code == 429 and ("per day" in detail or "_requests, limit:" in detail)
-        if e.code in RETRY_STATUSES and not exhausted:
+        # A 429 that survived the verdict above is a ceiling on the minute, which is
+        # exactly what backing off is for. The daily kind never reaches here.
+        if e.code in RETRY_STATUSES:
             wait = None
             m = re.search(r'"retryDelay"\s*:\s*"([\d.]+)s"', detail)
             if m:
