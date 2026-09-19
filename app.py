@@ -1,22 +1,20 @@
 import os
-import sys
 import uuid
-import json
 import base64
 import asyncio
-from typing import Dict, Any, Optional, List
-from fastapi import (FastAPI, UploadFile, File, Form, HTTPException,
+from typing import Dict, Any, Optional, List, Tuple
+from fastapi import (FastAPI, UploadFile, File, HTTPException,
                      BackgroundTasks, WebSocket, WebSocketDisconnect)
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse, FileResponse
+from fastapi.responses import Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 import pymupdf
 
 from engine import (
-    DocumentData, PageData, DocumentElement,
+    DocumentData, PageData,
     PDFAnalyzer, DigitalExtractor, ScannedExtractor, ImageReconstructor,
-    HTMLRenderer, Exporter, FidelityChecker, ModelManager
+    Exporter, FidelityChecker, ModelManager
 )
 import enhancer
 import logging
@@ -45,9 +43,11 @@ app.add_middleware(
 
 app.mount("/outputs", StaticFiles(directory=OUTPUTS_DIR), name="outputs")
 
-# In-memory tracking
+# What each job is doing, for /api/progress. Bounded: this is a desktop server that
+# stays up for days, and an unbounded dict keyed by a fresh uuid per upload only ever
+# grows. A finished job's line is worth keeping for a while and worthless forever.
 JOB_PROGRESS: Dict[str, Dict[str, Any]] = {}
-CONVERTED_DOCUMENTS: Dict[str, DocumentData] = {}
+JOB_HISTORY = 64
 
 class CompareRequest(BaseModel):
     origImageSrc: str
@@ -70,7 +70,10 @@ class EnhanceRequest(BaseModel):
     # Render the result and let the model compare it with the original, this many times.
     refine: Optional[int] = None
 
-def update_job_stage(job_id: str, stage: str, detail: str, percent: int, completed: bool = False, error: str = None):
+def update_job_stage(job_id: str, stage: str, detail: str, percent: int,
+                     completed: bool = False, error: Optional[str] = None):
+    while len(JOB_PROGRESS) >= JOB_HISTORY and job_id not in JOB_PROGRESS:
+        JOB_PROGRESS.pop(next(iter(JOB_PROGRESS)))
     JOB_PROGRESS[job_id] = {
         "jobId": job_id,
         "stage": stage,
@@ -111,90 +114,97 @@ def get_progress(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     return JOB_PROGRESS[job_id]
 
+def _reconstruct(file_path: str, filename: str,
+                 job_id: str, asset_dir: str) -> Tuple[DocumentData, Dict[str, Any]]:
+    """The whole reconstruction, start to finish, on a worker thread.
+
+    Split out from the route because it is seconds to minutes of solid CPU. Called
+    inline from an async handler it held the event loop for the entire conversion:
+    every other request queued behind it, including the progress endpoint that is
+    supposed to say how the conversion is going, and the live-build socket, which
+    could not even be opened while a page was being read.
+    """
+    ext = os.path.splitext(filename)[1].lower()
+    is_image = ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff']
+    doc_title = os.path.splitext(filename)[0]
+
+    if is_image:
+        update_job_stage(job_id, "Layered Visual Engine",
+                         "Analyzing image resolution, color palette, typography & shapes...", 25)
+        p_data = ImageReconstructor.reconstruct_image(file_path, asset_dir=asset_dir)
+        update_job_stage(job_id, "Finalizing HTML",
+                         "Assembling 2D coordinate canvas and intermediate JSON...", 90)
+        analysis = {
+            "pageCount": 1,
+            "isScannedDoc": True,
+            "pages": [{"page": 1, "isScanned": True, "textLength": len(p_data.elements)}]
+        }
+        return DocumentData(
+            title=doc_title,
+            pageCount=1,
+            pages=[p_data],
+            metadata={"filename": filename, "isImage": True, "analysis": analysis}
+        ), analysis
+
+    update_job_stage(job_id, "Analyzing Document Structure",
+                     "Detecting digital objects vs scanned pages...", 15)
+    analysis = PDFAnalyzer.analyze_document(file_path)
+    page_count = analysis["pageCount"]
+    reconstructed_pages: List[PageData] = []
+
+    # Closed explicitly. Left to the garbage collector the handle outlived the
+    # request, and on Windows that keeps the cached upload locked against deletion.
+    doc = pymupdf.open(file_path)
+    try:
+        for p_idx in range(page_count):
+            p_num = p_idx + 1
+            pct = int(20 + (p_idx / max(page_count, 1)) * 70)
+            if analysis["pages"][p_idx]["isScanned"]:
+                update_job_stage(
+                    job_id, "Layout & OCR Analysis",
+                    f"Processing scanned page {p_num} of {page_count} "
+                    f"(PP-DocLayout / OCR / Table)...", pct)
+                p_data = ScannedExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
+            else:
+                update_job_stage(
+                    job_id, "Native Extraction",
+                    f"Extracting digital geometry, fonts, tables & vectors for "
+                    f"page {p_num} of {page_count}...", pct)
+                p_data = DigitalExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
+            reconstructed_pages.append(p_data)
+    finally:
+        doc.close()
+
+    update_job_stage(job_id, "Finalizing HTML",
+                     "Assembling 2D coordinate canvas and intermediate JSON...", 95)
+    return DocumentData(
+        title=doc_title,
+        pageCount=page_count,
+        pages=reconstructed_pages,
+        metadata={"filename": filename, "analysis": analysis}
+    ), analysis
+
+
 @app.post("/api/convert")
 async def convert_pdf(file: UploadFile = File(...)):
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    file_path = os.path.join(CACHE_DIR, f"{job_id}_{file.filename}")
+    filename = file.filename or "upload"
+    file_path = os.path.join(CACHE_DIR, f"{job_id}_{filename}")
 
-    update_job_stage(job_id, "Reading PDF", f"Receiving {file.filename}...", 5)
+    update_job_stage(job_id, "Reading PDF", f"Receiving {filename}...", 5)
 
     contents = await file.read()
     with open(file_path, "wb") as f:
         f.write(contents)
 
+    asset_dir = os.path.join(OUTPUTS_DIR, job_id, "assets")
+    os.makedirs(asset_dir, exist_ok=True)
+
     try:
-        ext = os.path.splitext(file.filename)[1].lower()
-        is_image = ext in ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff']
-        asset_dir = os.path.join(OUTPUTS_DIR, job_id, "assets")
-        os.makedirs(asset_dir, exist_ok=True)
-        doc_title = os.path.splitext(file.filename)[0]
-
-        if is_image:
-            update_job_stage(job_id, "Layered Visual Engine", "Analyzing image resolution, color palette, typography & shapes...", 25)
-            p_data = ImageReconstructor.reconstruct_image(file_path, asset_dir=asset_dir)
-            update_job_stage(job_id, "Finalizing HTML", "Assembling 2D coordinate canvas and intermediate JSON...", 90)
-            analysis = {
-                "pageCount": 1,
-                "isScannedDoc": True,
-                "pages": [{"page": 1, "isScanned": True, "textLength": len(p_data.elements)}]
-            }
-            final_doc = DocumentData(
-                title=doc_title,
-                pageCount=1,
-                pages=[p_data],
-                metadata={
-                    "filename": file.filename,
-                    "isImage": True,
-                    "analysis": analysis
-                }
-            )
-        else:
-            update_job_stage(job_id, "Analyzing Document Structure", "Detecting digital objects vs scanned pages...", 15)
-            analysis = PDFAnalyzer.analyze_document(file_path)
-            page_count = analysis["pageCount"]
-
-            doc = pymupdf.open(file_path)
-            reconstructed_pages: List[PageData] = []
-
-            for p_idx in range(page_count):
-                p_info = analysis["pages"][p_idx]
-                is_scanned = p_info["isScanned"]
-                p_num = p_idx + 1
-                pct = int(20 + (p_idx / max(page_count, 1)) * 70)
-
-                if is_scanned:
-                    update_job_stage(
-                        job_id,
-                        "Layout & OCR Analysis",
-                        f"Processing scanned page {p_num} of {page_count} (PP-DocLayout / OCR / Table)...",
-                        pct
-                    )
-                    p_data = ScannedExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
-                else:
-                    update_job_stage(
-                        job_id,
-                        "Native Extraction",
-                        f"Extracting digital geometry, fonts, tables & vectors for page {p_num} of {page_count}...",
-                        pct
-                    )
-                    p_data = DigitalExtractor.extract_page(doc, p_idx, asset_dir=asset_dir)
-
-                reconstructed_pages.append(p_data)
-
-            update_job_stage(job_id, "Finalizing HTML", "Assembling 2D coordinate canvas and intermediate JSON...", 95)
-            final_doc = DocumentData(
-                title=doc_title,
-                pageCount=page_count,
-                pages=reconstructed_pages,
-                metadata={
-                    "filename": file.filename,
-                    "analysis": analysis
-                }
-            )
-
-        CONVERTED_DOCUMENTS[job_id] = final_doc
-        update_job_stage(job_id, "Completed", "Document successfully reconstructed!", 100, completed=True)
-
+        final_doc, analysis = await asyncio.to_thread(
+            _reconstruct, file_path, filename, job_id, asset_dir)
+        update_job_stage(job_id, "Completed", "Document successfully reconstructed!",
+                         100, completed=True)
         return {
             "jobId": job_id,
             "document": final_doc.model_dump(),
@@ -205,10 +215,9 @@ async def convert_pdf(file: UploadFile = File(...)):
         update_job_stage(job_id, "Failed", str(ve), 0, completed=True, error=str(ve))
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception("conversion failed")
         update_job_stage(job_id, "Failed", str(e), 0, completed=True, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Conversion error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Conversion error: {e}")
 
 @app.post("/api/compare")
 def compare_fidelity(req: CompareRequest):
@@ -249,8 +258,18 @@ def export_document(req: ExportRequest):
                 media_type="application/zip",
                 headers={"Content-Disposition": f"attachment; filename={doc_data.title or 'document'}_bundle.zip"}
             )
+    except ValidationError as e:
+        raise HTTPException(status_code=400,
+                            detail=f"That document did not validate: {e}")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Export failed: {str(e)}")
+        # A 400 here blamed the caller for a fault in the exporter, which is the same
+        # mistake /api/enhance made and the same wasted afternoon looking at the
+        # request. The traceback goes to the log; the status says where to look.
+        logger.exception("export failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Export failed inside the server: {type(e).__name__}: {e}. "
+                   f"The full traceback is in the server log.")
 
 @app.websocket("/ws/generate")
 async def generate_live(ws: WebSocket):
@@ -275,6 +294,10 @@ async def generate_live(ws: WebSocket):
 
     loop = asyncio.get_running_loop()
     queue: "asyncio.Queue" = asyncio.Queue()
+    # Set when the browser goes away. Generation costs a minute of model time and a
+    # slice of a daily quota, and it used to run to completion for a window that had
+    # already been closed -- every chunk forwarded into a queue with no reader.
+    abandoned = False
 
     def produce():
         """Runs the blocking stream on a worker thread and feeds the queue."""
@@ -283,6 +306,9 @@ async def generate_live(ws: WebSocket):
             for kind, payload in enhancer.generate_from_document(
                     doc, model=request.get("model"),
                     verify=int(request.get("verify", enhancer.VERIFY_ROUNDS))):
+                if abandoned:
+                    logger.info("live generation abandoned by the client")
+                    return
                 loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
         except enhancer.EnhancementError as e:
             # The socket's error goes straight into an alert, so it gets the readable
@@ -319,10 +345,13 @@ async def generate_live(ws: WebSocket):
             elif kind == "error":
                 await ws.send_json({"type": "error", "detail": payload})
     except WebSocketDisconnect:
-        return
+        pass
     except Exception:
         logger.exception("live generation socket failed")
     finally:
+        # Tells the worker to stop at its next yield rather than writing a page for
+        # a window that is no longer there.
+        abandoned = True
         try:
             await ws.close()
         except Exception:

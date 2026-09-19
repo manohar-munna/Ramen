@@ -1,13 +1,9 @@
-import os
-import io
-import pytest
 from fastapi.testclient import TestClient
 import pymupdf
 
 from app import app
 from engine import (
-    DocumentData, PageData, DocumentElement, TextStyle,
-    PDFAnalyzer, DigitalExtractor, ScannedExtractor, TableExtractor, ImageReconstructor,
+    DocumentData, DigitalExtractor, TableExtractor,
     HTMLRenderer, Exporter, FidelityChecker
 )
 
