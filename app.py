@@ -69,6 +69,8 @@ class EnhanceRequest(BaseModel):
     useReference: bool = True
     # Render the result and let the model compare it with the original, this many times.
     refine: Optional[int] = None
+    targetScore: Optional[float] = None
+
 
 # The phases a conversion actually goes through, as short keys the editor can match
 # against without parsing prose. The two paths differ, and saying so is the point: an
@@ -336,7 +338,8 @@ async def generate_live(ws: WebSocket):
             doc = DocumentData.model_validate(doc_raw)
             for kind, payload in enhancer.generate_from_document(
                     doc, model=request.get("model"),
-                    verify=int(request.get("verify", enhancer.VERIFY_ROUNDS))):
+                    verify=int(request.get("verify", enhancer.VERIFY_ROUNDS)),
+                    target_score=float(request.get("targetScore", enhancer.TARGET_ACCURACY_SCORE))):
                 if abandoned:
                     logger.info("live generation abandoned by the client")
                     return
@@ -365,6 +368,8 @@ async def generate_live(ws: WebSocket):
                 await ws.send_json({"type": "status", "detail": payload})
             elif kind == "issue":
                 await ws.send_json({"type": "issue", "detail": payload})
+            elif kind == "score":
+                await ws.send_json({"type": "score", **payload})
             elif kind == "revision":
                 await ws.send_json({"type": "revision", **payload})
             elif kind == "chunk":
@@ -428,6 +433,7 @@ def enhance_document(req: EnhanceRequest):
         result = enhancer.enhance_html(
             html_content, model=req.model, extra=req.instructions, reference=reference,
             refine=(enhancer.REFINE_ROUNDS if req.refine is None else req.refine),
+            target_score=(req.targetScore if req.targetScore is not None else enhancer.TARGET_ACCURACY_SCORE),
         )
         return result
     except enhancer.EnhancementError as e:
