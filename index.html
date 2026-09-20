@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ramen — Precision PDF Reconstruction & Editor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Merriweather:ital,wght@0,300;0,400;0,700;1,300&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+
     <style>
 /* ==========================================================================
    RAMEN: Precision PDF-to-HTML Reconstruction & Editor Styling
@@ -753,6 +757,82 @@ html, body {
     height: 100%;
     object-fit: fill;
     pointer-events: none;
+}
+
+/* Blend mode & Enhanced page container */
+.blend-toggle {
+    margin-left: 4px;
+    margin-right: 4px;
+}
+.blend-toggle .seg-btn {
+    font-size: 12px;
+    font-weight: 500;
+    padding: 0 10px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.enhanced-page-container {
+    position: relative;
+    background-color: #ffffff;
+    box-shadow: var(--shadow-page);
+    user-select: text;
+    -webkit-user-select: text;
+    transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+.enhanced-page-container [contenteditable="true"]:focus {
+    outline: 1px dashed var(--border-focus);
+    background-color: rgba(59, 130, 246, 0.05);
+}
+
+/* Dark Theme support */
+.pdf-page.theme-dark,
+.enhanced-page-container.theme-dark {
+    background-color: #0d1117 !important;
+    color: #f0f6fc !important;
+    transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+.pdf-page.theme-dark .pdf-rect[data-role="card"],
+.pdf-page.theme-dark .pdf-rect[data-role="panel"],
+.pdf-page.theme-dark .pdf-rect[data-role="surface"] {
+    background-color: #161b22 !important;
+    border-color: #30363d !important;
+    color: #f0f6fc !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5) !important;
+    transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.pdf-page.theme-dark .pdf-text {
+    color: #f0f6fc !important;
+    transition: color 0.3s ease;
+}
+.pdf-page.theme-dark .pdf-text span {
+    color: inherit;
+}
+
+/* Switch & Toggle interaction */
+.theme-switch-btn,
+[data-role="switch"] {
+    cursor: pointer !important;
+    transition: background-color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+}
+.theme-switch-btn:hover,
+[data-role="switch"]:hover {
+    filter: brightness(1.08);
+}
+.theme-switch-btn.is-dark,
+[data-role="switch"].is-dark {
+    background-color: #6366f1 !important;
+    border-color: #4f46e5 !important;
+}
+.theme-switch-btn .switch-knob,
+[data-role="switch"] > div,
+[data-role="switch"] > span {
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.25s ease !important;
 }
 
 .pdf-vector-container,
@@ -1920,6 +2000,22 @@ html, body {
                 </button>
             </div>
 
+            <div id="blend-mode-toggle" class="segmented blend-toggle" style="display: none;" role="group" aria-label="Reconstruction view mode">
+                <button id="btn-mode-deterministic" class="seg-btn active" title="Deterministic pixel reconstruction">
+                    <svg class="btn-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:13px;height:13px;margin-right:3px;vertical-align:-1px;">
+                        <rect x="3" y="3" width="18" height="18" rx="2"/>
+                        <path d="M3 9h18M9 21V9"/>
+                    </svg>
+                    Deterministic
+                </button>
+                <button id="btn-mode-enhanced" class="seg-btn" title="AI-enhanced responsive page">
+                    <svg class="btn-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:13px;height:13px;margin-right:3px;vertical-align:-1px;">
+                        <path d="M12 3.5 13.7 9l5.5 1.7-5.5 1.7L12 18l-1.7-5.6L4.8 10.7 10.3 9z"/>
+                    </svg>
+                    Enhanced ✨
+                </button>
+            </div>
+
             <button id="btn-enhance" class="btn btn-secondary"
                     title="Rewrite this page with flowing layout and transitions">
                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -2059,6 +2155,8 @@ html, body {
                 <span id="zoom-level-text" class="zoom-display">100%</span>
                 <button id="btn-zoom-in" class="btn-control" title="Zoom In"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
                 <button id="btn-zoom-fit" class="btn-control-subtle" title="Fit to Window">Fit Width</button>
+                <div class="divider-v"></div>
+                <button id="btn-theme-toggle" class="btn-control-subtle" title="Toggle Page Theme (Dark/Light)">🌓 Theme</button>
             </div>
             <div class="divider-v"></div>
             <span id="status-info-text" class="status-msg">Ready</span>
@@ -2231,13 +2329,17 @@ html, body {
     <span id="live-build-status" class="live-build-status">connecting...</span>
     <span id="live-build-issues" class="live-build-issues"></span>
     <span class="live-build-spacer"></span>
+    <button id="live-build-blend" class="btn btn-primary" style="margin-right:6px;" disabled title="Open this enhanced version in the interactive editor">
+        <svg class="btn-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;margin-right:3px;vertical-align:-1px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        Open in Editor
+    </button>
     <button id="live-build-compare" class="btn-toggle" disabled
             title="Original, the engine's reconstruction and this page, side by side"
             >Compare all three</button>
     <button id="live-build-code" class="btn-toggle">Code</button>
     <button id="live-build-download" class="btn-toggle" disabled>Download</button>
     <button id="live-build-open" class="btn-toggle" disabled>Open in a tab</button>
-    <button id="live-build-close" class="btn-icon-subtle" title="Close"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    <button id="live-build-close" class="btn-icon-subtle" title="Back to Editor"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
   <div id="live-build-body" class="live-build-body mode-building">
     <section class="lb-pane lb-pane-original">
@@ -2286,6 +2388,9 @@ const state = {
     history: [],               // Undo history
     inspecting: false,         // Element inspector active
     inspectTarget: null,       // Element currently highlighted
+    activeViewMode: 'deterministic', // 'deterministic' | 'enhanced'
+    enhancedHtml: null,
+    isDarkTheme: false,
 };
 
 // DOM References
@@ -2297,7 +2402,12 @@ const elements = {
     btnCompareMode: document.getElementById('btn-compare-mode'),
     btnPageCode: document.getElementById('btn-page-code'),
     btnEnhance: document.getElementById('btn-enhance'),
+    blendModeToggle: document.getElementById('blend-mode-toggle'),
+    btnModeDeterministic: document.getElementById('btn-mode-deterministic'),
+    btnModeEnhanced: document.getElementById('btn-mode-enhanced'),
+    btnThemeToggle: document.getElementById('btn-theme-toggle'),
     liveBuild: document.getElementById('live-build'),
+    liveBuildBlend: document.getElementById('live-build-blend'),
     liveBuildFrame: document.getElementById('live-build-frame'),
     liveBuildSource: document.getElementById('live-build-source'),
     liveBuildStatus: document.getElementById('live-build-status'),
@@ -2419,6 +2529,22 @@ function setupEventListeners() {
         elements.inspectBox.style.display = 'none';
         elements.inspectTip.style.display = 'none';
     });
+
+    // Blend mode switcher
+    if (elements.btnModeDeterministic) {
+        elements.btnModeDeterministic.addEventListener('click', () => switchViewMode('deterministic'));
+    }
+    if (elements.btnModeEnhanced) {
+        elements.btnModeEnhanced.addEventListener('click', () => switchViewMode('enhanced'));
+    }
+
+    // Theme toggle
+    if (elements.btnThemeToggle) {
+        elements.btnThemeToggle.addEventListener('click', () => {
+            const container = document.getElementById('enhanced-page-container') || document.querySelector('.pdf-page');
+            togglePageTheme(container);
+        });
+    }
 
     // Open PDF
     elements.btnOpenPdf.addEventListener('click', () => elements.pdfFileInput.click());
@@ -2764,7 +2890,7 @@ function renderCurrentPage() {
     elements.documentStage.innerHTML = '';
     
     const pageContainer = document.createElement('div');
-    pageContainer.className = 'pdf-page';
+    pageContainer.className = `pdf-page ${state.isDarkTheme ? 'theme-dark' : ''}`;
     pageContainer.id = `pdf-page-${page.pageNumber}`;
     pageContainer.style.width = `${page.width}px`;
     pageContainer.style.height = `${page.height}px`;
@@ -2804,8 +2930,206 @@ function renderCurrentPage() {
     });
     
     elements.documentStage.appendChild(pageContainer);
+    attachThemeToggleHandlers(pageContainer);
     updateThumbnailActiveState();
     updatePageNavigation();
+}
+
+function colorToHex(col) {
+    if (!col || col === 'transparent' || col === 'rgba(0, 0, 0, 0)') return '#000000';
+    if (col.startsWith('#')) return col.length === 4 ? `#${col[1]}${col[1]}${col[2]}${col[2]}${col[3]}${col[3]}` : col;
+    const m = col.match(/\d+/g);
+    if (m && m.length >= 3) {
+        return '#' + m.slice(0, 3).map(x => parseInt(x, 10).toString(16).padStart(2, '0')).join('');
+    }
+    return '#000000';
+}
+
+function showBlendToggle() {
+    if (elements.blendModeToggle) {
+        elements.blendModeToggle.style.display = 'inline-flex';
+    }
+}
+
+function switchViewMode(mode) {
+    state.activeViewMode = mode;
+    if (elements.btnModeDeterministic) {
+        elements.btnModeDeterministic.classList.toggle('active', mode === 'deterministic');
+    }
+    if (elements.btnModeEnhanced) {
+        elements.btnModeEnhanced.classList.toggle('active', mode === 'enhanced');
+    }
+
+    if (mode === 'enhanced') {
+        renderEnhancedPage();
+    } else {
+        renderCurrentPage();
+    }
+}
+
+function renderEnhancedPage() {
+    if (!state.enhancedHtml) {
+        notify('No enhanced page available yet. Click "Enhance" first.', 'info');
+        return;
+    }
+    deselectElement();
+    elements.documentStage.innerHTML = '';
+
+    const page = state.doc?.pages[state.currentPageIndex] || state.doc?.pages[0];
+    const container = document.createElement('div');
+    container.id = 'enhanced-page-container';
+    container.className = `enhanced-page-container ${state.isDarkTheme ? 'theme-dark' : ''}`;
+
+    const pw = page ? page.width : 1400;
+    const ph = page ? page.height : 900;
+    container.style.width = `${pw}px`;
+    container.style.minHeight = `${ph}px`;
+
+    const parser = new DOMParser();
+    const parsed = parser.parseFromString(state.enhancedHtml, 'text/html');
+
+    // Copy styles and links
+    parsed.querySelectorAll('style, link[rel="stylesheet"]').forEach(s => {
+        container.appendChild(s.cloneNode(true));
+    });
+
+    // Copy body contents
+    Array.from(parsed.body.childNodes).forEach(node => {
+        container.appendChild(node.cloneNode(true));
+    });
+
+    makeEnhancedElementsInteractive(container);
+    attachThemeToggleHandlers(container);
+
+    elements.documentStage.appendChild(container);
+    zoomToFit();
+}
+
+function makeEnhancedElementsInteractive(container) {
+    const editableTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'button', 'a', 'li', 'td', 'th', 'label', 'b', 'strong', 'i', 'em'];
+    const editableSelector = editableTags.join(', ');
+
+    container.querySelectorAll(editableSelector).forEach(el => {
+        if (el.children.length === 0 || el.tagName.toLowerCase().startsWith('h') || el.tagName.toLowerCase() === 'p') {
+            el.contentEditable = "true";
+            el.spellcheck = false;
+            el.addEventListener('input', () => {
+                state.enhancedHtml = container.innerHTML;
+                syncPropertiesPanelText(el.innerText);
+            });
+        }
+    });
+
+    container.querySelectorAll('*').forEach(el => {
+        const tag = el.tagName.toLowerCase();
+        if (['style', 'link', 'script', 'head', 'meta', 'title'].includes(tag)) return;
+        el.classList.add('pdf-element');
+
+        el.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+            selectEnhancedElement(el, container);
+        });
+    });
+}
+
+function selectEnhancedElement(el, container) {
+    if (!el.id) {
+        el.id = 'enh-' + Math.random().toString(36).slice(2, 8);
+    }
+    state.selectedElementId = el.id;
+
+    const cRect = container.getBoundingClientRect();
+    const eRect = el.getBoundingClientRect();
+    const z = state.zoom || 1.0;
+    const bbox = [
+        (eRect.left - cRect.left) / z,
+        (eRect.top - cRect.top) / z,
+        (eRect.right - cRect.left) / z,
+        (eRect.bottom - cRect.top) / z,
+    ];
+
+    const computed = window.getComputedStyle(el);
+    const tag = el.tagName.toLowerCase();
+    const isText = tag.startsWith('h') || ['p', 'span', 'a', 'button', 'label', 'li', 'td', 'th'].includes(tag);
+
+    const proxyElem = {
+        id: el.id,
+        type: isText ? 'text' : 'rect',
+        tag: tag,
+        role: tag,
+        bbox: bbox,
+        text: el.innerText || '',
+        style: {
+            fontFamily: computed.fontFamily,
+            fontSize: parseFloat(computed.fontSize) || 16,
+            fontWeight: computed.fontWeight,
+            fontStyle: computed.fontStyle,
+            color: colorToHex(computed.color),
+            textAlign: computed.textAlign,
+            lineHeight: parseFloat(computed.lineHeight) / (parseFloat(computed.fontSize) || 16) || 1.2,
+            letterSpacing: parseFloat(computed.letterSpacing) || 0,
+            backgroundColor: colorToHex(computed.backgroundColor),
+        },
+        box: {
+            backgroundColor: colorToHex(computed.backgroundColor),
+            borderColor: colorToHex(computed.borderColor),
+            borderWidth: parseFloat(computed.borderWidth) || 0,
+            borderRadius: computed.borderRadius,
+            boxShadow: computed.boxShadow,
+        },
+        _domNode: el,
+    };
+
+    updateSelectionBox(proxyElem);
+    renderPropertiesPanel(proxyElem);
+    elements.propertiesPanel.classList.add('is-open');
+    elements.propertiesPanel.setAttribute('aria-hidden', 'false');
+    setPanelRoom(true);
+}
+
+function attachThemeToggleHandlers(container) {
+    if (!container) return;
+    const switchCandidates = container.querySelectorAll(
+        '[data-role="switch"], .theme-switch-btn, button[title*="theme" i], button[title*="dark" i], button[title*="light" i], [class*="switch" i], [class*="toggle" i]'
+    );
+
+    switchCandidates.forEach(sw => {
+        sw.style.cursor = 'pointer';
+        sw.setAttribute('data-role', 'switch');
+        sw.addEventListener('click', (e) => {
+            e.stopPropagation();
+            togglePageTheme(container, sw);
+        });
+    });
+}
+
+function togglePageTheme(container, clickedSwitch) {
+    if (!container) {
+        container = document.getElementById('enhanced-page-container') || document.querySelector('.pdf-page');
+    }
+    if (!container) return;
+
+    state.isDarkTheme = !state.isDarkTheme;
+    const isDark = state.isDarkTheme;
+    container.classList.toggle('theme-dark', isDark);
+
+    // Update all switches in the container
+    const switches = container.querySelectorAll('[data-role="switch"], .theme-switch-btn, [class*="switch" i], [class*="toggle" i]');
+    switches.forEach(sw => {
+        sw.classList.toggle('is-dark', isDark);
+        sw.setAttribute('aria-checked', isDark ? 'true' : 'false');
+
+        // Knob sliding
+        const knob = sw.querySelector('.switch-knob, .pdf-shape, div[style*="50%"], span');
+        if (knob) {
+            const trackW = sw.offsetWidth || 44;
+            const knobW = knob.offsetWidth || 20;
+            const travel = Math.max(trackW - knobW - 4, 16);
+            knob.style.transform = isDark ? `translateX(${travel}px)` : 'translateX(0px)';
+        }
+    });
+
+    notify(isDark ? 'Switched to Dark Theme 🌙' : 'Switched to Light Theme ☀️', 'info');
 }
 
 const VOID_TAGS = new Set(['input', 'img', 'br', 'hr']);
@@ -2835,12 +3159,6 @@ function renderElementToDOM(elem, origin, hasChildren) {
     div.style.top = `${y0}px`;
     div.style.width = `${w}px`;
     div.style.height = `${h}px`;
-    // A container must not open its own stacking context. With one, a descendant's
-    // z-index is confined to it: a card at z=2 holding a heading at z=8 loses the whole
-    // subtree to any sibling backdrop at z=3, and the photograph appears to swallow the
-    // text written on it. Removing the card made the text reappear, which is how this
-    // was found. The exporter already leaves containers on `z-index: auto`; the canvas
-    // has to agree with it or the two disagree about what the page looks like.
     if (!hasChildren) div.style.zIndex = elem.zIndex || 1;
     if (elem.opacity !== undefined && elem.opacity !== null && elem.opacity < 0.999) {
         div.style.opacity = elem.opacity;
@@ -2862,7 +3180,16 @@ function renderElementToDOM(elem, origin, hasChildren) {
         }
         if (b.borderRadius) div.style.borderRadius = b.borderRadius;
         if (b.boxShadow) div.style.boxShadow = b.boxShadow;
-        if (elem.role === 'button' || elem.role === 'badge') div.style.cursor = 'pointer';
+        if (elem.role === 'button' || elem.role === 'badge' || elem.role === 'switch') div.style.cursor = 'pointer';
+
+        if (elem.role === 'switch') {
+            div.classList.add('theme-switch-btn');
+            div.setAttribute('data-role', 'switch');
+            div.addEventListener('click', (e) => {
+                e.stopPropagation();
+                togglePageTheme(document.querySelector('.pdf-page'), div);
+            });
+        }
 
         if (elem.text !== null && elem.text !== undefined && elem.text !== '') {
             if (tag === 'input') {
@@ -3773,7 +4100,10 @@ const LIVE_PLACEHOLDER =
 function closeLiveBuild() {
     if (liveBuildSocket) { try { liveBuildSocket.close(); } catch (e) {} liveBuildSocket = null; }
     elements.liveBuild.hidden = true;
-    elements.liveBuildFrame.srcdoc = '';
+    if (latestBuiltHtml) {
+        state.enhancedHtml = latestBuiltHtml;
+        showBlendToggle();
+    }
     elements.liveBuildSource.textContent = '';
     elements.liveBuildSource.hidden = true;
     elements.liveBuildIssues.textContent = '';
@@ -3912,6 +4242,9 @@ async function buildFromScreenshot() {
         }
         if (msg.type === 'status') {
             elements.liveBuildStatus.textContent = msg.detail;
+        } else if (msg.type === 'score') {
+            elements.liveBuildStatus.textContent =
+                `Visual match: ${msg.score}% (target >= ${msg.target}%) · Round ${msg.round}/${msg.max_rounds}`;
         } else if (msg.type === 'chunk') {
             buffer += msg.text;
             elements.liveBuildSource.textContent = buffer;
@@ -3947,25 +4280,28 @@ async function buildFromScreenshot() {
             // A corrected page arrived; show it and keep going.
             finalHtml = msg.html;
             latestBuiltHtml = msg.html;
+            state.enhancedHtml = msg.html;
+            showBlendToggle();
+            if (elements.liveBuildBlend) elements.liveBuildBlend.disabled = false;
             elements.liveBuildFrame.srcdoc = finalHtml;
             elements.liveBuildOpen.disabled = false;
         } else if (msg.type === 'done') {
             finalHtml = msg.html;
             latestBuiltHtml = msg.html;
+            state.enhancedHtml = msg.html;
+            showBlendToggle();
+            if (elements.liveBuildBlend) elements.liveBuildBlend.disabled = false;
             elements.liveBuildFrame.srcdoc = finalHtml;
             elements.liveBuildOpen.disabled = false;
             elements.liveBuildDownload.disabled = false;
             elements.liveBuildCompare.disabled = false;
             elements.lbBuiltHead.textContent = 'Written from the screenshot';
             loadEngineReconstruction();
-            const lost = (msg.assets_missing || []).length;
             const checks = msg.verify_rounds || 0;
+            const scoreMsg = (msg.score !== undefined && msg.score !== null) ? ` · Match: ${msg.score}%` : '';
             elements.liveBuildStatus.textContent =
                 `done in ${((Date.now() - started) / 1000).toFixed(0)}s - ${msg.model}` +
-                (checks ? `, self-corrected ${checks}x` : '') + ', ' +
-                (lost ? `${lost} of ${msg.assets_total} `
-                        + (lost === 1 ? 'image is missing' : 'images are missing')
-                      : `all ${msg.assets_total} images in place`);
+                (checks ? `, refined ${checks}x` : '') + scoreMsg;
         } else if (msg.type === 'error') {
             elements.liveBuildStatus.textContent = 'failed';
             notify(msg.detail, 'error', { title: 'The page could not be built' });
@@ -3987,6 +4323,17 @@ async function buildFromScreenshot() {
 // toolbar that did nothing until a page had been generated in this particular visit,
 // and nothing again after the overlay was closed and reopened.
 function wireLiveBuildControls() {
+    if (elements.liveBuildBlend) {
+        elements.liveBuildBlend.onclick = () => {
+            if (!latestBuiltHtml) return;
+            state.enhancedHtml = latestBuiltHtml;
+            showBlendToggle();
+            switchViewMode('enhanced');
+            closeLiveBuild();
+            notify('Enhanced page opened in editor ✨', 'success');
+        };
+    }
+
     elements.liveBuildCompare.onclick = () => {
         const comparing = elements.liveBuildBody.classList.toggle('mode-compare');
         elements.liveBuildBody.classList.toggle('mode-building', !comparing);
