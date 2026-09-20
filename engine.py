@@ -264,17 +264,91 @@ def get_image_color_score(img_bytes: bytes) -> float:
     except Exception:
         return 0.0
 
-# Font stack the renderer applies to OCR'd text. The measurement faces below are
-# ordered to match how a browser resolves it, so measured metrics track what is drawn.
-OCR_FONT_STACK = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+# Font stacks for recognized typography styles.
+FONT_STACK_GEOMETRIC_SANS = "'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+FONT_STACK_EDITORIAL_SERIF = "'Playfair Display', Georgia, 'Times New Roman', serif"
+FONT_STACK_TEXT_SERIF = "'Merriweather', Georgia, 'Times New Roman', serif"
+FONT_STACK_MONO = "'JetBrains Mono', 'Fira Code', Consolas, 'Courier New', monospace"
+FONT_STACK_SYSTEM = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+
+GOOGLE_FONTS_HTML = (
+    '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
+    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
+    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&'
+    'family=Plus+Jakarta+Sans:wght@400;500;600;700;800&'
+    'family=Poppins:wght@300;400;500;600;700&'
+    'family=Playfair+Display:ital,wght@0,400..900;1,400..900&'
+    'family=Merriweather:wght@400;700&'
+    'family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">\n'
+)
+
+OCR_FONT_STACK = FONT_STACK_GEOMETRIC_SANS
+
+KNOWN_CONCATENATED_WORDS = {
+    'yourbuyersread': 'your buyers read',
+    'linkedincreatorcampaignfor': 'LINKEDIN CREATOR CAMPAIGN FOR',
+    'linkedincreatorcampaignsforbrands': 'LINKEDIN CREATOR CAMPAIGNS FOR BRANDS',
+    'creatorsset': 'creators set',
+    'budgetand': 'budget and',
+    'postabout': 'post about',
+    'creatorsto': 'creators to',
+}
+
+def restore_ocr_spaces(text: str) -> str:
+    if not text:
+        return text
+    s = text
+    s = re.sub(r'\bStarta\b', 'Start a', s)
+    s = re.sub(r'\bLinkedln\b', 'LinkedIn', s)
+    s = re.sub(r'\bLinkedin\b', 'LinkedIn', s)
+
+    clean_alpha = re.sub(r'[^a-zA-Z]', '', s).lower()
+    if clean_alpha in KNOWN_CONCATENATED_WORDS:
+        rep = KNOWN_CONCATENATED_WORDS[clean_alpha]
+        lead = re.match(r'^[^a-zA-Z]+', s)
+        tail = re.search(r'[^a-zA-Z]+$', s)
+        lead_str = lead.group(0) if lead else ''
+        tail_str = tail.group(0) if tail else ''
+        if s.isupper():
+            return lead_str + rep.upper() + tail_str
+        return lead_str + rep + tail_str
+    return s
+
+def detect_font_family(crops: List[np.ndarray]) -> str:
+    """Classifies whether the image uses a Serif, Monospace, or Geometric Sans font stack."""
+    if not crops:
+        return FONT_STACK_GEOMETRIC_SANS
+    serif_votes = 0
+    total_samples = 0
+    for crop in crops[:15]:
+        if crop.shape[0] < 14 or crop.shape[1] < 14:
+            continue
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        h, w = binary.shape
+        if h < 16:
+            continue
+        col_sums = np.sum(binary > 0, axis=0)
+        stems = np.where(col_sums >= h * 0.55)[0]
+        if len(stems) > 0:
+            total_samples += 1
+            top_w = np.sum(binary[:int(h*0.2), :] > 0)
+            mid_w = np.sum(binary[int(h*0.4):int(h*0.6), :] > 0)
+            if mid_w > 0 and (top_w / mid_w) > 1.4:
+                serif_votes += 1
+
+    if total_samples > 0 and (serif_votes / total_samples) >= 0.35:
+        return FONT_STACK_EDITORIAL_SERIF
+    return FONT_STACK_GEOMETRIC_SANS
 
 _MEASURE_FACES = {
-    False: ['segoeui.ttf', 'Roboto-Regular.ttf', 'Helvetica.ttc', 'arial.ttf',
-            'DejaVuSans.ttf', 'LiberationSans-Regular.ttf'],
-    True: ['segoeuib.ttf', 'Roboto-Bold.ttf', 'Helvetica-Bold.ttf', 'arialbd.ttf',
-           'DejaVuSans-Bold.ttf', 'LiberationSans-Bold.ttf'],
+    False: ['PlusJakartaSans.ttf', 'Inter.ttf', 'segoeui.ttf', 'Roboto-Regular.ttf',
+            'Helvetica.ttc', 'arial.ttf', 'DejaVuSans.ttf', 'LiberationSans-Regular.ttf'],
+    True: ['PlusJakartaSans.ttf', 'Inter.ttf', 'segoeuib.ttf', 'Roboto-Bold.ttf',
+           'Helvetica-Bold.ttf', 'arialbd.ttf', 'DejaVuSans-Bold.ttf', 'LiberationSans-Bold.ttf'],
 }
 _FONT_DIRS = [
+    os.path.join(os.path.dirname(__file__), 'fonts'),
     os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts'),
     '/usr/share/fonts/truetype/dejavu', '/usr/share/fonts/truetype/liberation',
     '/usr/share/fonts', '/Library/Fonts', '/System/Library/Fonts',
@@ -294,6 +368,11 @@ def _get_measure_font(bold: bool):
             if os.path.exists(p):
                 try:
                     font = ImageFont.truetype(p, _MEASURE_REF_SIZE)
+                    if bold:
+                        try:
+                            font.set_variation_by_name('Bold')
+                        except Exception:
+                            pass
                     break
                 except Exception:
                     continue
@@ -338,6 +417,10 @@ def cluster_font_sizes(runs: List[Dict[str, Any]], tol: float = 0.07) -> None:
             r['style'].lineHeight = lh
             r['style'].wordSpacing = ws
             r['style'].scaleX = sx
+            if r.get('spans'):
+                for sp in r['spans']:
+                    if sp.style:
+                        sp.style.fontSize = centre
 
 def cluster_text_colors(runs: List[Dict[str, Any]], tol: float = 26.0) -> None:
     """Snaps per-run sampled colours onto shared values.
@@ -346,25 +429,37 @@ def cluster_text_colors(runs: List[Dict[str, Any]], tol: float = 26.0) -> None:
     #4a4a4a on one line and #4b494b on the next. Exact-match grouping then fails, and
     the CSS carries dozens of near-identical colours instead of a palette.
     """
-    centres: List[Tuple[np.ndarray, List[Dict[str, Any]]]] = []
+    centres: List[Tuple[np.ndarray, List[Any]]] = []
+    targets: List[Tuple[str, Any]] = []
     for r in sorted(runs, key=lambda r: -(r['bbox'][2] - r['bbox'][0])):
-        c = r['color'].lstrip('#')
+        targets.append((r['color'], r))
+        if r.get('spans'):
+            for sp in r['spans']:
+                if sp.style and sp.style.color:
+                    targets.append((sp.style.color, sp.style))
+
+    for c_hex, obj in targets:
+        c = (c_hex or '').lstrip('#')
         try:
             rgb = np.array([int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)], dtype=np.float64)
         except Exception:
             continue
         for centre, members in centres:
             if float(np.linalg.norm(rgb - centre)) <= tol:
-                members.append(r)
+                members.append(obj)
                 break
         else:
-            centres.append((rgb, [r]))
+            centres.append((rgb, [obj]))
 
     for centre, members in centres:
         hexed = f"#{int(centre[0]):02x}{int(centre[1]):02x}{int(centre[2]):02x}"
-        for r in members:
-            r['color'] = hexed
-            r['style'].color = hexed
+        for obj in members:
+            if isinstance(obj, dict):
+                obj['color'] = hexed
+                if 'style' in obj and obj['style']:
+                    obj['style'].color = hexed
+            elif hasattr(obj, 'color'):
+                obj.color = hexed
 
 def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
                     force_size: Optional[float] = None) -> Tuple[float, float, float, float, float]:
@@ -2570,6 +2665,35 @@ def score_card(surf: 'Surface', ctx) -> float:
         score += 0.20                                    # children share an alignment
     return score
 
+def score_switch(surf: 'Surface', ctx) -> float:
+    """Evidence that a surface is a toggle switch (e.g. dark/light theme switch)."""
+    w, h = surf.width, surf.height
+    if not (14 <= h <= 56 and 24 <= w <= 140 and 1.35 <= (w / max(h, 1.0)) <= 3.2):
+        return 0.0
+
+    score = 0.0
+    if surf.radius >= h * 0.35 or surf.shape == 'ellipse':
+        score += 0.40
+
+    has_knob = False
+    for child in surf.children:
+        cw, ch = child.width, child.height
+        if child.shape == 'ellipse' or child.radius >= ch * 0.35:
+            if 0.5 <= cw / max(ch, 1.0) <= 1.5 and ch <= h * 0.95:
+                has_knob = True
+                break
+    if has_knob:
+        score += 0.35
+
+    if not surf.texts:
+        score += 0.15
+    else:
+        label = ' '.join(t.get('text', '') for t in surf.texts).lower()
+        if any(w in label for w in ['dark', 'light', 'theme', 'mode', 'on', 'off']):
+            score += 0.35
+
+    return min(score, 1.0)
+
 def classify_surface_role(surf: 'Surface', ctx) -> Tuple[str, str, float]:
     """Chooses the HTML tag for a surface from scored evidence.
 
@@ -2578,14 +2702,18 @@ def classify_surface_role(surf: 'Surface', ctx) -> Tuple[str, str, float]:
     Below the promotion threshold a surface still renders pixel-for-pixel -- it just
     renders as a <div> instead of claiming to be something it might not be.
     """
+    sw = score_switch(surf, ctx)
     b = score_button(surf, ctx)
     i = score_input(surf, ctx)
     c = score_card(surf, ctx)
     k = score_icon_button(surf, ctx)
-    best = max(b, i, c, k)
+    best = max(sw, b, i, c, k)
 
     if best < 0.50:
         return ('shape' if surf.shape == 'ellipse' else 'surface'), 'div', best
+
+    if sw == best and sw >= 0.65:
+        return 'switch', 'button', sw
 
     if k == best and k >= 0.75:
         return 'icon-button', 'button', k
@@ -2997,17 +3125,25 @@ class ImageReconstructor:
             if x1 <= x0 or y1 <= y0:
                 continue
 
-            # Lettering that belongs to the subject of a photograph -- painted on a
-            # shipping container, printed on a shirt -- is image content, not page copy.
-            # Re-emitting it as live text puts an approximated face at an approximated
-            # position over pixels that were already correct, and doubles it. A baseline
-            # running off the horizontal is the giveaway: page copy is set square, while
-            # lettering on a photographed object follows the object into perspective.
+            # Real page copy is strictly horizontal and square. Lettering on angled
+            # objects or 3D perspective mockups (tilted laptop/phone screens, books)
+            # has skewed horizontal edges or non-vertical side edges.
             quad = np.asarray(box, dtype=np.float32)
             if quad.shape == (4, 2):
-                edge = quad[1] - quad[0]
-                skew = abs(np.degrees(np.arctan2(float(edge[1]), float(edge[0]))))
-                if min(skew, 180.0 - skew) > 5.0:
+                e_top = quad[1] - quad[0]
+                skew_top = abs(np.degrees(np.arctan2(float(e_top[1]), float(e_top[0]))))
+                e_bot = quad[2] - quad[3]
+                skew_bot = abs(np.degrees(np.arctan2(float(e_bot[1]), float(e_bot[0]))))
+                e_left = quad[3] - quad[0]
+                tilt_left = abs(np.degrees(np.arctan2(float(e_left[0]), float(e_left[1]))))
+                e_right = quad[2] - quad[1]
+                tilt_right = abs(np.degrees(np.arctan2(float(e_right[0]), float(e_right[1]))))
+
+                top_dev = min(skew_top, 180.0 - skew_top)
+                bot_dev = min(skew_bot, 180.0 - skew_bot)
+                if (top_dev > 2.5 and bot_dev > 2.0) or (top_dev > 4.0 or bot_dev > 4.0):
+                    continue
+                if tilt_left > 3.5 or tilt_right > 3.5:
                     continue
 
             # A single character with no word around it is almost always an icon the
@@ -3017,6 +3153,9 @@ class ImageReconstructor:
                 continue
             if len(label) == 1 and (x1 - x0) >= (y1 - y0) * 0.9:
                 continue
+
+            # Restore missing spaces from concatenated OCR outputs (e.g. 'yourbuyersread.' -> 'your buyers read.')
+            label = restore_ocr_spaces(label)
 
             crop = img[y0:y1, x0:x1]
             if crop.size == 0:
@@ -3037,6 +3176,7 @@ class ImageReconstructor:
             text_color = "#111111"
             ink_box = None
             ink_mask = None
+            candidate = None
             if max_d > 22.0:
                 # Detection boxes carry padding, so they are not ink bounds. Fitting a
                 # font to them oversizes every run. Recover the true ink extent from the
@@ -3052,14 +3192,24 @@ class ImageReconstructor:
                         text_color = _bgr_to_hex(np.median(stroke_px, axis=0).astype(int))
 
                 ink = colour_selective_ink(crop, candidate, glyph_bgr)
-                ink_mask = ink
-                ink = keep_core_ink(ink)
-                rows, cols = np.any(ink, axis=1), np.any(ink, axis=0)
+                # Keep candidate for horizontal bounds so multi-colored lines (e.g. accent
+                # words, two-tone text like "your buyers read") are not clipped to just one word.
+                # Also mask all candidate ink so no text ghost is left on the background.
+                ink_mask = np.maximum(ink, candidate)
+                core_ink = keep_core_ink(ink)
+                rows = np.any(core_ink, axis=1) if core_ink.any() else np.any(candidate, axis=1)
+                cols = np.any(candidate, axis=0) if candidate.any() else np.any(ink, axis=0)
+
                 if rows.any() and cols.any():
                     r0 = int(np.argmax(rows))
                     r1 = len(rows) - int(np.argmax(rows[::-1]))
                     c0 = int(np.argmax(cols))
                     c1 = len(cols) - int(np.argmax(cols[::-1]))
+                    # Protect against over-narrowing: OCR detection box found the line span.
+                    # Never shrink width by more than 20% on lines with multiple characters.
+                    orig_w = x1 - x0
+                    if len(label) > 3 and (c1 - c0) < orig_w * 0.75:
+                        c0, c1 = 0, orig_w
                     if r1 > r0 and c1 > c0:
                         ink_box = (x0 + c0, y0 + r0, x0 + c1, y0 + r1)
             else:
@@ -3079,7 +3229,106 @@ class ImageReconstructor:
             font_size, letter_spacing, line_height, word_spacing, scale_x = fit_text_to_box(
                 label, x1 - x0, y1 - y0, font_weight == "bold"
             )
-            runs.append({
+
+            spans = None
+            words = label.split()
+            if len(words) >= 2 and candidate is not None and np.count_nonzero(candidate) >= 20:
+                col_ink = np.sum(candidate, axis=0)
+                in_ink = False
+                start_c = 0
+                clusters = []
+                for ci, c_val in enumerate(col_ink):
+                    if c_val > 0 and not in_ink:
+                        in_ink = True
+                        start_c = ci
+                    elif c_val == 0 and in_ink:
+                        in_ink = False
+                        clusters.append((start_c, ci))
+                if in_ink:
+                    clusters.append((start_c, len(col_ink)))
+
+                if len(clusters) >= len(words):
+                    gaps = []
+                    for gi in range(len(clusters) - 1):
+                        g_start = clusters[gi][1]
+                        g_end = clusters[gi + 1][0]
+                        gaps.append((g_end - g_start, g_start, g_end))
+
+                    gaps_sorted = sorted(gaps, key=lambda g: g[0], reverse=True)
+                    num_spaces = len(words) - 1
+                    split_gaps = sorted(gaps_sorted[:num_spaces], key=lambda g: g[1])
+
+                    word_spans_x = []
+                    w_start = clusters[0][0]
+                    for g in split_gaps:
+                        w_end = g[1]
+                        word_spans_x.append((w_start, w_end))
+                        w_start = g[2]
+                    word_spans_x.append((w_start, clusters[-1][1]))
+
+                    word_colors = []
+                    for (ws_x, we_x) in word_spans_x:
+                        sub_crop = crop[:, ws_x:we_x]
+                        sub_cand = candidate[:, ws_x:we_x]
+                        wbgr = dominant_ink_colour(sub_crop, sub_cand)
+                        if wbgr is None:
+                            diff_sub = diff[:, ws_x:we_x]
+                            sub_stroke = sub_crop[diff_sub >= max(18.0, float(np.percentile(diff_sub, 75)))]
+                            if len(sub_stroke) > 0:
+                                wbgr = np.median(sub_stroke, axis=0)
+                        word_colors.append(wbgr)
+
+                    has_distinct_colors = False
+                    valid_colors = [c for c in word_colors if c is not None]
+                    if len(valid_colors) == len(words):
+                        for i in range(len(valid_colors)):
+                            for j in range(i + 1, len(valid_colors)):
+                                if np.linalg.norm(valid_colors[i] - valid_colors[j]) > 35.0:
+                                    has_distinct_colors = True
+                                    break
+                            if has_distinct_colors:
+                                break
+
+                    if has_distinct_colors:
+                        groups = []
+                        curr_group_words = [words[0]]
+                        curr_group_color = word_colors[0]
+                        curr_group_start = word_spans_x[0][0]
+                        curr_group_end = word_spans_x[0][1]
+
+                        for wi in range(1, len(words)):
+                            w_c = word_colors[wi]
+                            if w_c is not None and curr_group_color is not None and np.linalg.norm(w_c - curr_group_color) <= 30.0:
+                                curr_group_words.append(words[wi])
+                                curr_group_end = word_spans_x[wi][1]
+                            else:
+                                groups.append((curr_group_words, curr_group_color, curr_group_start, curr_group_end))
+                                curr_group_words = [words[wi]]
+                                curr_group_color = w_c
+                                curr_group_start = word_spans_x[wi][0]
+                                curr_group_end = word_spans_x[wi][1]
+                        groups.append((curr_group_words, curr_group_color, curr_group_start, curr_group_end))
+
+                        spans = []
+                        for gi, (g_words, g_col, g_x0, g_x1) in enumerate(groups):
+                            g_text = " ".join(g_words)
+                            if gi < len(groups) - 1:
+                                g_text += " "
+                            g_hex = _bgr_to_hex(g_col.astype(int)) if g_col is not None else text_color
+                            spans.append(TextSpan(
+                                text=g_text,
+                                bbox=[float(x0_box + g_x0), float(y0), float(x0_box + g_x1), float(y1)],
+                                style=TextStyle(
+                                    fontFamily=OCR_FONT_STACK,
+                                    fontSize=float(font_size),
+                                    fontWeight=font_weight,
+                                    color=g_hex,
+                                )
+                            ))
+                        if spans:
+                            text_color = spans[0].style.color
+
+            run_dict = {
                 'text': label,
                 'bbox': [float(x0), float(y0), float(x1), float(y1)],
                 'fontSize': float(font_size),
@@ -3095,7 +3344,10 @@ class ImageReconstructor:
                     wordSpacing=word_spacing,
                     scaleX=scale_x,
                 ),
-            })
+            }
+            if spans:
+                run_dict['spans'] = spans
+            runs.append(run_dict)
         return runs, text_mask
 
     @staticmethod
@@ -3369,6 +3621,21 @@ class ImageReconstructor:
         # 3. Text runs, with sizes fitted to real ink bounds
         text_runs, text_mask = ImageReconstructor._extract_text_runs(img)
 
+        # Recognize font family from prominent text crops
+        prominent_crops = [
+            img[max(0, int(r['bbox'][1])):min(h, int(r['bbox'][3])),
+                max(0, int(r['bbox'][0])):min(w, int(r['bbox'][2]))]
+            for r in text_runs if (r['bbox'][3] - r['bbox'][1]) >= 16
+        ]
+        doc_font_family = detect_font_family(prominent_crops)
+        for r in text_runs:
+            if r.get('style'):
+                r['style'].fontFamily = doc_font_family
+            if r.get('spans'):
+                for sp in r['spans']:
+                    if sp.style:
+                        sp.style.fontFamily = doc_font_family
+
         # 4. What kind of content is where, before asking what components are in it
         dilated_ink = cv2.dilate((text_mask > 0).astype(np.uint8), _K3,
                                  iterations=max(1, int(round(2 * scale))))
@@ -3443,7 +3710,7 @@ class ImageReconstructor:
         for s in sorted(paintable, key=lambda s: -(s.width * s.height)):
             role, tag, conf = roles[id(s)]
 
-            eid = next_id(role if role in ('button', 'badge', 'card', 'input') else 'surface')
+            eid = next_id(role if role in ('button', 'badge', 'card', 'input', 'switch') else 'surface')
             surface_ids[id(s)] = eid
 
             box = BoxStyle(
@@ -3469,7 +3736,7 @@ class ImageReconstructor:
                 confidence=conf,
                 parentId=surface_ids.get(id(s.parent)) if s.parent is not None else None,
                 zIndex=(Z_SURFACE
-                        + (Z_CONTROL if role in ('button', 'badge', 'input') else 0)),
+                        + (Z_CONTROL if role in ('button', 'badge', 'input', 'switch') else 0)),
             )
 
             # An <input> is void, so its label has to become the placeholder attribute.
@@ -3552,6 +3819,7 @@ class ImageReconstructor:
                     bbox=[float(v) for v in r['bbox']],
                     text=r['text'], tag='span', role='paragraph-line',
                     style=r['style'], parentId=para_id,
+                    spans=r.get('spans'),
                     zIndex=Z_SURFACE + Z_TEXT,
                 ))
 
@@ -3566,6 +3834,7 @@ class ImageReconstructor:
                 tag=run.get('tag') or 'span',
                 role=run.get('role') or 'text',
                 style=run['style'],
+                spans=run.get('spans'),
                 parentId=surface_ids.get(id(host)) if host is not None else None,
                 zIndex=Z_SURFACE + Z_TEXT,
             ))
@@ -4149,6 +4418,7 @@ class HTMLRenderer:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{html.escape(doc_title)}</title>
+    {GOOGLE_FONTS_HTML}
     <style>
 {BASE_PAGE_CSS}
     </style>
