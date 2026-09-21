@@ -1753,7 +1753,8 @@ Start with `<!DOCTYPE html>`.
 """
 
 
-def build_generate_direct_prompt(texts: Optional[List[str]] = None) -> str:
+def build_generate_direct_prompt(texts: Optional[List[str]] = None,
+                                 asset_lines: Optional[List[str]] = None) -> str:
     texts_section = ""
     if texts:
         texts_section = (
@@ -1761,7 +1762,17 @@ def build_generate_direct_prompt(texts: Optional[List[str]] = None) -> str:
             + "\n".join("- " + t.replace("\n", " ") for t in texts[:120])
             + "\n\nUse these exact strings in the markup where they appear in the screenshot."
         )
-    return GENERATE_DIRECT_PROMPT % {"texts_section": texts_section}
+    assets_section = ""
+    if asset_lines:
+        assets_section = (
+            f"\n\nTHE IMAGES ({len(asset_lines)} picture(s) cropped from the screenshot):\n"
+            "Every photograph, illustration, and graphic in this design has already been extracted for you.\n"
+            "Use these markers as the `src` of an `<img>` tag (or inside CSS `background-image: url('RAMEN_ASSET_<n>')`):\n"
+            + "\n".join(asset_lines)
+            + "\n\nWrite each marker exactly (e.g., RAMEN_ASSET_0). It will be replaced automatically with the real cropped picture pixels.\n"
+            "Use these markers for all photographs/pictures in the layout so the page displays the real images. Never invent markers and never link to external image URLs or placehold.co."
+        )
+    return GENERATE_DIRECT_PROMPT % {"texts_section": texts_section + assets_section}
 
 
 CRITIQUE_DIRECT_PROMPT = """\
@@ -1798,6 +1809,7 @@ Fix these problems in the HTML and CSS so the page matches the target design scr
 - Include Google Fonts links/imports in <head> for any required fonts.
 - Reproduce all icons, logos, and visual elements accurately with inline SVG or CSS shapes.
 - Keep all visible text accurate and complete. Do not omit sections or replace content with comments.
+- Preserve all RAMEN_ASSET_<n> image markers in <img> src or CSS background-image so real pictures stay in the page.
 - Ensure exact colors, backgrounds, borders, shadows, and spacing.
 
 Return the complete updated document and nothing else. No explanation, no markdown fences.
@@ -1986,6 +1998,61 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
 VERIFY_ROUNDS = 5
 
 
+def extract_document_assets(doc) -> Tuple[List[str], Dict[int, str]]:
+    """Collects raster image assets from the document's pages, cropping from
+    originalImageSrc if necessary, and filtering out tiny antialiasing fragments.
+    Returns (assets, asset_roles_map).
+    """
+    assets: List[str] = []
+    index: Dict[str, int] = {}
+    roles: Dict[int, str] = {}
+
+    for page in (getattr(doc, "pages", None) or []):
+        orig_shot = as_inline_image(getattr(page, "originalImageSrc", None))
+        for e in (getattr(page, "elements", None) or []):
+            if e.type == "image":
+                uri = getattr(e, "src", None)
+                if not uri and orig_shot and getattr(e, "bbox", None):
+                    try:
+                        from PIL import Image
+                        raw_shot = base64.b64decode(orig_shot[1])
+                        img = Image.open(io.BytesIO(raw_shot))
+                        bx0, by0, bx1, by1 = [int(round(v)) for v in e.bbox]
+                        bx0, by0 = max(0, bx0), max(0, by0)
+                        bx1, by1 = min(img.width, bx1), min(img.height, by1)
+                        if (bx1 - bx0) >= ASSET_MIN_SIDE and (by1 - by0) >= ASSET_MIN_SIDE:
+                            cropped = img.crop((bx0, by0, bx1, by1))
+                            buf = io.BytesIO()
+                            cropped.save(buf, format="PNG")
+                            uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+                    except Exception:
+                        pass
+                if uri and uri.startswith("data:image"):
+                    norm_uri = "".join(uri.split())
+                    if norm_uri not in index:
+                        idx = len(assets)
+                        index[norm_uri] = idx
+                        assets.append(norm_uri)
+                        if getattr(e, "role", None):
+                            roles[idx] = e.role
+
+    filtered_assets: List[str] = []
+    filtered_roles: Dict[int, str] = {}
+    dims = _asset_dims(assets)
+    for i, uri in enumerate(assets):
+        d = dims[i]
+        if d is not None:
+            aw, ah = d
+            if min(aw, ah) < ASSET_MIN_SIDE or (aw * ah) < ASSET_MIN_AREA:
+                continue
+        idx = len(filtered_assets)
+        filtered_assets.append(uri)
+        if i in roles:
+            filtered_roles[idx] = roles[i]
+
+    return filtered_assets, filtered_roles
+
+
 def generate_from_document(doc, api_key: Optional[str] = None,
                            model: Optional[str] = None, timeout: int = 600,
                            verify: int = VERIFY_ROUNDS,
@@ -2012,8 +2079,10 @@ def generate_from_document(doc, api_key: Optional[str] = None,
     w, h = _shot_dims(shot)
     flat = flatten_document(doc)
     texts = page_texts(flat)
+    assets, asset_roles_map = extract_document_assets(flat)
+    asset_lines = describe_assets(assets, roles=asset_roles_map)
 
-    prompt = build_generate_direct_prompt(texts)
+    prompt = build_generate_direct_prompt(texts, asset_lines)
 
     yield "status", ("Sending the screenshot to generate complete semantic HTML and CSS...")
 
@@ -2061,7 +2130,8 @@ def generate_from_document(doc, api_key: Optional[str] = None,
     for attempt in range(1, max(1, verify) + 1):
         yield "status", "Rendering your page in browser (check %d of %d)..." % (
             attempt, max(1, verify))
-        render = render_html(raw, width=w, height=h)
+        page_to_render, _ = restore_assets(raw, assets)
+        render = render_html(page_to_render, width=w, height=h)
         if not render:
             yield "status", "No headless browser available, so skipping visual fidelity checks."
             break
@@ -2126,7 +2196,8 @@ def generate_from_document(doc, api_key: Optional[str] = None,
             yield "status", "Nothing came back to apply from check %d. Retrying..." % attempt
             continue
 
-        test_render = render_html(fixed, width=w, height=h)
+        test_page, _ = restore_assets(fixed, assets)
+        test_render = render_html(test_page, width=w, height=h)
         if test_render:
             new_score = calculate_ssim_score(shot, test_render)
             yield "status", "Check %d revision evaluated: %.1f%% (previous: %.1f%%)." % (
@@ -2137,7 +2208,8 @@ def generate_from_document(doc, api_key: Optional[str] = None,
                 if score > best_score:
                     best_score = score
                     best_html = raw
-                yield "revision", {"html": raw}
+                rev_html, _ = restore_assets(raw, assets)
+                yield "revision", {"html": rev_html}
                 yield "score", {
                     "score": round(score, 1),
                     "target": target_score,
@@ -2154,11 +2226,12 @@ def generate_from_document(doc, api_key: Optional[str] = None,
                     new_score, score)
         else:
             raw = fixed
-            yield "revision", {"html": raw}
+            rev_html, _ = restore_assets(raw, assets)
+            yield "revision", {"html": rev_html}
 
         rounds_done += 1
 
-    final_html = best_html
+    final_html, missing = restore_assets(best_html, assets)
     yield "done", {
         "html": final_html,
         "model": _LAST_MODEL[0] or model or DEFAULT_MODEL,
@@ -2166,6 +2239,8 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         "score": round(best_score, 1),
         "target": target_score,
         "issues": all_issues,
+        "assets_total": len(assets),
+        "assets_missing": missing,
         "chars": len(final_html),
     }
 
