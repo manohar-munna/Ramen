@@ -617,6 +617,7 @@ html, body {
 .canvas-viewport {
     flex: 1;
     min-width: 0;
+    min-height: 0;
     background-color: var(--bg-viewport);
     overflow: auto;
     position: relative;
@@ -1872,18 +1873,34 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
     .snackbar, .snackbar.leaving { animation: none; }
 }
-/* Enhance Top Progress Bar in Editor */
+/* Center Workspace Area */
+.workspace-center {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    position: relative;
+    overflow: hidden;
+}
+
+/* Enhance Top Progress Bar in Editor (Fixed Header) */
 .enhance-progress-bar {
-    position: sticky;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 80;
+    position: relative;
+    width: 100%;
+    flex-shrink: 0;
+    z-index: 40;
     background: var(--bg-chrome);
     border-bottom: 1px solid var(--border-subtle);
     box-shadow: var(--shadow-sm);
     padding: 10px 18px;
+    box-sizing: border-box;
     animation: slideDown 0.2s ease-out;
+    transition: padding-right var(--dur-slow) var(--ease);
+}
+.enhance-progress-bar.with-panel {
+    padding-right: 320px;
 }
 @keyframes slideDown {
     from { opacity: 0; transform: translateY(-8px); }
@@ -2167,9 +2184,9 @@ html, body {
             </div>
         </aside>
 
-        <!-- Center Workspace Canvas -->
-        <main class="canvas-viewport" id="canvas-viewport">
-            <!-- Top Enhance Progress Bar (shows operation, details, match score, and live fixes) -->
+        <!-- Center Workspace Area -->
+        <div class="workspace-center">
+            <!-- Top Enhance Progress Bar (Fixed Header) -->
             <div id="enhance-progress-bar" class="enhance-progress-bar" style="display: none;">
                 <div class="epb-main">
                     <div class="epb-status-line">
@@ -2191,56 +2208,59 @@ html, body {
                 </div>
             </div>
 
-            <!-- The box that takes up the room. A transform does not change layout, so
-                 the page's own element is still full size however far it is scaled;
-                 this one is set to the scaled size, which is what the scrollbars and
-                 the centring need to know about. -->
-            <div class="canvas-fit" id="canvas-fit">
-            <div class="canvas-wrapper" id="canvas-wrapper">
-                
-                <!-- Initial Dropzone / Welcome state -->
-                <div id="empty-state" class="empty-state">
-                    <div class="empty-icon-circle">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                            <polyline points="14 2 14 8 20 8"></polyline>
-                        </svg>
+            <!-- Center Workspace Canvas Viewport -->
+            <main class="canvas-viewport" id="canvas-viewport">
+                <!-- The box that takes up the room. A transform does not change layout, so
+                     the page's own element is still full size however far it is scaled;
+                     this one is set to the scaled size, which is what the scrollbars and
+                     the centring need to know about. -->
+                <div class="canvas-fit" id="canvas-fit">
+                <div class="canvas-wrapper" id="canvas-wrapper">
+                    
+                    <!-- Initial Dropzone / Welcome state -->
+                    <div id="empty-state" class="empty-state">
+                        <div class="empty-icon-circle">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                <polyline points="14 2 14 8 20 8"></polyline>
+                            </svg>
+                        </div>
+                        <h3>Open a PDF or Image to Reconstruct</h3>
+                        <p>Converts PDFs and images (JPG, PNG, WebP) into pixel-perfect, editable HTML without LLMs/VLMs.</p>
+                        <div class="empty-actions">
+                            <button id="btn-welcome-open" class="btn btn-primary">Select PDF or Image</button>
+                            <button id="btn-load-sample-digital" class="btn btn-outline">Load Sample Report</button>
+                        </div>
                     </div>
-                    <h3>Open a PDF or Image to Reconstruct</h3>
-                    <p>Converts PDFs and images (JPG, PNG, WebP) into pixel-perfect, editable HTML without LLMs/VLMs.</p>
-                    <div class="empty-actions">
-                        <button id="btn-welcome-open" class="btn btn-primary">Select PDF or Image</button>
-                        <button id="btn-load-sample-digital" class="btn btn-outline">Load Sample Report</button>
+
+                    <!-- Page Container (Rendered PDF Pages) -->
+                    <div id="document-stage" class="document-stage" style="display: none;">
+                        <!-- Pages will be rendered here dynamically -->
                     </div>
-                </div>
 
-                <!-- Page Container (Rendered PDF Pages) -->
-                <div id="document-stage" class="document-stage" style="display: none;">
-                    <!-- Pages will be rendered here dynamically -->
-                </div>
+                    <!-- DevTools-style element inspector overlay -->
+                    <div id="inspect-layer" aria-hidden="true">
+                        <div id="inspect-box"></div>
+                        <div id="inspect-tip"></div>
+                    </div>
 
-                <!-- DevTools-style element inspector overlay -->
-                <div id="inspect-layer" aria-hidden="true">
-                    <div id="inspect-box"></div>
-                    <div id="inspect-tip"></div>
-                </div>
+                    <!-- Interactive Selection & Transform Gizmo -->
+                    <div id="selection-box" class="selection-box">
+                        <div class="resize-handle n" data-handle="n"></div>
+                        <div class="resize-handle s" data-handle="s"></div>
+                        <div class="resize-handle e" data-handle="e"></div>
+                        <div class="resize-handle w" data-handle="w"></div>
+                        <div class="resize-handle nw" data-handle="nw"></div>
+                        <div class="resize-handle ne" data-handle="ne"></div>
+                        <div class="resize-handle sw" data-handle="sw"></div>
+                        <div class="resize-handle se" data-handle="se"></div>
+                        <div class="selection-label" id="selection-label">Text</div>
+                    </div>
 
-                <!-- Interactive Selection & Transform Gizmo -->
-                <div id="selection-box" class="selection-box">
-                    <div class="resize-handle n" data-handle="n"></div>
-                    <div class="resize-handle s" data-handle="s"></div>
-                    <div class="resize-handle e" data-handle="e"></div>
-                    <div class="resize-handle w" data-handle="w"></div>
-                    <div class="resize-handle nw" data-handle="nw"></div>
-                    <div class="resize-handle ne" data-handle="ne"></div>
-                    <div class="resize-handle sw" data-handle="sw"></div>
-                    <div class="resize-handle se" data-handle="se"></div>
-                    <div class="selection-label" id="selection-label">Text</div>
                 </div>
-
-            </div>
-            </div>
-        </main>
+                </div>
+            </main>
+        </div>
 
         <!-- Right Contextual Properties Panel (Only visible when an element is selected) -->
         <aside id="properties-panel" class="sidebar-properties" aria-hidden="true">
@@ -3447,6 +3467,9 @@ function setPanelRoom(open) {
     const vp = elements.canvasViewport;
     if (vp.classList.contains('with-panel') === open) return;
     vp.classList.toggle('with-panel', open);
+    if (elements.enhanceProgressBar) {
+        elements.enhanceProgressBar.classList.toggle('with-panel', open);
+    }
     if (state.zoomIsFitted) zoomToFit();
 }
 
