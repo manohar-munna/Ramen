@@ -148,6 +148,12 @@ _ROLE_RE = re.compile(r'data-role="([^"]+)"')
 _ROLE_NOTES = {
     "backdrop": "photograph or gradient, kept as pixels",
     "artwork": "small graphic or icon",
+    "illustration": "graphic or 3D illustration crop from screenshot",
+    "logo": "logo or brand mark crop from screenshot",
+    "icon": "icon crop from screenshot",
+    "vector": "vector graphic / shape crop from screenshot",
+    "graphic": "graphic element crop from screenshot",
+    "full_screenshot": "full original page screenshot / background reference",
 }
 
 
@@ -1583,7 +1589,7 @@ You are an expert front-end developer. You are given a screenshot of a web page 
 write a single self-contained HTML file that looks exactly like it.
 
 - Match the screenshot closely: background colours, text colour, font size and weight,
-  spacing, alignment, borders, radii, shadows.
+  spacing, alignment, borders, radii, shadows. Target >= 95% pixel-level visual match.
 - Write the FULL code. Never write a comment in place of content -- no "<!-- repeat for
   each item -->", no "<!-- other nav links here -->". If the screenshot shows nine cards,
   write nine cards.
@@ -1594,6 +1600,16 @@ write a single self-contained HTML file that looks exactly like it.
 - Put all CSS in one <style> block in the head. Use CSS custom properties for the
   palette. Plain CSS, no framework, no CDN, no external requests of any kind.
 
+CRITICAL: USE SCREENSHOT PNGS / CROPPED IMAGES WHERE HTML GENERATION IS NOT POSSIBLE
+Where generating faithful HTML/CSS is not possible or difficult (such as complex 3D
+artwork, intricate container graphics, specialized triangular/geometric logos, complex
+illustrations, or photorealistic visuals):
+DO NOT attempt an inaccurate or distorted CSS approximation! Instead, use the provided
+cropped images and screenshot PNG markers (`RAMEN_ASSET_<n>`) directly (via `<img>` or
+CSS `background-image: url(RAMEN_ASSET_<n>)`)!
+Use the cropped images and original screenshot assets wherever pure HTML/CSS cannot
+achieve 95%+ exact visual match.
+
 THE TEXT
 Use these strings, exactly as written, for the page's text. They were measured from the
 screenshot, so they are more reliable than reading the picture -- including where a word
@@ -1603,11 +1619,12 @@ cut off. Do not correct, translate, complete or invent any of them.
 %(texts)s
 
 THE IMAGES
-Every picture in this page has already been extracted for you. Use these markers as the
-`src` of an `<img>` -- write the marker exactly, it is replaced with the real image
-afterwards. Each line gives the marker, the size it was in the original, its main
-colours, and what kind of thing it is. Use all %(n_assets)d of them, and do not invent
-any others or link to any external image.
+Every picture, logo, vector graphic, and cropped visual from the page has been extracted
+for you. Use these markers as the `src` of an `<img>` or in CSS `background-image: url(...)`
+-- write the marker exactly, it is replaced with the real image afterwards. Each line gives
+the marker, the size it was in the original, its main colours, and what kind of thing it is.
+Use all relevant assets, especially where pure HTML cannot reproduce the visual accurately.
+Do not invent any markers or link to any external image.
 
 %(assets)s
 
@@ -1671,33 +1688,35 @@ def build_generate_prompt(texts: List[str], asset_lines: List[str]) -> str:
 CRITIQUE_PROMPT = """\
 Two screenshots are attached:
 
-1. THE TARGET -- the design that was being reproduced.
+1. THE TARGET -- the original design to reproduce.
 2. THE ATTEMPT -- a page built from it, rendered in a browser just now.
 
-List what is wrong with the attempt. One short line each, most serious first. Look for
-sections in the wrong order or overlapping, blocks that should be side by side and are
-stacked (or the reverse), spacing and alignment that do not match, type far too large
-or too small, images at the wrong size or in the wrong place, and anything in the target
-that is missing from the attempt.
+Current visual match accuracy is %(score).1f%%. The required target is >= %(target).1f%%.
+List what is wrong with the attempt to reach 95%+ visual match. One short line each, most serious first.
 
-Judge only what could be fixed in the markup. Ignore differences in the content of a
-photograph, and ignore text that looks truncated -- those words are genuinely cut off in
-the design.
+Critique checklist:
+- Typography: Check heading font family (geometric sans-serif), weights (bold/heavy), sizes, line-heights, letter-spacing.
+- Layout & Spacing: Check exact alignments, margins, paddings, column positions, button placements.
+- Colors & Styling: Check exact background colors, button colors, borders, shadows.
+- Graphics & Artwork: If complex container graphics, 3D artwork, logos, or illustrations in the attempt do not match the target, instruct the model to use the cropped screenshot PNGs / image markers (`RAMEN_ASSET_<n>`) instead of crude CSS shapes!
+- Any missing sections, headings, subtexts, or elements from the target.
 
-Reply with the lines and nothing else, each starting with "- ". If the attempt is already
-close, reply with the single line "- nothing worth changing".
+Reply with the lines and nothing else, each starting with "- ". Be demanding and thorough to help reach 95%+ match.
 """
 
 
 FIX_PROMPT = """\
-Here is an HTML document and a list of problems someone found by comparing its rendering
-against the design it came from.
+Here is an HTML document and a list of problems found by comparing its rendering
+against the original target design. The target is >= 95%% visual match.
 
-PROBLEMS
+PROBLEMS TO FIX:
 %(issues)s
 
-Fix those problems and return the corrected document. Change nothing else.
+Fix all of those problems and return the corrected document to reach 95%%+ visual match.
 
+- Where generating exact HTML/CSS for graphics, logos, 3D artwork, or container visuals is
+  difficult or failing to match the target, USE the cropped image / screenshot PNG markers
+  (`RAMEN_ASSET_<n>`) directly (via `<img>` or `background-image: url(RAMEN_ASSET_<n>)`)!
 - Every piece of visible text stays exactly as it is. Do not reword, translate, correct
   spelling or add text -- including words that look truncated, which are genuinely cut
   off in the design.
@@ -1713,17 +1732,17 @@ Start with `<!DOCTYPE html>`.
 """
 
 
-def build_critique_prompt() -> str:
-    return CRITIQUE_PROMPT
+def build_critique_prompt(score: float = 0.0, target_score: float = TARGET_ACCURACY_SCORE) -> str:
+    return CRITIQUE_PROMPT % {"score": score, "target": target_score}
 
 
 def build_fix_prompt(current: str, issues: List[str], n_assets: int) -> str:
     unused = missing_markers(current, n_assets)
     if unused:
-        note = ("Markers %s are not used anywhere, so those pictures are invisible: "
-                "place them where they belong." % ", ".join(str(i) for i in unused[:12]))
+        note = ("Markers %s are available: use them where HTML/CSS cannot match the visual design."
+                % ", ".join(str(i) for i in unused[:12]))
     else:
-        note = "All of them are in use; keep it that way."
+        note = "All markers are in use; keep them."
     return FIX_PROMPT % {
         "issues": "\n".join("- " + i for i in issues) or "- layout does not match",
         "html": current,
@@ -1898,12 +1917,14 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
 
 # How many times to render the finished page, show it to the model beside the original,
 # and let it correct itself.
-VERIFY_ROUNDS = 5
+VERIFY_ROUNDS = 10
 
 
 def extract_document_assets(doc) -> Tuple[List[str], Dict[int, str]]:
-    """Collects raster image assets from the document's pages, cropping from
-    originalImageSrc if necessary, and filtering out tiny antialiasing fragments.
+    """Collects raster image assets, vector graphic crops, logos, and artwork from
+    the document's pages, cropping from originalImageSrc if necessary. Also provides
+    the full original screenshot as an asset so the model can use it where pure HTML
+    generation is not possible.
     Returns (assets, asset_roles_map).
     """
     assets: List[str] = []
@@ -1912,8 +1933,22 @@ def extract_document_assets(doc) -> Tuple[List[str], Dict[int, str]]:
 
     for page in (getattr(doc, "pages", None) or []):
         orig_shot = as_inline_image(getattr(page, "originalImageSrc", None))
+        
+        # Include full original screenshot as an asset for fallback background / reference
+        if orig_shot:
+            full_uri = "data:%s;base64,%s" % (orig_shot[0], orig_shot[1])
+            if full_uri not in index:
+                idx = len(assets)
+                index[full_uri] = idx
+                assets.append(full_uri)
+                roles[idx] = "full_screenshot"
+
         for e in (getattr(page, "elements", None) or []):
-            if e.type == "image":
+            is_graphic = (
+                e.type in ("image", "vector")
+                or getattr(e, "role", "") in ("artwork", "illustration", "graphic", "logo", "icon", "backdrop", "figure", "badge")
+            )
+            if is_graphic:
                 uri = getattr(e, "src", None)
                 if not uri and orig_shot and getattr(e, "bbox", None):
                     try:
@@ -1936,8 +1971,8 @@ def extract_document_assets(doc) -> Tuple[List[str], Dict[int, str]]:
                         idx = len(assets)
                         index[norm_uri] = idx
                         assets.append(norm_uri)
-                        if getattr(e, "role", None):
-                            roles[idx] = e.role
+                        role = getattr(e, "role", None) or getattr(e, "type", "artwork")
+                        roles[idx] = role
 
     filtered_assets: List[str] = []
     filtered_roles: Dict[int, str] = {}
@@ -2067,7 +2102,7 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         yield "status", "Comparing rendered attempt with the target screenshot..."
         try:
             critique = call_gemini(
-                build_critique_prompt(),
+                build_critique_prompt(score=score, target_score=target_score),
                 api_key=api_key, model=model, timeout=timeout,
                 images=[shot, render])
         except EnhancementError as e:
@@ -2081,8 +2116,18 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         all_issues.extend(issues)
 
         unused = missing_markers(raw, len(assets))
-        if not issues and not unused:
-            yield "status", "Check %d found nothing worth changing." % attempt
+        if not issues and score < target_score:
+            issues = [
+                f"Visual fidelity is currently {score:.1f}%, which is below the required {target_score:.1f}% target.",
+                "Review heading typography: ensure geometric sans-serif fonts, heavy weights, sizes, and letter-spacing match the target screenshot exactly.",
+                "Review layout alignment, margins, container colors, and button positioning to match the target screenshot.",
+                "For complex graphics, container artwork, 3D elements, or logos, use the cropped screenshot images (RAMEN_ASSET_<n>) instead of CSS approximations."
+            ]
+            for issue in issues:
+                yield "issue", issue
+            all_issues.extend(issues)
+        elif not issues and not unused and score >= target_score:
+            yield "status", "Target visual match achieved (%.1f%% >= %.1f%%)!" % (score, target_score)
             break
 
         yield "status", "Applying %d fix(es)%s..." % (
