@@ -180,18 +180,9 @@ def asset_roles(html: str, assets: List[str]) -> Dict[int, str]:
 
 
 def describe_assets(assets: List[str], max_colours: int = 3,
-                    roles: Optional[Dict[int, str]] = None) -> List[str]:
-    """One line per held-back image: its size and the colours in it.
-
-    Stripping the images also strips the page's colour identity, which is a problem
-    nobody notices until the result comes back grey. On the logistics page the red is
-    entirely in the photographs of the containers; every flat surface really is a grey or
-    a near-white, so a model shown only the skeleton has no way to know the page is red,
-    and duly picks a palette of #1a1a1a and #888888.
-
-    Sending a few dominant colours and the dimensions costs a couple of dozen tokens and
-    gives back both the palette and enough shape information to size the image sensibly.
-    """
+                    roles: Optional[Dict[int, str]] = None,
+                    boxes: Optional[Dict[int, Tuple[int, int, int, int]]] = None) -> List[str]:
+    """One line per held-back image: its size, colours, and position."""
     try:
         from PIL import Image
     except ImportError:
@@ -222,7 +213,11 @@ def describe_assets(assets: List[str], max_colours: int = 3,
                 r, g, b = pal[idx * 3:idx * 3 + 3]
                 names.append("#%02x%02x%02x" % (r, g, b))
             note = _ROLE_NOTES.get((roles or {}).get(i, ""), "")
-            lines.append(f"{_PLACEHOLDER % i}  {w}x{h}  {' '.join(names)}"
+            loc = ""
+            if boxes and i in boxes:
+                bx0, by0, bx1, by1 = boxes[i]
+                loc = f"  at (x={bx0}, y={by0})"
+            lines.append(f"{_PLACEHOLDER % i}  {w}x{h}  {' '.join(names)}{loc}"
                          + (f"  -- {note}" if note else ""))
         except Exception:
             lines.append(f"{_PLACEHOLDER % i}  (unreadable)")
@@ -1589,7 +1584,7 @@ You are an expert front-end developer. You are given a screenshot of a web page 
 write a single self-contained HTML file that looks exactly like it.
 
 - Match the screenshot closely: background colours, text colour, font size and weight,
-  spacing, alignment, borders, radii, shadows. Target >= 95%% pixel-level visual match.
+  spacing, alignment, borders, radii, shadows.
 - Write the FULL code. Never write a comment in place of content -- no "<!-- repeat for
   each item -->", no "<!-- other nav links here -->". If the screenshot shows nine cards,
   write nine cards.
@@ -1600,16 +1595,6 @@ write a single self-contained HTML file that looks exactly like it.
 - Put all CSS in one <style> block in the head. Use CSS custom properties for the
   palette. Plain CSS, no framework, no CDN, no external requests of any kind.
 
-CRITICAL: USE SCREENSHOT PNGS / CROPPED IMAGES WHERE HTML GENERATION IS NOT POSSIBLE
-Where generating faithful HTML/CSS is not possible or difficult (such as complex 3D
-artwork, intricate container graphics, specialized triangular/geometric logos, complex
-illustrations, or photorealistic visuals):
-DO NOT attempt an inaccurate or distorted CSS approximation! Instead, use the provided
-cropped images and screenshot PNG markers (`RAMEN_ASSET_<n>`) directly (via `<img>` or
-CSS `background-image: url(RAMEN_ASSET_<n>)`)!
-Use the cropped images and original screenshot assets wherever pure HTML/CSS cannot
-achieve 95%%+ exact visual match.
-
 THE TEXT
 Use these strings, exactly as written, for the page's text. They were measured from the
 screenshot, so they are more reliable than reading the picture -- including where a word
@@ -1619,12 +1604,11 @@ cut off. Do not correct, translate, complete or invent any of them.
 %(texts)s
 
 THE IMAGES
-Every picture, logo, vector graphic, and cropped visual from the page has been extracted
-for you. Use these markers as the `src` of an `<img>` or in CSS `background-image: url(...)`
--- write the marker exactly, it is replaced with the real image afterwards. Each line gives
-the marker, the size it was in the original, its main colours, and what kind of thing it is.
-Use all relevant assets, especially where pure HTML cannot reproduce the visual accurately.
-Do not invent any markers or link to any external image.
+Every picture in this page has already been extracted for you. Use these markers as the
+`src` of an `<img>` -- write the marker exactly, it is replaced with the real image
+afterwards. Each line gives the marker, the size it was in the original, its main
+colours, and what kind of thing it is. Use all %(n_assets)d of them, and do not invent
+any others or link to any external image.
 
 %(assets)s
 
@@ -1688,35 +1672,33 @@ def build_generate_prompt(texts: List[str], asset_lines: List[str]) -> str:
 CRITIQUE_PROMPT = """\
 Two screenshots are attached:
 
-1. THE TARGET -- the original design to reproduce.
+1. THE TARGET -- the design that was being reproduced.
 2. THE ATTEMPT -- a page built from it, rendered in a browser just now.
 
-Current visual match accuracy is %(score).1f%%. The required target is >= %(target).1f%%.
-List what is wrong with the attempt to reach 95%%+ visual match. One short line each, most serious first.
+List what is wrong with the attempt. One short line each, at most six, most serious
+first. Look for sections in the wrong order or overlapping, blocks that should be side
+by side and are stacked (or the reverse), spacing and alignment that do not match, type
+far too large or too small, images at the wrong size or in the wrong place, and anything
+in the target that is missing from the attempt.
 
-Critique checklist:
-- Typography: Check heading font family (geometric sans-serif), weights (bold/heavy), sizes, line-heights, letter-spacing.
-- Layout & Spacing: Check exact alignments, margins, paddings, column positions, button placements.
-- Colors & Styling: Check exact background colors, button colors, borders, shadows.
-- Graphics & Artwork: If complex container graphics, 3D artwork, logos, or illustrations in the attempt do not match the target, instruct the model to use the cropped screenshot PNGs / image markers (`RAMEN_ASSET_<n>`) instead of crude CSS shapes!
-- Any missing sections, headings, subtexts, or elements from the target.
+Judge only what could be fixed in the markup. Ignore differences in the content of a
+photograph, and ignore text that looks truncated -- those words are genuinely cut off in
+the design.
 
-Reply with the lines and nothing else, each starting with "- ". Be demanding and thorough to help reach 95%%+ match.
+Reply with the lines and nothing else, each starting with "- ". If the attempt is already
+close, reply with the single line "- nothing worth changing".
 """
 
 
 FIX_PROMPT = """\
-Here is an HTML document and a list of problems found by comparing its rendering
-against the original target design. The target is >= 95%% visual match.
+Here is an HTML document and a list of problems someone found by comparing its rendering
+against the design it came from.
 
-PROBLEMS TO FIX:
+PROBLEMS
 %(issues)s
 
-Fix all of those problems and return the corrected document to reach 95%%+ visual match.
+Fix those problems and return the corrected document. Change nothing else.
 
-- Where generating exact HTML/CSS for graphics, logos, 3D artwork, or container visuals is
-  difficult or failing to match the target, USE the cropped image / screenshot PNG markers
-  (`RAMEN_ASSET_<n>`) directly (via `<img>` or `background-image: url(RAMEN_ASSET_<n>)`)!
 - Every piece of visible text stays exactly as it is. Do not reword, translate, correct
   spelling or add text -- including words that look truncated, which are genuinely cut
   off in the design.
@@ -1732,25 +1714,23 @@ Start with `<!DOCTYPE html>`.
 """
 
 
-def build_critique_prompt(score: float = 0.0, target_score: float = TARGET_ACCURACY_SCORE) -> str:
-    return CRITIQUE_PROMPT % {"score": score, "target": target_score}
+def build_critique_prompt() -> str:
+    return CRITIQUE_PROMPT
 
 
 def build_fix_prompt(current: str, issues: List[str], n_assets: int) -> str:
     unused = missing_markers(current, n_assets)
     if unused:
-        note = ("Markers %s are available: use them where HTML/CSS cannot match the visual design."
-                % ", ".join(str(i) for i in unused[:12]))
+        note = ("Markers %s are not used anywhere, so those pictures are invisible: "
+                "place them where they belong." % ", ".join(str(i) for i in unused[:12]))
     else:
-        note = "All markers are in use; keep them."
+        note = "All of them are in use; keep it that way."
     return FIX_PROMPT % {
         "issues": "\n".join("- " + i for i in issues) or "- layout does not match",
         "html": current,
         "max_asset": max(n_assets - 1, 0),
         "unused_note": note,
     }
-
-
 
 
 def parse_critique(reply: str) -> List[str]:
@@ -1764,7 +1744,7 @@ def parse_critique(reply: str) -> List[str]:
         if not text or text.lower().startswith("nothing worth changing"):
             continue
         out.append(text)
-    return out
+    return out[:6]
 
 
 def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
@@ -1916,88 +1896,15 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
 
 
 # How many times to render the finished page, show it to the model beside the original,
-# and let it correct itself.
-VERIFY_ROUNDS = 10
-
-
-def extract_document_assets(doc) -> Tuple[List[str], Dict[int, str]]:
-    """Collects raster image assets, vector graphic crops, logos, and artwork from
-    the document's pages, cropping from originalImageSrc if necessary. Also provides
-    the full original screenshot as an asset so the model can use it where pure HTML
-    generation is not possible.
-    Returns (assets, asset_roles_map).
-    """
-    assets: List[str] = []
-    index: Dict[str, int] = {}
-    roles: Dict[int, str] = {}
-
-    for page in (getattr(doc, "pages", None) or []):
-        orig_shot = as_inline_image(getattr(page, "originalImageSrc", None))
-        
-        # Include full original screenshot as an asset for fallback background / reference
-        if orig_shot:
-            full_uri = "data:%s;base64,%s" % (orig_shot[0], orig_shot[1])
-            if full_uri not in index:
-                idx = len(assets)
-                index[full_uri] = idx
-                assets.append(full_uri)
-                roles[idx] = "full_screenshot"
-
-        for e in (getattr(page, "elements", None) or []):
-            is_graphic = (
-                e.type in ("image", "vector")
-                or getattr(e, "role", "") in ("artwork", "illustration", "graphic", "logo", "icon", "backdrop", "figure", "badge")
-            )
-            if is_graphic:
-                uri = getattr(e, "src", None)
-                if not uri and orig_shot and getattr(e, "bbox", None):
-                    try:
-                        from PIL import Image
-                        raw_shot = base64.b64decode(orig_shot[1])
-                        img = Image.open(io.BytesIO(raw_shot))
-                        bx0, by0, bx1, by1 = [int(round(v)) for v in e.bbox]
-                        bx0, by0 = max(0, bx0), max(0, by0)
-                        bx1, by1 = min(img.width, bx1), min(img.height, by1)
-                        if (bx1 - bx0) >= ASSET_MIN_SIDE and (by1 - by0) >= ASSET_MIN_SIDE:
-                            cropped = img.crop((bx0, by0, bx1, by1))
-                            buf = io.BytesIO()
-                            cropped.save(buf, format="PNG")
-                            uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
-                    except Exception:
-                        pass
-                if uri and uri.startswith("data:image"):
-                    norm_uri = "".join(uri.split())
-                    if norm_uri not in index:
-                        idx = len(assets)
-                        index[norm_uri] = idx
-                        assets.append(norm_uri)
-                        role = getattr(e, "role", None) or getattr(e, "type", "artwork")
-                        roles[idx] = role
-
-    filtered_assets: List[str] = []
-    filtered_roles: Dict[int, str] = {}
-    dims = _asset_dims(assets)
-    for i, uri in enumerate(assets):
-        d = dims[i]
-        if d is not None:
-            aw, ah = d
-            if min(aw, ah) < ASSET_MIN_SIDE or (aw * ah) < ASSET_MIN_AREA:
-                continue
-        idx = len(filtered_assets)
-        filtered_assets.append(uri)
-        if i in roles:
-            filtered_roles[idx] = roles[i]
-
-    return filtered_assets, filtered_roles
+# and let it correct itself. Each round is one request and about a minute.
+VERIFY_ROUNDS = 2
 
 
 def generate_from_document(doc, api_key: Optional[str] = None,
                            model: Optional[str] = None, timeout: int = 600,
                            verify: int = VERIFY_ROUNDS,
                            target_score: float = TARGET_ACCURACY_SCORE):
-    """Streams a page written directly from the screenshot, then refines it in a loop
-    comparing the rendered page to the original until visual match accuracy reaches
-    >= target_score (default 95.0%) or verify rounds finish.
+    """Streams a page written from the screenshot, then restores the real images.
 
     Yields:
     - ("status", text)
@@ -2014,17 +1921,46 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         raise EnhancementError(
             "This document has no original screenshot to work from.")
 
-    w, h = _shot_dims(shot)
-    flat = flatten_document(doc)
-    texts = page_texts(flat)
-    assets, asset_roles_map = extract_document_assets(flat)
-    asset_lines = describe_assets(assets, roles=asset_roles_map)
+    # Preparation takes half a minute before a single character arrives, because
+    # composing the images renders the page twice to check the composite is faithful.
+    # Saying so beats a silent stare: the first version showed "Reading the
+    # screenshot..." for thirty seconds and looked hung.
+    yield "status", "Composing the extracted images..."
 
-    prompt = build_generate_prompt(texts, asset_lines)
+    # The engine's own render is only used to harvest the assets; the model never sees it.
+    flat = flatten_document(doc)
+    html = HTMLRenderer.render_document(
+        DocumentData(title=getattr(doc, "title", "page") or "page",
+                     pageCount=len(flat.pages or []), pages=list(flat.pages or [])),
+        editable=False, interactive=False)
+    _, all_assets = strip_assets(html)
+    roles = asset_roles(html, all_assets)
+
+    # Only offer pictures worth placing. The residual pass emits every scrap CSS could
+    # not explain, and on the Reddit page 21 of its 31 crops are slivers -- 19x5, 178x3,
+    # 148x4 -- which are antialiasing rims, not content. Handed all of them, the model
+    # reasonably ignores the noise, and the run then reports "15 of 31 images missing"
+    # as though half the page were lost. Dropping them shortens the prompt, leaves fewer
+    # markers to misplace, and makes the count mean something.
+    keep = [i for i, dims in enumerate(_asset_dims(all_assets))
+            if dims and min(dims) >= ASSET_MIN_SIDE and dims[0] * dims[1] >= ASSET_MIN_AREA]
+    assets = [all_assets[i] for i in keep]
+    asset_lines = describe_assets(assets,
+                                  roles={n: roles.get(i, "") for n, i in enumerate(keep)})
+    dropped = len(all_assets) - len(assets)
+    if dropped:
+        yield "status", ("Set aside %d fragment(s) too small to place; offering %d image(s)."
+                         % (dropped, len(assets)))
+    prompt = build_generate_prompt(page_texts(flat), asset_lines)
 
     yield "status", ("Sending the screenshot, %d image(s) and %d line(s) of text..."
-                     % (len(assets), len(texts)))
+                     % (len(assets), len(page_texts(flat))))
 
+    # A model that writes nothing is not a dead end while others remain. It happens --
+    # a lite model spending its whole budget on reasoning, a stop before the first
+    # token -- and it used to end the run with an error that had nothing after the
+    # colon. Nothing has been shown to the caller at that point, so starting again on
+    # the next model costs only the request.
     buf = []
     tried: List[str] = []
     for candidate in models_to_try(model):
@@ -2060,25 +1996,30 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         raise EnhancementError(
             "%s did not return HTML. It said: %s" % (used, detail))
 
-    # ---- look at the result and correct it towards >= 95% visual match ----------
+    # ---- look at the result and correct it ----------------------------------------
+    #
+    # One shot at a whole page from a screenshot gets the shape roughly right and the
+    # details wrong, and the model has no way to know which is which: it never sees
+    # what it built. Rendering the page and handing it back beside the original is the
+    # correction it cannot otherwise make. Each round is announced, and so is every
+    # problem it reports finding, because a minute of silence reads as a hang.
     all_issues: List[str] = []
     rounds_done = 0
-    best_html = raw
+    w, h = _shot_dims(shot)
     best_score = 0.0
 
-    for attempt in range(1, max(1, verify) + 1):
-        yield "status", "Rendering your page in browser (check %d of %d)..." % (
-            attempt, max(1, verify))
-        page_to_render, _ = restore_assets(raw, assets)
-        render = render_html(page_to_render, width=w, height=h)
+    for attempt in range(1, max(0, verify) + 1):
+        current, _ = restore_assets(raw, assets)
+        yield "status", "Rendering your page to look at it (check %d of %d)..." % (
+            attempt, max(0, verify))
+        render = render_html(current, width=w, height=h)
         if not render:
-            yield "status", "No headless browser available, so skipping visual fidelity checks."
+            yield "status", "No headless browser available, so skipping the checks."
             break
 
         score = calculate_ssim_score(shot, render)
         if score > best_score:
             best_score = score
-            best_html = raw
 
         yield "score", {
             "score": round(score, 1),
@@ -2086,25 +2027,16 @@ def generate_from_document(doc, api_key: Optional[str] = None,
             "round": attempt,
             "max_rounds": max(1, verify)
         }
-        yield "status", "Visual fidelity match: %.1f%% (target: >= %.1f%%) [Round %d/%d]" % (
-            score, target_score, attempt, max(1, verify))
 
-        if score >= target_score:
-            yield "status", "Target fidelity reached (%.1f%% >= %.1f%%)! Visual match achieved." % (
-                score, target_score)
-            break
-
-        if attempt >= verify:
-            yield "status", "Completed %d refinement round(s). Final fidelity score: %.1f%%." % (
-                verify, score)
-            break
-
-        yield "status", "Comparing rendered attempt with the target screenshot..."
+        # Two calls rather than one. Asking for the critique and a twenty-thousand
+        # character document in a single reply got MALFORMED_RESP back from the API and
+        # the check never ran; separately, each answer is one shape and short enough to
+        # come back whole. It also reads better -- the findings appear before the fix.
+        yield "status", "Comparing it with the original screenshot (fidelity: %.1f%%)..." % score
         try:
-            critique = call_gemini(
-                build_critique_prompt(score=score, target_score=target_score),
-                api_key=api_key, model=model, timeout=timeout,
-                images=[shot, render])
+            critique = call_gemini(build_critique_prompt(), api_key=api_key,
+                                   model=model, timeout=timeout,
+                                   images=[shot, render])
         except EnhancementError as e:
             yield "status", "Check %d could not run - %s." % (
                 attempt, short_reason(e))
@@ -2113,84 +2045,68 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         issues = parse_critique(critique)
         for issue in issues:
             yield "issue", issue
-        all_issues.extend(issues)
-
         unused = missing_markers(raw, len(assets))
-        if not issues and score < target_score:
-            issues = [
-                f"Visual fidelity is currently {score:.1f}%, which is below the required {target_score:.1f}% target.",
-                "Review heading typography: ensure geometric sans-serif fonts, heavy weights, sizes, and letter-spacing match the target screenshot exactly.",
-                "Review layout alignment, margins, container colors, and button positioning to match the target screenshot.",
-                "For complex graphics, container artwork, 3D elements, or logos, use the cropped screenshot images (RAMEN_ASSET_<n>) instead of CSS approximations."
-            ]
-            for issue in issues:
-                yield "issue", issue
-            all_issues.extend(issues)
-        elif not issues and not unused and score >= target_score:
-            yield "status", "Target visual match achieved (%.1f%% >= %.1f%%)!" % (score, target_score)
+        if not issues and not unused:
+            yield "status", "Check %d found nothing worth changing." % attempt
             break
 
         yield "status", "Applying %d fix(es)%s..." % (
             len(issues), " and placing %d unused image(s)" % len(unused) if unused else "")
         try:
             fixed = _unfence(call_gemini(
-                build_fix_prompt(raw, issues, len(assets)),
-                api_key=api_key, model=model, timeout=timeout))
+                build_fix_prompt(raw, issues, len(assets)), api_key=api_key,
+                model=model, timeout=timeout))
         except EnhancementError as e:
             yield "status", "Could not apply check %d - %s." % (
                 attempt, short_reason(e))
             break
-
         if not fixed or "<" not in fixed:
-            yield "status", "Nothing came back to apply from check %d. Retrying..." % attempt
-            continue
+            yield "status", "Nothing came back to apply from check %d." % attempt
+            break
 
-        test_page, _ = restore_assets(fixed, assets)
-        test_render = render_html(test_page, width=w, height=h)
-        if test_render:
-            new_score = calculate_ssim_score(shot, test_render)
-            yield "status", "Check %d revision evaluated: %.1f%% (previous: %.1f%%)." % (
-                attempt, new_score, score)
-            if new_score >= score - 1.5:
-                raw = fixed
-                score = new_score
-                if score > best_score:
-                    best_score = score
-                    best_html = raw
-                rev_html, _ = restore_assets(raw, assets)
-                yield "revision", {"html": rev_html}
-                yield "score", {
-                    "score": round(score, 1),
-                    "target": target_score,
-                    "round": attempt,
-                    "max_rounds": max(1, verify)
-                }
-                if score >= target_score:
-                    yield "status", "Target fidelity reached (%.1f%% >= %.1f%%)! Visual match achieved." % (
-                        score, target_score)
-                    rounds_done += 1
-                    break
-            else:
-                yield "status", "Revision scored lower (%.1f%% vs %.1f%%). Retaining current best version." % (
-                    new_score, score)
-        else:
-            raw = fixed
-            rev_html, _ = restore_assets(raw, assets)
-            yield "revision", {"html": rev_html}
+        # Same acceptance test as the rewrite path: a correction that costs content or
+        # turns controls into plain markup is not a correction.
+        before_words, after_words = _visible_words(raw), _visible_words(fixed)
+        word_loss = sum((before_words - after_words).values())
+        word_gain = sum((after_words - before_words).values())
+        missing_before = len(missing_markers(raw, len(assets)))
+        missing_after = len(missing_markers(fixed, len(assets)))
+        controls_lost = max(0, _count_controls(raw) - _count_controls(fixed))
+        refusals = []
+        if word_loss:
+            refusals.append("%d word(s) lost" % word_loss)
+        if word_gain > REFINE_MAX_WORD_GAIN:
+            refusals.append("%d word(s) invented" % word_gain)
+        if missing_after > missing_before:
+            refusals.append("%d more image(s) dropped" % (missing_after - missing_before))
+        if controls_lost:
+            refusals.append("%d control(s) flattened" % controls_lost)
+        if refusals:
+            yield "status", "Discarded check %d: it would have %s." % (
+                attempt, ", ".join(refusals))
+            break
 
+        raw = fixed
         rounds_done += 1
+        all_issues.extend(issues)
+        recovered = missing_before - missing_after
+        yield "status", ("Applied check %d: %d fix(es)%s." % (
+            attempt, len(issues),
+            ", %d image(s) put back" % recovered if recovered > 0 else ""))
+        rev_html, _ = restore_assets(raw, assets)
+        yield "revision", {"html": rev_html}
 
-    final_html, missing = restore_assets(best_html, assets)
+    final, missing = restore_assets(raw, assets)
     yield "done", {
-        "html": final_html,
+        "html": final,
         "model": _LAST_MODEL[0] or model or DEFAULT_MODEL,
+        "assets_total": len(assets),
+        "assets_missing": missing,
         "verify_rounds": rounds_done,
         "score": round(best_score, 1),
         "target": target_score,
         "issues": all_issues,
-        "assets_total": len(assets),
-        "assets_missing": missing,
-        "chars": len(final_html),
+        "chars": len(final),
     }
 
 # ---------------------------------------------------------------- command line
