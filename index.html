@@ -3182,7 +3182,7 @@ function scheduleLivePreviewUpdate(frame, rawCode, assets, minHeight = 900) {
     if (assets && assets.length > 0) {
         for (let i = 0; i < assets.length; i++) {
             if (assets[i]) {
-                html = html.split(`ASSET_${i}`).join(assets[i]);
+                html = html.split(`RAMEN_ASSET_${i}`).join(assets[i]).split(`ASSET_${i}`).join(assets[i]);
             }
         }
     }
@@ -4460,7 +4460,11 @@ async function enhanceCurrentDocument() {
     ws.onopen = () => {
         if (elements.epbOperation) elements.epbOperation.textContent = 'Sending Document Payload';
         if (elements.epbDetail) elements.epbDetail.textContent = `Transmitting screenshot & structure (${elemCount} elements) to Gemini...`;
-        ws.send(JSON.stringify({ document: state.doc }));
+        ws.send(JSON.stringify({
+            document: state.doc,
+            verify: 15,
+            targetScore: 95.0
+        }));
     };
 
     ws.onmessage = (ev) => {

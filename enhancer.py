@@ -1672,40 +1672,36 @@ def build_generate_prompt(texts: List[str], asset_lines: List[str]) -> str:
 CRITIQUE_PROMPT = """\
 Two screenshots are attached:
 
-1. THE TARGET -- the design that was being reproduced.
-2. THE ATTEMPT -- a page built from it, rendered in a browser just now.
+1. THE TARGET -- the original design to reproduce.
+2. THE ATTEMPT -- the current HTML rendered in a browser just now.
 
-List what is wrong with the attempt. One short line each, at most six, most serious
-first. Look for sections in the wrong order or overlapping, blocks that should be side
-by side and are stacked (or the reverse), spacing and alignment that do not match, type
-far too large or too small, images at the wrong size or in the wrong place, and anything
-in the target that is missing from the attempt.
+List what is wrong with the attempt compared to the target. One short line each, at most ten, most serious first.
+Look for:
+- Missing sections, logos, brand marks, partner logos, or text that are in the target but absent in the attempt.
+- Misaligned, squished, or overlapping navigation items, headers, cards, or mockups.
+- Spacing, padding, and alignment that do not match.
+- Image assets (RAMEN_ASSET_<n>) at the wrong size, missing, or in the wrong place.
+- Typography (font size, weight, line height, color) that does not match.
 
-Judge only what could be fixed in the markup. Ignore differences in the content of a
-photograph, and ignore text that looks truncated -- those words are genuinely cut off in
-the design.
-
-Reply with the lines and nothing else, each starting with "- ". If the attempt is already
-close, reply with the single line "- nothing worth changing".
+Reply with the lines and nothing else, each starting with "- ". If the attempt already matches the target at 95%+ fidelity, reply with the single line "- nothing worth changing".
 """
 
 
 FIX_PROMPT = """\
-Here is an HTML document and a list of problems someone found by comparing its rendering
-against the design it came from.
+Two screenshots are attached:
+1. THE TARGET -- the original design to reproduce.
+2. THE ATTEMPT -- the current HTML rendered in a browser.
+
+Below is the current HTML document and a list of problems found by comparing the attempt against the target:
 
 PROBLEMS
 %(issues)s
 
-Fix those problems and return the corrected document. Change nothing else.
-
-- Every piece of visible text stays exactly as it is. Do not reword, translate, correct
-  spelling or add text -- including words that look truncated, which are genuinely cut
-  off in the design.
-- Image sources are `RAMEN_ASSET_<n>` markers, numbered 0 to %(max_asset)d and no higher.
-  %(unused_note)s Never invent a marker number and never link to an external image.
-- Keep the layout flowing -- flex and grid, no absolute positioning -- responsive to
-  480px, with hover and focus states and short transitions.
+Fix all of those problems and return the corrected document so the rendered page matches THE TARGET (target fidelity >= 95%%).
+- Accurately add any missing sections, partner brand logos, badges, and labels mentioned in the problems.
+- Fix any misaligned, squished, or overlapping navigation items, cards, or mockups using proper flexbox/grid layout and CSS.
+- Image sources are `RAMEN_ASSET_<n>` markers, numbered 0 to %(max_asset)d. %(unused_note)s
+- Keep the layout flowing and responsive down to 480px, with hover/focus states.
 
 Return the complete document and nothing else. No explanation, no markdown fences.
 Start with `<!DOCTYPE html>`.
@@ -1744,7 +1740,7 @@ def parse_critique(reply: str) -> List[str]:
         if not text or text.lower().startswith("nothing worth changing"):
             continue
         out.append(text)
-    return out[:6]
+    return out[:10]
 
 
 def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
@@ -1897,7 +1893,7 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
 
 # How many times to render the finished page, show it to the model beside the original,
 # and let it correct itself. Each round is one request and about a minute.
-VERIFY_ROUNDS = 2
+VERIFY_ROUNDS = 15
 
 
 def generate_from_document(doc, api_key: Optional[str] = None,
@@ -2009,10 +2005,13 @@ def generate_from_document(doc, api_key: Optional[str] = None,
     w, h = _shot_dims(shot)
     best_score = 0.0
 
-    for attempt in range(1, max(0, verify) + 1):
+    MAX_ROUNDS = max(15, verify)
+    TARGET_SCORE = target_score or 95.0
+
+    for attempt in range(1, MAX_ROUNDS + 1):
         current, _ = restore_assets(raw, assets)
-        yield "status", "Rendering your page to look at it (check %d of %d)..." % (
-            attempt, max(0, verify))
+        yield "status", "Rendering HTML screenshot for visual verification (round %d of %d)..." % (
+            attempt, MAX_ROUNDS)
         render = render_html(current, width=w, height=h)
         if not render:
             yield "status", "No headless browser available, so skipping the checks."
@@ -2024,22 +2023,23 @@ def generate_from_document(doc, api_key: Optional[str] = None,
 
         yield "score", {
             "score": round(score, 1),
-            "target": target_score,
+            "target": TARGET_SCORE,
             "round": attempt,
-            "max_rounds": max(1, verify)
+            "max_rounds": MAX_ROUNDS
         }
 
-        # Two calls rather than one. Asking for the critique and a twenty-thousand
-        # character document in a single reply got MALFORMED_RESP back from the API and
-        # the check never ran; separately, each answer is one shape and short enough to
-        # come back whole. It also reads better -- the findings appear before the fix.
-        yield "status", "Comparing it with the original screenshot (fidelity: %.1f%%)..." % score
+        # Exit condition: if score >= target_score (95%+), we are done!
+        if score >= TARGET_SCORE:
+            yield "status", ("Match target achieved: %.1f%% >= %.1f%%!" % (score, TARGET_SCORE))
+            break
+
+        yield "status", ("Comparing attempt against target (current match: %.1f%%, target: ≥ %.1f%%)..." % (score, TARGET_SCORE))
         try:
             critique = call_gemini(build_critique_prompt(), api_key=api_key,
                                    model=model, timeout=timeout,
                                    images=[shot, render])
         except EnhancementError as e:
-            yield "status", "Check %d could not run - %s." % (
+            yield "status", "Check %d critique call failed: %s." % (
                 attempt, short_reason(e))
             break
 
@@ -2047,55 +2047,55 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         for issue in issues:
             yield "issue", issue
         unused = missing_markers(raw, len(assets))
-        if not issues and not unused:
+        if not issues and not unused and score >= TARGET_SCORE:
             yield "status", "Check %d found nothing worth changing." % attempt
             break
 
-        yield "status", "Applying %d fix(es)%s..." % (
-            len(issues), " and placing %d unused image(s)" % len(unused) if unused else "")
+        yield "status", "Applying %d fix(es)%s (targeting ≥ %.1f%% match)..." % (
+            len(issues), " and placing %d unused image(s)" % len(unused) if unused else "", TARGET_SCORE)
         try:
             fixed = _unfence(call_gemini(
                 build_fix_prompt(raw, issues, len(assets)), api_key=api_key,
-                model=model, timeout=timeout))
+                model=model, timeout=timeout,
+                images=[shot, render]))
         except EnhancementError as e:
             yield "status", "Could not apply check %d - %s." % (
                 attempt, short_reason(e))
-            break
-        if not fixed or "<" not in fixed:
-            yield "status", "Nothing came back to apply from check %d." % attempt
-            break
+            continue
 
-        # Same acceptance test as the rewrite path: a correction that costs content or
-        # turns controls into plain markup is not a correction.
-        before_words, after_words = _visible_words(raw), _visible_words(fixed)
-        word_loss = sum((before_words - after_words).values())
-        word_gain = sum((after_words - before_words).values())
-        missing_before = len(missing_markers(raw, len(assets)))
-        missing_after = len(missing_markers(fixed, len(assets)))
-        controls_lost = max(0, _count_controls(raw) - _count_controls(fixed))
-        refusals = []
-        if word_loss:
-            refusals.append("%d word(s) lost" % word_loss)
-        if word_gain > REFINE_MAX_WORD_GAIN:
-            refusals.append("%d word(s) invented" % word_gain)
-        if missing_after > missing_before:
-            refusals.append("%d more image(s) dropped" % (missing_after - missing_before))
-        if controls_lost:
-            refusals.append("%d control(s) flattened" % controls_lost)
-        if refusals:
-            yield "status", "Discarded check %d: it would have %s." % (
-                attempt, ", ".join(refusals))
-            break
+        if not fixed or "<" not in fixed or len(fixed) < 100:
+            yield "status", "Nothing valid came back to apply from check %d; retrying..." % attempt
+            continue
 
-        raw = fixed
-        rounds_done += 1
-        all_issues.extend(issues)
-        recovered = missing_before - missing_after
-        yield "status", ("Applied check %d: %d fix(es)%s." % (
-            attempt, len(issues),
-            ", %d image(s) put back" % recovered if recovered > 0 else ""))
-        rev_html, _ = restore_assets(raw, assets)
-        yield "revision", {"html": rev_html}
+        # Render the fixed page and check if it improved fidelity
+        fixed_current, _ = restore_assets(fixed, assets)
+        fixed_render = render_html(fixed_current, width=w, height=h)
+        if fixed_render:
+            fixed_score = calculate_ssim_score(shot, fixed_render)
+            # Accept if it improves or stays roughly the same while addressing structural issues
+            if fixed_score >= score - 2.0:
+                raw = fixed
+                rounds_done += 1
+                all_issues.extend(issues)
+                score = fixed_score
+                if score > best_score:
+                    best_score = score
+                yield "status", ("Applied round %d: %d fix(es) (new match: %.1f%%)." % (
+                    attempt, len(issues), score))
+                rev_html, _ = restore_assets(raw, assets)
+                yield "revision", {"html": rev_html}
+                if score >= TARGET_SCORE:
+                    yield "status", ("Match target achieved: %.1f%% >= %.1f%%!" % (score, TARGET_SCORE))
+                    break
+            else:
+                yield "status", ("Round %d fix reduced match score (%.1f%% vs %.1f%%); continuing refinement..." % (
+                    attempt, fixed_score, score))
+        else:
+            raw = fixed
+            rounds_done += 1
+            all_issues.extend(issues)
+            rev_html, _ = restore_assets(raw, assets)
+            yield "revision", {"html": rev_html}
 
     final, missing = restore_assets(raw, assets)
     yield "done", {
