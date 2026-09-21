@@ -1674,11 +1674,11 @@ Two screenshots are attached:
 1. THE TARGET -- the design that was being reproduced.
 2. THE ATTEMPT -- a page built from it, rendered in a browser just now.
 
-List what is wrong with the attempt. One short line each, at most six, most serious
-first. Look for sections in the wrong order or overlapping, blocks that should be side
-by side and are stacked (or the reverse), spacing and alignment that do not match, type
-far too large or too small, images at the wrong size or in the wrong place, and anything
-in the target that is missing from the attempt.
+List what is wrong with the attempt. One short line each, most serious first. Look for
+sections in the wrong order or overlapping, blocks that should be side by side and are
+stacked (or the reverse), spacing and alignment that do not match, type far too large
+or too small, images at the wrong size or in the wrong place, and anything in the target
+that is missing from the attempt.
 
 Judge only what could be fixed in the markup. Ignore differences in the content of a
 photograph, and ignore text that looks truncated -- those words are genuinely cut off in
@@ -1771,7 +1771,7 @@ Two screenshots are attached:
 2. THE ATTEMPT -- the current rendered HTML/CSS page.
 Current visual match score is %(score).1f%%. The target is >= %(target).1f%%.
 
-List what is wrong with the attempt compared to the target design. Up to 6 short lines, most serious first:
+List what is wrong with the attempt compared to the target design. One short line each, most serious first:
 - Layout and orientation discrepancies (e.g., sections in wrong order, stacked instead of side-by-side, grid/flex issues).
 - Typography discrepancies (wrong font families, font sizes, weights, line heights, or letter spacing).
 - Colors, backgrounds, gradients, borders, shadows, and corner radii differences.
@@ -1830,7 +1830,7 @@ def parse_critique(reply: str) -> List[str]:
         if not text or text.lower().startswith("nothing worth changing"):
             continue
         out.append(text)
-    return out[:6]
+    return out
 
 
 def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
