@@ -4122,6 +4122,7 @@ function closeLiveBuild() {
     elements.lbPaneEngine.hidden = true;
     elements.lbEngineFrame.srcdoc = '';
     elements.lbOriginalImg.removeAttribute('src');
+    elements.liveBuildFrame.onload = null;
     elements.lbBuiltHead.textContent = 'Being written now';
     elements.btnEnhance.disabled = false;
 }
@@ -4227,6 +4228,29 @@ async function buildFromScreenshot() {
     let buffer = '';
     let painted = 0;
     const started = Date.now();
+    let isLiveStreaming = true;
+
+    function scrollFrameToBottom(frame) {
+        try {
+            const win = frame.contentWindow;
+            const doc = frame.contentDocument || (win && win.document);
+            if (win && doc) {
+                const maxScroll = Math.max(
+                    doc.body ? doc.body.scrollHeight : 0,
+                    doc.documentElement ? doc.documentElement.scrollHeight : 0
+                );
+                win.scrollTo({ top: maxScroll, behavior: 'instant' });
+            }
+            const paneBody = frame.parentElement;
+            if (paneBody) paneBody.scrollTop = paneBody.scrollHeight;
+        } catch (e) {}
+    }
+
+    elements.liveBuildFrame.onload = () => {
+        if (isLiveStreaming) {
+            scrollFrameToBottom(elements.liveBuildFrame);
+        }
+    };
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${location.host}/ws/generate`);
@@ -4269,6 +4293,7 @@ async function buildFromScreenshot() {
                 // icon for each one. Show a neutral box instead while it writes.
                 safe = safe.replace(/RAMEN_ASSET_\d+/g, LIVE_PLACEHOLDER);
                 elements.liveBuildFrame.srcdoc = safe;
+                scrollFrameToBottom(elements.liveBuildFrame);
                 const secs = ((now - started) / 1000).toFixed(0);
                 elements.liveBuildStatus.textContent =
                     `writing... ${buffer.length.toLocaleString()} characters, ${secs}s`;
@@ -4289,6 +4314,8 @@ async function buildFromScreenshot() {
             elements.liveBuildFrame.srcdoc = finalHtml;
             elements.liveBuildOpen.disabled = false;
         } else if (msg.type === 'done') {
+            isLiveStreaming = false;
+            elements.liveBuildFrame.onload = null;
             finalHtml = msg.html;
             latestBuiltHtml = msg.html;
             state.enhancedHtml = msg.html;
