@@ -1887,13 +1887,19 @@ html, body {
 .live-build-title { font-weight: 600; font-size: 13px; }
 .live-build-status { font-size: 12px; opacity: .75; font-variant-numeric: tabular-nums; }
 .live-build-issues {
-    font-size: 12px; display: flex; gap: 6px; overflow: hidden;
-    max-width: 46vw; white-space: nowrap;
+    font-size: 12px; display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden;
+    max-width: 46vw; white-space: nowrap; scrollbar-width: thin;
+    padding-bottom: 2px;
+}
+.live-build-issues::-webkit-scrollbar { height: 4px; }
+.live-build-issues::-webkit-scrollbar-thumb {
+    background: var(--border-subtle); border-radius: 2px;
 }
 .live-build-issues span {
     padding: 2px 8px; border-radius: 10px; flex: 0 0 auto;
     background: var(--accent-amber-subtle); color: var(--accent-amber);
-    overflow: hidden; text-overflow: ellipsis; max-width: 22vw;
+    overflow: hidden; text-overflow: ellipsis; max-width: 28vw;
+    cursor: default;
 }
 .live-build-spacer { flex: 1 1 auto; }
 .live-build-body {
@@ -4273,9 +4279,6 @@ async function buildFromScreenshot() {
             chip.textContent = msg.detail;
             chip.title = msg.detail;
             elements.liveBuildIssues.prepend(chip);
-            while (elements.liveBuildIssues.childElementCount > 4) {
-                elements.liveBuildIssues.lastElementChild.remove();
-            }
         } else if (msg.type === 'revision') {
             // A corrected page arrived; show it and keep going.
             finalHtml = msg.html;
