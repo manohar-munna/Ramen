@@ -3042,6 +3042,8 @@ function renderEnhancedPage() {
         return;
     }
     deselectElement();
+    if (elements.emptyState) elements.emptyState.style.display = 'none';
+    if (elements.documentStage) elements.documentStage.style.display = 'flex';
     elements.documentStage.innerHTML = '';
 
     const page = state.doc?.pages[state.currentPageIndex] || state.doc?.pages[0];
@@ -4187,7 +4189,10 @@ function closeLiveBuild() {
     elements.liveBuild.hidden = true;
     if (latestBuiltHtml) {
         state.enhancedHtml = latestBuiltHtml;
+    }
+    if (state.enhancedHtml) {
         showBlendToggle();
+        switchViewMode('enhanced');
     }
     elements.liveBuildSource.textContent = '';
     elements.liveBuildSource.hidden = true;
@@ -4316,7 +4321,7 @@ async function buildFromScreenshot() {
     elements.liveBuildCompare.disabled = true;
 
     let finalHtml = null;
-    latestBuiltHtml = null;
+    latestBuiltHtml = state.enhancedHtml || null;
     let buffer = '';
     let painted = 0;
     const started = Date.now();
@@ -4402,6 +4407,7 @@ async function buildFromScreenshot() {
             latestBuiltHtml = msg.html;
             state.enhancedHtml = msg.html;
             showBlendToggle();
+            switchViewMode('enhanced');
             if (elements.liveBuildBlend) elements.liveBuildBlend.disabled = false;
             elements.liveBuildFrame.srcdoc = finalHtml;
             elements.liveBuildOpen.disabled = false;
@@ -4412,6 +4418,7 @@ async function buildFromScreenshot() {
             latestBuiltHtml = msg.html;
             state.enhancedHtml = msg.html;
             showBlendToggle();
+            switchViewMode('enhanced');
             if (elements.liveBuildBlend) elements.liveBuildBlend.disabled = false;
             elements.liveBuildFrame.srcdoc = finalHtml;
             elements.liveBuildOpen.disabled = false;
@@ -4517,6 +4524,22 @@ function wireLiveBuildControls() {
 async function exportDocument(format) {
     if (!state.doc) {
         notify('Open a PDF or image first.', 'info');
+        return;
+    }
+    
+    if (state.activeViewMode === 'enhanced' && state.enhancedHtml && format === 'html') {
+        const title = (state.doc.title || 'enhanced_page').toLowerCase().replace(/\s+/g, '_');
+        const blob = new Blob([state.enhancedHtml], { type: 'text/html' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${title}.enhanced.html`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => window.URL.revokeObjectURL(url), 30000);
+        a.remove();
+        setStatus('Exported Enhanced HTML successfully.');
+        notify('Enhanced HTML exported ✨', 'success');
         return;
     }
     
@@ -4911,12 +4934,23 @@ function updatePageCodeDisplay() {
     if (elements.btnCodeTabFull) elements.btnCodeTabFull.classList.toggle('active', currentCodeTab === 'full');
     
     if (elements.pageCodeContent) {
-        if (currentCodeTab === 'html') {
-            elements.pageCodeContent.textContent = getPageHTML(page, true);
-        } else if (currentCodeTab === 'css') {
-            elements.pageCodeContent.textContent = BASE_DOC_CSS;
-        } else if (currentCodeTab === 'full') {
-            elements.pageCodeContent.textContent = getStandalonePageHTML(page);
+        if (state.activeViewMode === 'enhanced' && state.enhancedHtml) {
+            if (currentCodeTab === 'html' || currentCodeTab === 'full') {
+                elements.pageCodeContent.textContent = state.enhancedHtml;
+            } else if (currentCodeTab === 'css') {
+                const parser = new DOMParser();
+                const parsed = parser.parseFromString(state.enhancedHtml, 'text/html');
+                const styles = Array.from(parsed.querySelectorAll('style')).map(s => s.textContent.trim()).filter(Boolean).join('\n\n');
+                elements.pageCodeContent.textContent = styles || '/* Embedded in HTML */';
+            }
+        } else {
+            if (currentCodeTab === 'html') {
+                elements.pageCodeContent.textContent = getPageHTML(page, true);
+            } else if (currentCodeTab === 'css') {
+                elements.pageCodeContent.textContent = BASE_DOC_CSS;
+            } else if (currentCodeTab === 'full') {
+                elements.pageCodeContent.textContent = getStandalonePageHTML(page);
+            }
         }
     }
     
@@ -4947,12 +4981,23 @@ function setupCodeViewerInteraction() {
             if (!state.doc || !state.doc.pages[state.currentPageIndex]) return;
             const page = state.doc.pages[state.currentPageIndex];
             let textToCopy = '';
-            if (currentCodeTab === 'html') {
-                textToCopy = getPageHTML(page, false);
-            } else if (currentCodeTab === 'css') {
-                textToCopy = BASE_DOC_CSS;
-            } else if (currentCodeTab === 'full') {
-                textToCopy = getStandalonePageHTML(page);
+            if (state.activeViewMode === 'enhanced' && state.enhancedHtml) {
+                if (currentCodeTab === 'css') {
+                    const parser = new DOMParser();
+                    const parsed = parser.parseFromString(state.enhancedHtml, 'text/html');
+                    const styles = Array.from(parsed.querySelectorAll('style')).map(s => s.textContent.trim()).filter(Boolean).join('\n\n');
+                    textToCopy = styles || '/* Embedded in HTML */';
+                } else {
+                    textToCopy = state.enhancedHtml;
+                }
+            } else {
+                if (currentCodeTab === 'html') {
+                    textToCopy = getPageHTML(page, false);
+                } else if (currentCodeTab === 'css') {
+                    textToCopy = BASE_DOC_CSS;
+                } else if (currentCodeTab === 'full') {
+                    textToCopy = getStandalonePageHTML(page);
+                }
             }
             navigator.clipboard.writeText(textToCopy).then(() => {
                 const lbl = document.getElementById('copy-btn-label');
