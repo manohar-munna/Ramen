@@ -1874,7 +1874,7 @@ html, body {
 }
 
 .live-build {
-    position: fixed; inset: 0; z-index: 1200;
+    position: absolute; inset: 0; z-index: 50;
     background: var(--bg-app);
     display: flex; flex-direction: column;
 }
@@ -2059,22 +2059,6 @@ html, body {
                 </button>
             </div>
 
-            <div id="blend-mode-toggle" class="segmented blend-toggle" style="display: none;" role="group" aria-label="Reconstruction view mode">
-                <button id="btn-mode-deterministic" class="seg-btn active" title="Deterministic pixel reconstruction">
-                    <svg class="btn-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:13px;height:13px;margin-right:3px;vertical-align:-1px;">
-                        <rect x="3" y="3" width="18" height="18" rx="2"/>
-                        <path d="M3 9h18M9 21V9"/>
-                    </svg>
-                    Deterministic
-                </button>
-                <button id="btn-mode-enhanced" class="seg-btn" title="AI-enhanced responsive page">
-                    <svg class="btn-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:13px;height:13px;margin-right:3px;vertical-align:-1px;">
-                        <path d="M12 3.5 13.7 9l5.5 1.7-5.5 1.7L12 18l-1.7-5.6L4.8 10.7 10.3 9z"/>
-                    </svg>
-                    Enhanced ✨
-                </button>
-            </div>
-
             <button id="btn-enhance" class="btn btn-secondary"
                     title="Rewrite this page with flowing layout and transitions">
                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -2189,6 +2173,52 @@ html, body {
                 </div>
 
             </div>
+            </div>
+
+            <!-- Live build embedded inside the main application canvas -->
+            <div id="live-build" class="live-build" hidden>
+              <div class="live-build-bar">
+                <span class="live-build-title">Building from the screenshot</span>
+                <span id="live-build-status" class="live-build-status">connecting...</span>
+                <span id="live-build-issues" class="live-build-issues"></span>
+                <span class="live-build-spacer"></span>
+                <div class="lb-zoom-controls">
+                    <button id="lb-zoom-out" class="btn-control" title="Zoom Out (-)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg></button>
+                    <span id="lb-zoom-level" class="zoom-display" style="cursor:pointer;" title="Reset to 100%">100%</span>
+                    <button id="lb-zoom-in" class="btn-control" title="Zoom In (+)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+                    <button id="lb-zoom-fit" class="btn-control-subtle" title="Fit Content">Fit</button>
+                </div>
+                <button id="live-build-blend" class="btn btn-primary" style="margin-right:6px;" disabled title="Edit this enhanced page directly in the canvas">
+                    <svg class="btn-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;margin-right:3px;vertical-align:-1px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    Edit in Canvas
+                </button>
+                <button id="live-build-compare" class="btn-toggle" disabled
+                        title="Original, the engine's reconstruction and this page, side by side"
+                        >Compare all three</button>
+                <button id="live-build-code" class="btn-toggle">Code</button>
+                <button id="live-build-download" class="btn-toggle" disabled>Download</button>
+                <button id="live-build-open" class="btn-toggle" disabled>Open in a tab</button>
+                <button id="live-build-close" class="btn-icon-subtle" title="Close and View in Canvas"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+              </div>
+              <div id="live-build-body" class="live-build-body mode-building">
+                <section class="lb-pane lb-pane-original">
+                  <header class="lb-pane-head">Original screenshot</header>
+                  <div class="lb-pane-body"><img id="lb-original-img" alt="the page being rebuilt"></div>
+                </section>
+                <section id="lb-pane-engine" class="lb-pane lb-pane-engine" hidden>
+                  <header class="lb-pane-head">Reconstructed by the engine</header>
+                  <div class="lb-pane-body">
+                    <iframe id="lb-engine-frame" title="Engine reconstruction"></iframe>
+                  </div>
+                </section>
+                <section class="lb-pane lb-pane-built">
+                  <header id="lb-built-head" class="lb-pane-head">Being written now</header>
+                  <div class="lb-pane-body">
+                    <iframe id="live-build-frame" class="live-build-frame" title="Live preview"></iframe>
+                    <pre id="live-build-source" class="live-build-source" hidden></pre>
+                  </div>
+                </section>
+              </div>
             </div>
         </main>
 
@@ -2381,52 +2411,6 @@ html, body {
         </div>
     </div>
 
-    <!-- Live build overlay: the page writing itself, beside the code producing it. -->
-<div id="live-build" class="live-build" hidden>
-  <div class="live-build-bar">
-    <span class="live-build-title">Building from the screenshot</span>
-    <span id="live-build-status" class="live-build-status">connecting...</span>
-    <span id="live-build-issues" class="live-build-issues"></span>
-    <span class="live-build-spacer"></span>
-    <div class="lb-zoom-controls">
-        <button id="lb-zoom-out" class="btn-control" title="Zoom Out (-)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg></button>
-        <span id="lb-zoom-level" class="zoom-display" style="cursor:pointer;" title="Reset to 100%">100%</span>
-        <button id="lb-zoom-in" class="btn-control" title="Zoom In (+)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
-        <button id="lb-zoom-fit" class="btn-control-subtle" title="Fit Content">Fit</button>
-    </div>
-    <button id="live-build-blend" class="btn btn-primary" style="margin-right:6px;" disabled title="Open this enhanced version in the interactive editor">
-        <svg class="btn-icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;margin-right:3px;vertical-align:-1px;"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-        Open in Editor
-    </button>
-    <button id="live-build-compare" class="btn-toggle" disabled
-            title="Original, the engine's reconstruction and this page, side by side"
-            >Compare all three</button>
-    <button id="live-build-code" class="btn-toggle">Code</button>
-    <button id="live-build-download" class="btn-toggle" disabled>Download</button>
-    <button id="live-build-open" class="btn-toggle" disabled>Open in a tab</button>
-    <button id="live-build-close" class="btn-icon-subtle" title="Back to Editor"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-  </div>
-  <div id="live-build-body" class="live-build-body mode-building">
-    <section class="lb-pane lb-pane-original">
-      <header class="lb-pane-head">Original screenshot</header>
-      <div class="lb-pane-body"><img id="lb-original-img" alt="the page being rebuilt"></div>
-    </section>
-    <section id="lb-pane-engine" class="lb-pane lb-pane-engine" hidden>
-      <header class="lb-pane-head">Reconstructed by the engine</header>
-      <div class="lb-pane-body">
-        <iframe id="lb-engine-frame" title="Engine reconstruction"></iframe>
-      </div>
-    </section>
-    <section class="lb-pane lb-pane-built">
-      <header id="lb-built-head" class="lb-pane-head">Being written now</header>
-      <div class="lb-pane-body">
-        <iframe id="live-build-frame" class="live-build-frame" title="Live preview"></iframe>
-        <pre id="live-build-source" class="live-build-source" hidden></pre>
-      </div>
-    </section>
-  </div>
-</div>
-
 <!-- Snackbars. Live region so a screen reader hears what the eye is shown. -->
 <div id="snackbars" class="snackbars" role="status" aria-live="polite"></div>
 
@@ -2467,9 +2451,6 @@ const elements = {
     btnCompareMode: document.getElementById('btn-compare-mode'),
     btnPageCode: document.getElementById('btn-page-code'),
     btnEnhance: document.getElementById('btn-enhance'),
-    blendModeToggle: document.getElementById('blend-mode-toggle'),
-    btnModeDeterministic: document.getElementById('btn-mode-deterministic'),
-    btnModeEnhanced: document.getElementById('btn-mode-enhanced'),
     btnThemeToggle: document.getElementById('btn-theme-toggle'),
     liveBuild: document.getElementById('live-build'),
     liveBuildBlend: document.getElementById('live-build-blend'),
@@ -2598,14 +2579,6 @@ function setupEventListeners() {
         elements.inspectBox.style.display = 'none';
         elements.inspectTip.style.display = 'none';
     });
-
-    // Blend mode switcher
-    if (elements.btnModeDeterministic) {
-        elements.btnModeDeterministic.addEventListener('click', () => switchViewMode('deterministic'));
-    }
-    if (elements.btnModeEnhanced) {
-        elements.btnModeEnhanced.addEventListener('click', () => switchViewMode('enhanced'));
-    }
 
     // Theme toggle
     if (elements.btnThemeToggle) {
@@ -3014,21 +2987,10 @@ function colorToHex(col) {
     return '#000000';
 }
 
-function showBlendToggle() {
-    if (elements.blendModeToggle) {
-        elements.blendModeToggle.style.display = 'inline-flex';
-    }
-}
+function showBlendToggle() {}
 
 function switchViewMode(mode) {
     state.activeViewMode = mode;
-    if (elements.btnModeDeterministic) {
-        elements.btnModeDeterministic.classList.toggle('active', mode === 'deterministic');
-    }
-    if (elements.btnModeEnhanced) {
-        elements.btnModeEnhanced.classList.toggle('active', mode === 'enhanced');
-    }
-
     if (mode === 'enhanced') {
         renderEnhancedPage();
     } else {
