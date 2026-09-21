@@ -1589,7 +1589,7 @@ You are an expert front-end developer. You are given a screenshot of a web page 
 write a single self-contained HTML file that looks exactly like it.
 
 - Match the screenshot closely: background colours, text colour, font size and weight,
-  spacing, alignment, borders, radii, shadows. Target >= 95% pixel-level visual match.
+  spacing, alignment, borders, radii, shadows. Target >= 95%% pixel-level visual match.
 - Write the FULL code. Never write a comment in place of content -- no "<!-- repeat for
   each item -->", no "<!-- other nav links here -->". If the screenshot shows nine cards,
   write nine cards.
@@ -1608,7 +1608,7 @@ DO NOT attempt an inaccurate or distorted CSS approximation! Instead, use the pr
 cropped images and screenshot PNG markers (`RAMEN_ASSET_<n>`) directly (via `<img>` or
 CSS `background-image: url(RAMEN_ASSET_<n>)`)!
 Use the cropped images and original screenshot assets wherever pure HTML/CSS cannot
-achieve 95%+ exact visual match.
+achieve 95%%+ exact visual match.
 
 THE TEXT
 Use these strings, exactly as written, for the page's text. They were measured from the
@@ -1692,7 +1692,7 @@ Two screenshots are attached:
 2. THE ATTEMPT -- a page built from it, rendered in a browser just now.
 
 Current visual match accuracy is %(score).1f%%. The required target is >= %(target).1f%%.
-List what is wrong with the attempt to reach 95%+ visual match. One short line each, most serious first.
+List what is wrong with the attempt to reach 95%%+ visual match. One short line each, most serious first.
 
 Critique checklist:
 - Typography: Check heading font family (geometric sans-serif), weights (bold/heavy), sizes, line-heights, letter-spacing.
@@ -1701,7 +1701,7 @@ Critique checklist:
 - Graphics & Artwork: If complex container graphics, 3D artwork, logos, or illustrations in the attempt do not match the target, instruct the model to use the cropped screenshot PNGs / image markers (`RAMEN_ASSET_<n>`) instead of crude CSS shapes!
 - Any missing sections, headings, subtexts, or elements from the target.
 
-Reply with the lines and nothing else, each starting with "- ". Be demanding and thorough to help reach 95%+ match.
+Reply with the lines and nothing else, each starting with "- ". Be demanding and thorough to help reach 95%%+ match.
 """
 
 
