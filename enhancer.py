@@ -1732,103 +1732,6 @@ def build_fix_prompt(current: str, issues: List[str], n_assets: int) -> str:
     }
 
 
-# Direct prompts for whole-page generation from the actual screenshot (without overlay crops)
-GENERATE_DIRECT_PROMPT = """\
-You are an expert front-end developer and UI designer. You are given a screenshot of a design/web page.
-Write a single, complete, self-contained HTML file (with embedded CSS in a <style> tag in <head>) that reproduces the visual design with pixel-level precision.
-
-REQUIREMENTS:
-- Exact Visual Match: Match the screenshot closely: layout, typography (font families, font sizes, font weights, line heights, letter spacing), colors, gradients, borders, corner radii, box shadows, margins, and padding.
-- Modern Semantic HTML: Use clean, semantic HTML5 tags (header, nav, main, section, footer, h1-h6, p, ul/li, button, a, form, input, table).
-- Layout: Lay it out using modern CSS (Flexbox and CSS Grid). Make the page responsive and clean.
-- Fonts: Include Google Fonts <link> or @import in <head> for any detected font families (e.g. Inter, Plus Jakarta Sans, Poppins, Roboto, Playfair Display, JetBrains Mono, etc.).
-- Icons & Graphics: Reproduce all icons, logos, illustrations, and graphic accents accurately using inline SVG (<svg>...</svg>) or CSS shapes. Do NOT use broken external image links or placehold.co images.
-- Complete Implementation: Write the FULL code. Never write comments in place of content (no "<!-- repeat for each item -->", no "<!-- other links here -->"). If the screenshot shows cards, list items, or columns, write all of them completely.
-- Interactive States: Add subtle hover and focus states on buttons and links with smooth transitions (150-250ms).
-
-%(texts_section)s
-
-Return ONLY the complete HTML document and nothing else. No explanation, no markdown fences.
-Start with `<!DOCTYPE html>`.
-"""
-
-
-def build_generate_direct_prompt(texts: Optional[List[str]] = None,
-                                 asset_lines: Optional[List[str]] = None) -> str:
-    texts_section = ""
-    if texts:
-        texts_section = (
-            "THE TEXT (Transcribed strings from the design for exact wording reference):\n"
-            + "\n".join("- " + t.replace("\n", " ") for t in texts[:120])
-            + "\n\nUse these exact strings in the markup where they appear in the screenshot."
-        )
-    assets_section = ""
-    if asset_lines:
-        assets_section = (
-            f"\n\nTHE IMAGES ({len(asset_lines)} picture(s) cropped from the screenshot):\n"
-            "Every photograph, illustration, and graphic in this design has already been extracted for you.\n"
-            "Use these markers as the `src` of an `<img>` tag (or inside CSS `background-image: url('RAMEN_ASSET_<n>')`):\n"
-            + "\n".join(asset_lines)
-            + "\n\nWrite each marker exactly (e.g., RAMEN_ASSET_0). It will be replaced automatically with the real cropped picture pixels.\n"
-            "Use these markers for all photographs/pictures in the layout so the page displays the real images. Never invent markers and never link to external image URLs or placehold.co."
-        )
-    return GENERATE_DIRECT_PROMPT % {"texts_section": texts_section + assets_section}
-
-
-CRITIQUE_DIRECT_PROMPT = """\
-Two screenshots are attached:
-
-1. THE TARGET -- the exact original design to reproduce.
-2. THE ATTEMPT -- the current rendered HTML/CSS page.
-Current visual match score is %(score).1f%%. The target is >= %(target).1f%%.
-
-List what is wrong with the attempt compared to the target design. One short line each, most serious first:
-- Layout and orientation discrepancies (e.g., sections in wrong order, stacked instead of side-by-side, grid/flex issues).
-- Typography discrepancies (wrong font families, font sizes, weights, line heights, or letter spacing).
-- Colors, backgrounds, gradients, borders, shadows, and corner radii differences.
-- Margins, padding, and spacing misalignments.
-- Missing or inaccurate icons, illustrations, or graphics.
-
-Reply with the lines and nothing else, each starting with "- ". If the attempt is already >= 95%% matching, reply with the single line "- nothing worth changing".
-"""
-
-
-def build_critique_direct_prompt(score: float, target: float = TARGET_ACCURACY_SCORE) -> str:
-    return CRITIQUE_DIRECT_PROMPT % {"score": score, "target": target}
-
-
-FIX_DIRECT_PROMPT = """\
-Here is the current HTML and a list of visual discrepancies found by comparing its render against the target design screenshot.
-Current visual match score is %(score).1f%%; target is >= %(target).1f%%.
-
-PROBLEMS TO FIX:
-%(issues)s
-
-Fix these problems in the HTML and CSS so the page matches the target design screenshot with 95%%+ fidelity.
-- Use clean, semantic HTML5 and modern CSS (Flexbox / Grid) inside a <style> tag in <head>.
-- Include Google Fonts links/imports in <head> for any required fonts.
-- Reproduce all icons, logos, and visual elements accurately with inline SVG or CSS shapes.
-- Keep all visible text accurate and complete. Do not omit sections or replace content with comments.
-- Preserve all RAMEN_ASSET_<n> image markers in <img> src or CSS background-image so real pictures stay in the page.
-- Ensure exact colors, backgrounds, borders, shadows, and spacing.
-
-Return the complete updated document and nothing else. No explanation, no markdown fences.
-Start with `<!DOCTYPE html>`.
-
-CURRENT HTML:
-%(html)s
-"""
-
-
-def build_fix_direct_prompt(current: str, issues: List[str], score: float,
-                            target: float = TARGET_ACCURACY_SCORE) -> str:
-    return FIX_DIRECT_PROMPT % {
-        "issues": "\n".join("- " + i for i in issues) or "- layout and styling do not match target",
-        "score": score,
-        "target": target,
-        "html": current,
-    }
-
 
 
 def parse_critique(reply: str) -> List[str]:
@@ -2082,9 +1985,10 @@ def generate_from_document(doc, api_key: Optional[str] = None,
     assets, asset_roles_map = extract_document_assets(flat)
     asset_lines = describe_assets(assets, roles=asset_roles_map)
 
-    prompt = build_generate_direct_prompt(texts, asset_lines)
+    prompt = build_generate_prompt(texts, asset_lines)
 
-    yield "status", ("Sending the screenshot to generate complete semantic HTML and CSS...")
+    yield "status", ("Sending the screenshot, %d image(s) and %d line(s) of text..."
+                     % (len(assets), len(texts)))
 
     buf = []
     tried: List[str] = []
@@ -2163,7 +2067,7 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         yield "status", "Comparing rendered attempt with the target screenshot..."
         try:
             critique = call_gemini(
-                build_critique_direct_prompt(score, target_score),
+                build_critique_prompt(),
                 api_key=api_key, model=model, timeout=timeout,
                 images=[shot, render])
         except EnhancementError as e:
@@ -2176,17 +2080,17 @@ def generate_from_document(doc, api_key: Optional[str] = None,
             yield "issue", issue
         all_issues.extend(issues)
 
-        if not issues and score >= 90.0:
-            yield "status", "Check %d found no further critical issues to change." % attempt
+        unused = missing_markers(raw, len(assets))
+        if not issues and not unused:
+            yield "status", "Check %d found nothing worth changing." % attempt
             break
 
-        yield "status", "Applying %d fix(es) to reach >= %.1f%% fidelity..." % (
-            len(issues), target_score)
+        yield "status", "Applying %d fix(es)%s..." % (
+            len(issues), " and placing %d unused image(s)" % len(unused) if unused else "")
         try:
             fixed = _unfence(call_gemini(
-                build_fix_direct_prompt(raw, issues, score, target_score),
-                api_key=api_key, model=model, timeout=timeout,
-                images=[shot, render]))
+                build_fix_prompt(raw, issues, len(assets)),
+                api_key=api_key, model=model, timeout=timeout))
         except EnhancementError as e:
             yield "status", "Could not apply check %d - %s." % (
                 attempt, short_reason(e))
