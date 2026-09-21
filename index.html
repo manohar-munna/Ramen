@@ -1872,6 +1872,165 @@ html, body {
 @media (prefers-reduced-motion: reduce) {
     .snackbar, .snackbar.leaving { animation: none; }
 }
+/* Enhance Top Progress Bar in Editor */
+.enhance-progress-bar {
+    position: sticky;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 80;
+    background: var(--bg-chrome);
+    border-bottom: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-sm);
+    padding: 10px 18px;
+    animation: slideDown 0.2s ease-out;
+}
+@keyframes slideDown {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.epb-main {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 100%;
+}
+.epb-status-line {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.epb-spinner {
+    width: 18px;
+    height: 18px;
+    border: 2.5px solid var(--border-subtle);
+    border-top-color: var(--accent-blue);
+    border-radius: 50%;
+    animation: epbSpin 0.7s linear infinite;
+    flex-shrink: 0;
+}
+.epb-spinner.done {
+    border: none;
+    background: var(--accent-green);
+    border-radius: 50%;
+    animation: none;
+    position: relative;
+}
+.epb-spinner.done::after {
+    content: '';
+    position: absolute;
+    top: 4px;
+    left: 6px;
+    width: 4px;
+    height: 8px;
+    border: solid white;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+@keyframes epbSpin {
+    to { transform: rotate(360deg); }
+}
+.epb-text-group {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+}
+.epb-operation {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.epb-detail {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.epb-badges {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.epb-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 12px;
+}
+.epb-badge-score {
+    background: var(--accent-blue-subtle);
+    color: var(--accent-blue);
+}
+.epb-badge-fixes {
+    background: var(--accent-amber-subtle);
+    color: var(--accent-amber);
+}
+.epb-close {
+    width: 22px;
+    height: 22px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 4px;
+}
+.epb-fixes-container {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    overflow: hidden;
+}
+.epb-fixes-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+.epb-fixes-list {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    padding-bottom: 2px;
+}
+.epb-fix-chip {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* 3-way view switcher in top bar */
+.view-mode-selector {
+    display: inline-flex;
+    margin-left: 4px;
+}
+.view-mode-selector .seg-btn {
+    font-size: 11px;
+    padding: 3px 10px;
+    font-weight: 500;
+}
+
+/* Original Screenshot view container */
+.original-page-container {
+    position: relative;
+    background-color: #ffffff;
+    box-shadow: var(--shadow-page);
+    overflow: hidden;
+}
+.original-page-container img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: contain;
+}
 </style>
     <!-- html2canvas for client-side visual fidelity comparison -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -1947,6 +2106,13 @@ html, body {
                 Enhance
             </button>
 
+            <!-- 3-Way View Switcher: Original Screenshot, Engine Reconstruction, Gemini Enhanced Page -->
+            <div id="view-mode-selector" class="segmented view-mode-selector" style="display: none;" role="group" aria-label="Page version">
+                <button id="btn-view-original" class="seg-btn" title="View Original Screenshot">Original</button>
+                <button id="btn-view-engine" class="seg-btn" title="View Engine Reconstruction">Engine</button>
+                <button id="btn-view-gemini" class="seg-btn active" title="View Gemini Enhanced Page">Gemini</button>
+            </div>
+
             <div class="dropdown-container">
                 <button id="btn-export-dropdown" class="btn btn-primary" aria-haspopup="true"
                         aria-expanded="false">
@@ -2003,6 +2169,28 @@ html, body {
 
         <!-- Center Workspace Canvas -->
         <main class="canvas-viewport" id="canvas-viewport">
+            <!-- Top Enhance Progress Bar (shows operation, details, match score, and live fixes) -->
+            <div id="enhance-progress-bar" class="enhance-progress-bar" style="display: none;">
+                <div class="epb-main">
+                    <div class="epb-status-line">
+                        <span class="epb-spinner" id="epb-spinner" aria-hidden="true"></span>
+                        <div class="epb-text-group">
+                            <span id="epb-operation" class="epb-operation">Preparing enhancement...</span>
+                            <span id="epb-detail" class="epb-detail">Connecting to Gemini...</span>
+                        </div>
+                        <div class="epb-badges">
+                            <span id="epb-score-badge" class="epb-badge epb-badge-score" style="display: none;">Match: --%</span>
+                            <span id="epb-fixes-badge" class="epb-badge epb-badge-fixes" style="display: none;">0 fixes</span>
+                        </div>
+                        <button id="btn-close-epb" class="btn-icon-subtle epb-close" title="Dismiss" style="display: none;">✕</button>
+                    </div>
+                    <div id="epb-fixes-container" class="epb-fixes-container" style="display: none;">
+                        <span class="epb-fixes-title">Fixes:</span>
+                        <div id="epb-fixes-list" class="epb-fixes-list"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- The box that takes up the room. A transform does not change layout, so
                  the page's own element is still full size however far it is scaled;
                  this one is set to the scaled size, which is what the scrollbars and
@@ -2283,6 +2471,19 @@ const elements = {
     btnCompareMode: document.getElementById('btn-compare-mode'),
     btnPageCode: document.getElementById('btn-page-code'),
     btnEnhance: document.getElementById('btn-enhance'),
+    viewModeSelector: document.getElementById('view-mode-selector'),
+    btnViewOriginal: document.getElementById('btn-view-original'),
+    btnViewEngine: document.getElementById('btn-view-engine'),
+    btnViewGemini: document.getElementById('btn-view-gemini'),
+    enhanceProgressBar: document.getElementById('enhance-progress-bar'),
+    epbSpinner: document.getElementById('epb-spinner'),
+    epbOperation: document.getElementById('epb-operation'),
+    epbDetail: document.getElementById('epb-detail'),
+    epbScoreBadge: document.getElementById('epb-score-badge'),
+    epbFixesBadge: document.getElementById('epb-fixes-badge'),
+    epbFixesContainer: document.getElementById('epb-fixes-container'),
+    epbFixesList: document.getElementById('epb-fixes-list'),
+    btnCloseEpb: document.getElementById('btn-close-epb'),
     btnThemeToggle: document.getElementById('btn-theme-toggle'),
     snackbars: document.getElementById('snackbars'),
     btnInspect: document.getElementById('btn-inspect'),
@@ -2452,10 +2653,24 @@ function setupEventListeners() {
     // Keyboard navigation
     window.addEventListener('keydown', handleGlobalKeyDown);
     
-    // Enhancement pass
+    // Enhancement pass & view switcher
     if (elements.btnEnhance) {
         elements.btnEnhance.addEventListener('click', enhanceCurrentDocument);
         refreshEnhanceAvailability();
+    }
+    if (elements.btnViewOriginal) {
+        elements.btnViewOriginal.addEventListener('click', () => switchViewMode('original'));
+    }
+    if (elements.btnViewEngine) {
+        elements.btnViewEngine.addEventListener('click', () => switchViewMode('engine'));
+    }
+    if (elements.btnViewGemini) {
+        elements.btnViewGemini.addEventListener('click', () => switchViewMode('gemini'));
+    }
+    if (elements.btnCloseEpb) {
+        elements.btnCloseEpb.addEventListener('click', () => {
+            if (elements.enhanceProgressBar) elements.enhanceProgressBar.style.display = 'none';
+        });
     }
 
     // Fidelity Diff Modal & Page Code
@@ -2687,6 +2902,14 @@ function loadDocument(docData, analysis) {
     state.doc = docData;
     state.currentPageIndex = 0;
     state.selectedElementId = null;
+    state.enhancedHtml = null;
+    state.activeViewMode = 'engine';
+
+    if (elements.viewModeSelector) elements.viewModeSelector.style.display = 'none';
+    if (elements.enhanceProgressBar) elements.enhanceProgressBar.style.display = 'none';
+    if (elements.btnViewOriginal) elements.btnViewOriginal.classList.remove('active');
+    if (elements.btnViewEngine) elements.btnViewEngine.classList.add('active');
+    if (elements.btnViewGemini) elements.btnViewGemini.classList.remove('active');
     
     // UI Metadata
     elements.emptyState.style.display = 'none';
@@ -2812,11 +3035,50 @@ function showBlendToggle() {}
 
 function switchViewMode(mode) {
     state.activeViewMode = mode;
-    if (mode === 'enhanced') {
+    if (elements.btnViewOriginal) elements.btnViewOriginal.classList.toggle('active', mode === 'original');
+    if (elements.btnViewEngine) elements.btnViewEngine.classList.toggle('active', mode === 'engine');
+    if (elements.btnViewGemini) elements.btnViewGemini.classList.toggle('active', mode === 'gemini');
+
+    if (mode === 'original') {
+        renderOriginalPage();
+    } else if (mode === 'gemini' || mode === 'enhanced') {
         renderEnhancedPage();
     } else {
         renderCurrentPage();
     }
+}
+
+function renderOriginalPage() {
+    if (!state.doc || !state.doc.pages[state.currentPageIndex]) return;
+    deselectElement();
+    if (elements.emptyState) elements.emptyState.style.display = 'none';
+    if (elements.documentStage) elements.documentStage.style.display = 'flex';
+    elements.documentStage.innerHTML = '';
+
+    const page = state.doc.pages[state.currentPageIndex];
+    const container = document.createElement('div');
+    container.id = 'original-page-container';
+    container.className = 'original-page-container';
+    container.style.width = `${page.width}px`;
+    container.style.height = `${page.height}px`;
+
+    if (page.originalImageSrc) {
+        const img = document.createElement('img');
+        img.src = page.originalImageSrc;
+        img.alt = `Page ${page.pageNumber || (state.currentPageIndex + 1)} Original`;
+        container.appendChild(img);
+    } else {
+        const hint = document.createElement('div');
+        hint.style.padding = '40px';
+        hint.style.color = 'var(--text-secondary)';
+        hint.textContent = 'No original screenshot available for this page.';
+        container.appendChild(hint);
+    }
+
+    elements.documentStage.appendChild(container);
+    updateThumbnailActiveState();
+    updatePageNavigation();
+    zoomToFit();
 }
 
 function renderEnhancedPage() {
@@ -3836,7 +4098,13 @@ function zoomToFit() {
 function goToPage(pageIndex) {
     if (!state.doc || pageIndex < 0 || pageIndex >= state.doc.pages.length) return;
     state.currentPageIndex = pageIndex;
-    renderCurrentPage();
+    if (state.activeViewMode === 'original') {
+        renderOriginalPage();
+    } else if (state.activeViewMode === 'gemini' || state.activeViewMode === 'enhanced') {
+        renderEnhancedPage();
+    } else {
+        renderCurrentPage();
+    }
 }
 
 function updatePageNavigation() {
@@ -3961,20 +4229,49 @@ async function enhanceCurrentDocument() {
     }
 
     elements.btnEnhance.disabled = true;
-    showProcessingModal('enhance');
-    updateStage('connect', 'Connecting to Gemini...', 5, 'Connecting');
+
+    // In the editor place, show empty screen
+    deselectElement();
+    if (elements.emptyState) elements.emptyState.style.display = 'none';
+    if (elements.documentStage) {
+        elements.documentStage.style.display = 'flex';
+        elements.documentStage.innerHTML = '';
+    }
+    if (elements.inspectBox) elements.inspectBox.style.display = 'none';
+    if (elements.inspectTip) elements.inspectTip.style.display = 'none';
+
+    // Top progress bar in editor area
+    if (elements.enhanceProgressBar) {
+        elements.enhanceProgressBar.style.display = 'block';
+    }
+    if (elements.epbSpinner) {
+        elements.epbSpinner.style.display = 'inline-block';
+        elements.epbSpinner.classList.remove('done');
+    }
+    if (elements.epbScoreBadge) elements.epbScoreBadge.style.display = 'none';
+    if (elements.epbFixesBadge) elements.epbFixesBadge.style.display = 'none';
+    if (elements.epbFixesContainer) elements.epbFixesContainer.style.display = 'none';
+    if (elements.epbFixesList) elements.epbFixesList.innerHTML = '';
+    if (elements.btnCloseEpb) elements.btnCloseEpb.style.display = 'none';
+
+    const elemCount = page.elements ? page.elements.length : 0;
+    const textElemCount = page.elements ? page.elements.filter(e => e.type === 'text').length : 0;
+    if (elements.epbOperation) elements.epbOperation.textContent = 'Connecting to Gemini...';
+    if (elements.epbDetail) elements.epbDetail.textContent = `Sending screenshot (${page.width}×${page.height}px) with ${elemCount} elements (${textElemCount} text blocks)...`;
     setStatus('Enhancing document with Gemini...');
 
     const started = Date.now();
     let buffer = '';
     let finalHtml = null;
+    let fixesCount = 0;
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${location.host}/ws/generate`);
     enhanceSocket = ws;
 
     ws.onopen = () => {
-        updateStage('connect', 'Sending screenshot...', 15, 'Preparing');
+        if (elements.epbOperation) elements.epbOperation.textContent = 'Sending Document Payload';
+        if (elements.epbDetail) elements.epbDetail.textContent = `Transmitting screenshot & structure (${elemCount} elements) to Gemini...`;
         ws.send(JSON.stringify({ document: state.doc }));
     };
 
@@ -3982,41 +4279,69 @@ async function enhanceCurrentDocument() {
         let msg;
         try { msg = JSON.parse(ev.data); }
         catch (e) {
-            updateStage('generate', 'Unreadable response from server', 50, 'Error');
+            if (elements.epbDetail) elements.epbDetail.textContent = 'Unreadable response from server';
             return;
         }
 
         if (msg.type === 'status') {
-            elements.processingDetailText.textContent = msg.detail;
+            if (elements.epbOperation) elements.epbOperation.textContent = msg.phase || 'Processing';
+            if (elements.epbDetail) elements.epbDetail.textContent = msg.detail;
             setStatus(msg.detail);
         } else if (msg.type === 'chunk') {
             buffer += msg.text;
-            const estPercent = Math.min(65, 15 + Math.round(buffer.length / 80));
-            updateStage('generate', `Writing markup (${buffer.length.toLocaleString()} chars)...`, estPercent, 'Generating');
+            if (elements.epbOperation) elements.epbOperation.textContent = 'Generating responsive markup';
+            if (elements.epbDetail) elements.epbDetail.textContent = `Streaming HTML/CSS (${buffer.length.toLocaleString()} chars received)...`;
         } else if (msg.type === 'score') {
-            const roundPct = Math.min(95, 65 + (msg.round / (msg.max_rounds || 3)) * 30);
-            updateStage('refine', `Visual match: ${msg.score}% (target >= ${msg.target}%) · Round ${msg.round}/${msg.max_rounds}`, roundPct, 'Refining');
+            if (elements.epbScoreBadge) {
+                elements.epbScoreBadge.style.display = 'inline-flex';
+                elements.epbScoreBadge.textContent = `Match: ${msg.score}% (Target ≥ ${msg.target}%)`;
+            }
+            if (elements.epbOperation) elements.epbOperation.textContent = `Visual Refinement · Round ${msg.round}/${msg.max_rounds}`;
+            if (elements.epbDetail) elements.epbDetail.textContent = `Critique score: ${msg.score}% (target: ${msg.target}%)`;
             setStatus(`Visual match: ${msg.score}% (Round ${msg.round}/${msg.max_rounds})`);
         } else if (msg.type === 'issue') {
-            elements.processingDetailText.textContent = `Refining: ${msg.detail}`;
+            fixesCount++;
+            if (elements.epbFixesBadge) {
+                elements.epbFixesBadge.style.display = 'inline-flex';
+                elements.epbFixesBadge.textContent = `${fixesCount} fix${fixesCount > 1 ? 'es' : ''}`;
+            }
+            if (elements.epbFixesContainer) {
+                elements.epbFixesContainer.style.display = 'flex';
+            }
+            if (elements.epbFixesList) {
+                const chip = document.createElement('span');
+                chip.className = 'epb-fix-chip';
+                chip.textContent = msg.detail;
+                chip.title = msg.detail;
+                elements.epbFixesList.appendChild(chip);
+                chip.scrollIntoView({ behavior: 'smooth', inline: 'nearest' });
+            }
+            if (elements.epbDetail) elements.epbDetail.textContent = `Fixing: ${msg.detail}`;
         } else if (msg.type === 'revision') {
             finalHtml = msg.html;
+            if (elements.epbDetail) elements.epbDetail.textContent = 'Applying visual fixes revision...';
         } else if (msg.type === 'done') {
             finalHtml = msg.html;
             state.enhancedHtml = finalHtml;
-            updateStage('finalize', 'Applying enhanced page to canvas...', 100, 'Done');
-            finishStages();
-            setTimeout(() => {
-                hideProcessingModal();
-                elements.btnEnhance.disabled = false;
-                switchViewMode('enhanced');
-                const secs = ((Date.now() - started) / 1000).toFixed(0);
-                const scoreMsg = (msg.score !== undefined && msg.score !== null) ? ` · Match: ${msg.score}%` : '';
-                setStatus(`Enhanced with ${msg.model} in ${secs}s${scoreMsg}`);
-                notify('Document enhanced successfully ✨', 'success');
-            }, 400);
+            if (elements.epbSpinner) elements.epbSpinner.classList.add('done');
+            if (elements.epbOperation) elements.epbOperation.textContent = 'Enhancement Complete!';
+            const secs = ((Date.now() - started) / 1000).toFixed(1);
+            const scoreText = (msg.score !== undefined && msg.score !== null) ? ` · Match: ${msg.score}%` : '';
+            if (elements.epbDetail) elements.epbDetail.textContent = `Completed with ${msg.model} in ${secs}s${scoreText}`;
+            if (elements.btnCloseEpb) elements.btnCloseEpb.style.display = 'inline-flex';
+
+            // Show 3-way toggle on right side top: [ Original | Engine | Gemini ]
+            if (elements.viewModeSelector) elements.viewModeSelector.style.display = 'inline-flex';
+            switchViewMode('gemini');
+
+            elements.btnEnhance.disabled = false;
+            setStatus(`Enhanced with ${msg.model} in ${secs}s${scoreText}`);
+            notify('Document enhanced successfully ✨', 'success');
         } else if (msg.type === 'error') {
-            hideProcessingModal();
+            if (elements.epbSpinner) elements.epbSpinner.style.display = 'none';
+            if (elements.epbOperation) elements.epbOperation.textContent = 'Enhancement Failed';
+            if (elements.epbDetail) elements.epbDetail.textContent = msg.detail;
+            if (elements.btnCloseEpb) elements.btnCloseEpb.style.display = 'inline-flex';
             elements.btnEnhance.disabled = false;
             notify(msg.detail, 'error', { title: 'Enhancement failed' });
             setStatus('Enhancement failed');
@@ -4024,7 +4349,10 @@ async function enhanceCurrentDocument() {
     };
 
     ws.onerror = () => {
-        hideProcessingModal();
+        if (elements.epbSpinner) elements.epbSpinner.style.display = 'none';
+        if (elements.epbOperation) elements.epbOperation.textContent = 'Connection Error';
+        if (elements.epbDetail) elements.epbDetail.textContent = 'WebSocket connection failed.';
+        if (elements.btnCloseEpb) elements.btnCloseEpb.style.display = 'inline-flex';
         elements.btnEnhance.disabled = false;
         notify('WebSocket connection failed.', 'error');
         setStatus('Enhancement connection failed');
@@ -4042,7 +4370,7 @@ async function exportDocument(format) {
         return;
     }
     
-    if (state.activeViewMode === 'enhanced' && state.enhancedHtml && format === 'html') {
+    if ((state.activeViewMode === 'gemini' || state.activeViewMode === 'enhanced') && state.enhancedHtml && format === 'html') {
         const title = (state.doc.title || 'enhanced_page').toLowerCase().replace(/\s+/g, '_');
         const blob = new Blob([state.enhancedHtml], { type: 'text/html' });
         const url = window.URL.createObjectURL(blob);
