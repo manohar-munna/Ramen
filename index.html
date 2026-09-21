@@ -3180,11 +3180,10 @@ function scheduleLivePreviewUpdate(frame, rawCode, assets, minHeight = 900) {
     if (!html || html.length < 20) return;
 
     if (assets && assets.length > 0) {
-        for (let i = 0; i < assets.length; i++) {
-            if (assets[i]) {
-                html = html.split(`RAMEN_ASSET_${i}`).join(assets[i]).split(`ASSET_${i}`).join(assets[i]);
-            }
-        }
+        html = html.replace(/(?:RAMEN_)?ASSET_(\d+)\b/g, (match, idx) => {
+            const i = parseInt(idx, 10);
+            return (assets[i] !== undefined && assets[i] !== null) ? assets[i] : match;
+        });
     }
 
     pendingLiveHtml = html;
