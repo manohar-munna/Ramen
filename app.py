@@ -366,6 +366,8 @@ async def generate_live(ws: WebSocket):
                 break
             if kind == "status":
                 await ws.send_json({"type": "status", "detail": payload})
+            elif kind == "assets":
+                await ws.send_json({"type": "assets", "assets": payload})
             elif kind == "issue":
                 await ws.send_json({"type": "issue", "detail": payload})
             elif kind == "score":

@@ -775,10 +775,14 @@ html, body {
     gap: 4px;
 }
 
-.enhanced-page-container {
+.enhanced-page-container,
+.enhanced-preview-frame {
     position: relative;
+    border: none;
     background-color: #ffffff;
     box-shadow: var(--shadow-page);
+    border-radius: 4px;
+    display: block;
     user-select: text;
     -webkit-user-select: text;
     transition: background-color 0.3s ease, color 0.3s ease;
@@ -791,7 +795,8 @@ html, body {
 
 /* Dark Theme support */
 .pdf-page.theme-dark,
-.enhanced-page-container.theme-dark {
+.enhanced-page-container.theme-dark,
+.enhanced-preview-frame.theme-dark {
     background-color: #0d1117 !important;
     color: #f0f6fc !important;
     transition: background-color 0.3s ease, color 0.3s ease;
@@ -3107,6 +3112,93 @@ function renderOriginalPage() {
     zoomToFit();
 }
 
+// Extract HTML content cleanly from streaming or full code (inspired by screenshot-to-code)
+function extractHtml(code) {
+    if (!code) return '';
+    let str = code.trim();
+    const htmlBlockMatch = str.match(/```(?:html)?\s*([\s\S]*?)(?:```|$)/i);
+    if (htmlBlockMatch && htmlBlockMatch[1]) {
+        str = htmlBlockMatch[1].trim();
+    } else {
+        if (str.startsWith('```html')) str = str.slice(7);
+        else if (str.startsWith('```')) str = str.slice(3);
+        if (str.endsWith('```')) str = str.slice(0, -3);
+        str = str.trim();
+    }
+
+    const docTypeIdx = str.toLowerCase().indexOf('<!doctype');
+    if (docTypeIdx !== -1) return str.slice(docTypeIdx);
+    const htmlIdx = str.toLowerCase().indexOf('<html');
+    if (htmlIdx !== -1) return str.slice(htmlIdx);
+    const headIdx = str.toLowerCase().indexOf('<head');
+    if (headIdx !== -1) return '<!DOCTYPE html><html>' + str.slice(headIdx);
+    const styleIdx = str.toLowerCase().indexOf('<style');
+    if (styleIdx !== -1) return '<!DOCTYPE html><html><head>' + str.slice(styleIdx);
+    const bodyIdx = str.toLowerCase().indexOf('<body');
+    if (bodyIdx !== -1) return '<!DOCTYPE html><html><head></head>' + str.slice(bodyIdx);
+    return str;
+}
+
+function adjustFrameHeight(frame, minHeight = 900) {
+    if (!frame) return;
+    const applyHeight = () => {
+        try {
+            const doc = frame.contentDocument || frame.contentWindow?.document;
+            if (doc && doc.documentElement) {
+                const bodyHeight = doc.body ? doc.body.scrollHeight : 0;
+                const docHeight = doc.documentElement.scrollHeight;
+                const h = Math.max(bodyHeight, docHeight, minHeight);
+                frame.style.height = `${h}px`;
+                const page = state.doc && state.doc.pages[state.currentPageIndex];
+                if (page && (state.activeViewMode === 'gemini' || state.activeViewMode === 'enhanced')) {
+                    const z = state.zoom || 1.0;
+                    if (elements.canvasFit) {
+                        elements.canvasFit.style.height = `${Math.floor(h * z)}px`;
+                    }
+                }
+            }
+        } catch (e) {}
+    };
+    applyHeight();
+    frame.onload = applyHeight;
+}
+
+let livePreviewTimer = null;
+let pendingLiveHtml = null;
+
+function cancelScheduledLivePreview() {
+    if (livePreviewTimer) {
+        clearTimeout(livePreviewTimer);
+        livePreviewTimer = null;
+    }
+    pendingLiveHtml = null;
+}
+
+function scheduleLivePreviewUpdate(frame, rawCode, assets, minHeight = 900) {
+    if (!frame) return;
+    let html = extractHtml(rawCode);
+    if (!html || html.length < 20) return;
+
+    if (assets && assets.length > 0) {
+        for (let i = 0; i < assets.length; i++) {
+            if (assets[i]) {
+                html = html.split(`ASSET_${i}`).join(assets[i]);
+            }
+        }
+    }
+
+    pendingLiveHtml = html;
+    if (!livePreviewTimer) {
+        livePreviewTimer = setTimeout(() => {
+            livePreviewTimer = null;
+            if (pendingLiveHtml && frame) {
+                frame.srcdoc = pendingLiveHtml;
+                adjustFrameHeight(frame, minHeight);
+            }
+        }, 150);
+    }
+}
+
 function renderEnhancedPage() {
     if (!state.enhancedHtml) {
         notify('No enhanced page available yet. Click "Enhance" first.', 'info');
@@ -3118,79 +3210,80 @@ function renderEnhancedPage() {
     elements.documentStage.innerHTML = '';
 
     const page = state.doc?.pages[state.currentPageIndex] || state.doc?.pages[0];
-    const container = document.createElement('div');
-    container.id = 'enhanced-page-container';
-    container.className = `enhanced-page-container ${state.isDarkTheme ? 'theme-dark' : ''}`;
-
     const pw = page ? page.width : 1400;
     const ph = page ? page.height : 900;
-    container.style.width = `${pw}px`;
-    container.style.minHeight = `${ph}px`;
 
-    const parser = new DOMParser();
-    const parsed = parser.parseFromString(state.enhancedHtml, 'text/html');
+    const frame = document.createElement('iframe');
+    frame.id = 'enhanced-preview-frame';
+    frame.className = `enhanced-preview-frame ${state.isDarkTheme ? 'theme-dark' : ''}`;
+    frame.style.width = `${pw}px`;
+    frame.style.minHeight = `${ph}px`;
+    frame.sandbox = 'allow-scripts allow-same-origin allow-forms';
+    frame.srcdoc = state.enhancedHtml;
 
-    // Copy styles and links
-    parsed.querySelectorAll('style, link[rel="stylesheet"]').forEach(s => {
-        container.appendChild(s.cloneNode(true));
+    frame.addEventListener('load', () => {
+        adjustFrameHeight(frame, ph);
+        makeEnhancedElementsInteractive(frame);
     });
 
-    // Copy body contents
-    Array.from(parsed.body.childNodes).forEach(node => {
-        container.appendChild(node.cloneNode(true));
-    });
-
-    makeEnhancedElementsInteractive(container);
-    attachThemeToggleHandlers(container);
-
-    elements.documentStage.appendChild(container);
+    elements.documentStage.appendChild(frame);
+    updateThumbnailActiveState();
+    updatePageNavigation();
     zoomToFit();
 }
 
-function makeEnhancedElementsInteractive(container) {
-    const editableTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'button', 'a', 'li', 'td', 'th', 'label', 'b', 'strong', 'i', 'em'];
-    const editableSelector = editableTags.join(', ');
+function makeEnhancedElementsInteractive(frame) {
+    if (!frame) return;
+    try {
+        const doc = frame.contentDocument || frame.contentWindow?.document;
+        if (!doc) return;
 
-    container.querySelectorAll(editableSelector).forEach(el => {
-        if (el.children.length === 0 || el.tagName.toLowerCase().startsWith('h') || el.tagName.toLowerCase() === 'p') {
-            el.contentEditable = "true";
-            el.spellcheck = false;
-            el.addEventListener('input', () => {
-                state.enhancedHtml = container.innerHTML;
-                syncPropertiesPanelText(el.innerText);
-            });
-        }
-    });
+        const editableTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'button', 'a', 'li', 'td', 'th', 'label', 'b', 'strong', 'i', 'em'];
+        const editableSelector = editableTags.join(', ');
 
-    container.querySelectorAll('*').forEach(el => {
-        const tag = el.tagName.toLowerCase();
-        if (['style', 'link', 'script', 'head', 'meta', 'title'].includes(tag)) return;
-        el.classList.add('pdf-element');
-
-        el.addEventListener('mousedown', (e) => {
-            e.stopPropagation();
-            selectEnhancedElement(el, container);
+        doc.querySelectorAll(editableSelector).forEach(el => {
+            if (el.children.length === 0 || el.tagName.toLowerCase().startsWith('h') || el.tagName.toLowerCase() === 'p') {
+                el.contentEditable = "true";
+                el.spellcheck = false;
+                el.addEventListener('input', () => {
+                    state.enhancedHtml = '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+                    syncPropertiesPanelText(el.innerText);
+                });
+            }
         });
-    });
+
+        doc.querySelectorAll('*').forEach(el => {
+            const tag = el.tagName.toLowerCase();
+            if (['style', 'link', 'script', 'head', 'meta', 'title', 'html', 'body'].includes(tag)) return;
+            el.addEventListener('mousedown', (e) => {
+                e.stopPropagation();
+                selectEnhancedElementInFrame(el, frame);
+            });
+        });
+
+        attachThemeToggleHandlers(doc);
+    } catch (e) {
+        console.warn('Interactive binding warning:', e);
+    }
 }
 
-function selectEnhancedElement(el, container) {
+function selectEnhancedElementInFrame(el, frame) {
     if (!el.id) {
         el.id = 'enh-' + Math.random().toString(36).slice(2, 8);
     }
     state.selectedElementId = el.id;
 
-    const cRect = container.getBoundingClientRect();
+    const fRect = frame.getBoundingClientRect();
     const eRect = el.getBoundingClientRect();
     const z = state.zoom || 1.0;
     const bbox = [
-        (eRect.left - cRect.left) / z,
-        (eRect.top - cRect.top) / z,
-        (eRect.right - cRect.left) / z,
-        (eRect.bottom - cRect.top) / z,
+        (eRect.left - fRect.left) / z,
+        (eRect.top - fRect.top) / z,
+        (eRect.right - fRect.left) / z,
+        (eRect.bottom - fRect.top) / z,
     ];
 
-    const computed = window.getComputedStyle(el);
+    const computed = (frame.contentWindow || window).getComputedStyle(el);
     const tag = el.tagName.toLowerCase();
     const isText = tag.startsWith('h') || ['p', 'span', 'a', 'button', 'label', 'li', 'td', 'th'].includes(tag);
 
@@ -3247,29 +3340,51 @@ function attachThemeToggleHandlers(container) {
 
 function togglePageTheme(container, clickedSwitch) {
     if (!container) {
-        container = document.getElementById('enhanced-page-container') || document.querySelector('.pdf-page');
+        container = document.getElementById('enhanced-preview-frame') || document.getElementById('enhanced-page-container') || document.querySelector('.pdf-page');
     }
     if (!container) return;
 
     state.isDarkTheme = !state.isDarkTheme;
     const isDark = state.isDarkTheme;
-    container.classList.toggle('theme-dark', isDark);
 
-    // Update all switches in the container
-    const switches = container.querySelectorAll('[data-role="switch"], .theme-switch-btn, [class*="switch" i], [class*="toggle" i]');
-    switches.forEach(sw => {
-        sw.classList.toggle('is-dark', isDark);
-        sw.setAttribute('aria-checked', isDark ? 'true' : 'false');
+    if (container.classList) {
+        container.classList.toggle('theme-dark', isDark);
+    }
 
-        // Knob sliding
-        const knob = sw.querySelector('.switch-knob, .pdf-shape, div[style*="50%"], span');
-        if (knob) {
-            const trackW = sw.offsetWidth || 44;
-            const knobW = knob.offsetWidth || 20;
-            const travel = Math.max(trackW - knobW - 4, 16);
-            knob.style.transform = isDark ? `translateX(${travel}px)` : 'translateX(0px)';
-        }
-    });
+    const frame = document.getElementById('enhanced-preview-frame');
+    if (frame) {
+        frame.classList.toggle('theme-dark', isDark);
+        try {
+            const fDoc = frame.contentDocument;
+            if (fDoc && fDoc.documentElement) {
+                fDoc.documentElement.classList.toggle('dark', isDark);
+                fDoc.documentElement.classList.toggle('theme-dark', isDark);
+                if (fDoc.body) {
+                    fDoc.body.classList.toggle('dark', isDark);
+                    fDoc.body.classList.toggle('theme-dark', isDark);
+                }
+            }
+        } catch(e) {}
+    }
+
+    const root = container.nodeType === Node.DOCUMENT_NODE ? container : (container.contentDocument || container);
+    try {
+        const switches = root.querySelectorAll('[data-role="switch"], .theme-switch-btn, [class*="switch" i], [class*="toggle" i]');
+        switches.forEach(sw => {
+            const ariaChecked = sw.getAttribute('aria-checked');
+            if (ariaChecked !== null) sw.setAttribute('aria-checked', String(isDark));
+            sw.classList.toggle('is-dark', isDark);
+            sw.classList.toggle('active', isDark);
+
+            const knob = sw.querySelector('.switch-knob, .pdf-shape, div[style*="50%"], span');
+            if (knob) {
+                const trackW = sw.offsetWidth || 44;
+                const knobW = knob.offsetWidth || 20;
+                const travel = Math.max(trackW - knobW - 4, 16);
+                knob.style.transform = isDark ? `translateX(${travel}px)` : 'translateX(0px)';
+            }
+        });
+    } catch(e) {}
 
     notify(isDark ? 'Switched to Dark Theme 🌙' : 'Switched to Light Theme ☀️', 'info');
 }
@@ -4257,9 +4372,15 @@ async function enhanceCurrentDocument() {
         return;
     }
 
+    if (enhanceSocket) {
+        try { enhanceSocket.close(); } catch(e) {}
+        enhanceSocket = null;
+    }
+    cancelScheduledLivePreview();
+
     elements.btnEnhance.disabled = true;
 
-    // In the editor place, show empty screen
+    // Prepare live building canvas in the editor
     deselectElement();
     if (elements.emptyState) elements.emptyState.style.display = 'none';
     if (elements.documentStage) {
@@ -4268,6 +4389,43 @@ async function enhanceCurrentDocument() {
     }
     if (elements.inspectBox) elements.inspectBox.style.display = 'none';
     if (elements.inspectTip) elements.inspectTip.style.display = 'none';
+
+    // Switch view mode state to gemini so the user sees live building
+    state.activeViewMode = 'gemini';
+    if (elements.viewModeSelector) elements.viewModeSelector.style.display = 'inline-flex';
+    if (elements.btnViewOriginal) elements.btnViewOriginal.classList.remove('active');
+    if (elements.btnViewEngine) elements.btnViewEngine.classList.remove('active');
+    if (elements.btnViewGemini) elements.btnViewGemini.classList.add('active');
+
+    // Create live preview iframe in editor
+    const pw = page ? page.width : 1400;
+    const ph = page ? page.height : 900;
+    const frame = document.createElement('iframe');
+    frame.id = 'enhanced-preview-frame';
+    frame.className = `enhanced-preview-frame ${state.isDarkTheme ? 'theme-dark' : ''}`;
+    frame.style.width = `${pw}px`;
+    frame.style.minHeight = `${ph}px`;
+    frame.sandbox = 'allow-scripts allow-same-origin allow-forms';
+
+    // Initial clean live building skeleton
+    frame.srcdoc = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f8fafc; color: #475569; }
+    .building-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 36px 44px; box-shadow: 0 4px 24px rgba(0,0,0,0.06); text-align: center; max-width: 460px; }
+    .pulse-ring { width: 44px; height: 44px; border: 3px solid #e0e7ff; border-top-color: #2563eb; border-radius: 50%; animation: spin 1s cubic-bezier(0.55, 0.15, 0.45, 0.85) infinite; margin: 0 auto 16px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .title { font-size: 16px; font-weight: 600; color: #0f172a; margin-bottom: 6px; }
+    .desc { font-size: 13px; color: #64748b; line-height: 1.5; }
+    </style></head><body>
+    <div class="building-card">
+        <div class="pulse-ring"></div>
+        <div class="title">Live Building in Progress</div>
+        <div class="desc">Gemini is analyzing the screenshot & layout. Responsive markup and styles will stream live into this preview.</div>
+    </div>
+    </body></html>`;
+
+    elements.documentStage.appendChild(frame);
+    zoomToFit();
 
     // Top progress bar in editor area
     if (elements.enhanceProgressBar) {
@@ -4293,6 +4451,7 @@ async function enhanceCurrentDocument() {
     let buffer = '';
     let finalHtml = null;
     let fixesCount = 0;
+    let harvestedAssets = [];
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${location.host}/ws/generate`);
@@ -4316,10 +4475,14 @@ async function enhanceCurrentDocument() {
             if (elements.epbOperation) elements.epbOperation.textContent = msg.phase || 'Processing';
             if (elements.epbDetail) elements.epbDetail.textContent = msg.detail;
             setStatus(msg.detail);
+        } else if (msg.type === 'assets') {
+            harvestedAssets = msg.assets || [];
         } else if (msg.type === 'chunk') {
             buffer += msg.text;
             if (elements.epbOperation) elements.epbOperation.textContent = 'Generating responsive markup';
             if (elements.epbDetail) elements.epbDetail.textContent = `Streaming HTML/CSS (${buffer.length.toLocaleString()} chars received)...`;
+            // Live Building: update preview frame throttled at 150ms
+            scheduleLivePreviewUpdate(frame, buffer, harvestedAssets, ph);
         } else if (msg.type === 'score') {
             if (elements.epbScoreBadge) {
                 elements.epbScoreBadge.style.display = 'inline-flex';
@@ -4348,10 +4511,22 @@ async function enhanceCurrentDocument() {
             if (elements.epbDetail) elements.epbDetail.textContent = `Fixing: ${msg.detail}`;
         } else if (msg.type === 'revision') {
             finalHtml = msg.html;
-            if (elements.epbDetail) elements.epbDetail.textContent = 'Applying visual fixes revision...';
+            state.enhancedHtml = finalHtml;
+            cancelScheduledLivePreview();
+            frame.srcdoc = finalHtml;
+            adjustFrameHeight(frame, ph);
+            if (elements.epbDetail) elements.epbDetail.textContent = 'Applied visual fixes revision ✨';
         } else if (msg.type === 'done') {
             finalHtml = msg.html;
             state.enhancedHtml = finalHtml;
+            cancelScheduledLivePreview();
+            frame.srcdoc = finalHtml;
+            adjustFrameHeight(frame, ph);
+            frame.addEventListener('load', () => {
+                adjustFrameHeight(frame, ph);
+                makeEnhancedElementsInteractive(frame);
+            });
+
             if (elements.epbSpinner) elements.epbSpinner.classList.add('done');
             if (elements.epbOperation) elements.epbOperation.textContent = 'Enhancement Complete!';
             const secs = ((Date.now() - started) / 1000).toFixed(1);
@@ -4367,6 +4542,7 @@ async function enhanceCurrentDocument() {
             setStatus(`Enhanced with ${msg.model} in ${secs}s${scoreText}`);
             notify('Document enhanced successfully ✨', 'success');
         } else if (msg.type === 'error') {
+            cancelScheduledLivePreview();
             if (elements.epbSpinner) elements.epbSpinner.style.display = 'none';
             if (elements.epbOperation) elements.epbOperation.textContent = 'Enhancement Failed';
             if (elements.epbDetail) elements.epbDetail.textContent = msg.detail;
@@ -4378,6 +4554,7 @@ async function enhanceCurrentDocument() {
     };
 
     ws.onerror = () => {
+        cancelScheduledLivePreview();
         if (elements.epbSpinner) elements.epbSpinner.style.display = 'none';
         if (elements.epbOperation) elements.epbOperation.textContent = 'Connection Error';
         if (elements.epbDetail) elements.epbDetail.textContent = 'WebSocket connection failed.';
@@ -4757,16 +4934,38 @@ function renderCodeViewPreview(page) {
     if (!previewCanvas) return;
     previewCanvas.innerHTML = '';
     
+    const availW = Math.max((previewCanvas.clientWidth || 360) - 32, 200);
+    const availH = Math.max((previewCanvas.clientHeight || 500) - 32, 200);
+    const pageW = page.width || 595.0;
+    const pageH = page.height || 842.0;
+    const scale = Math.min(availW / pageW, availH / pageH, 1.0);
+    const targetW = Math.round(pageW * scale);
+    const targetH = Math.round(pageH * scale);
+
+    if ((state.activeViewMode === 'gemini' || state.activeViewMode === 'enhanced') && state.enhancedHtml) {
+        const frame = document.createElement('iframe');
+        frame.style.width = `${pageW}px`;
+        frame.style.height = `${pageH}px`;
+        frame.style.transformOrigin = '0 0';
+        frame.style.transform = `scale(${scale})`;
+        frame.style.border = 'none';
+        frame.style.pointerEvents = 'none';
+        frame.sandbox = 'allow-scripts allow-same-origin';
+        frame.srcdoc = state.enhancedHtml;
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'diff-html-page-wrapper';
+        wrapper.style.width = `${targetW}px`;
+        wrapper.style.height = `${targetH}px`;
+        wrapper.style.position = 'relative';
+        wrapper.style.overflow = 'hidden';
+        wrapper.appendChild(frame);
+        previewCanvas.appendChild(wrapper);
+        return;
+    }
+
     const domPage = document.getElementById(`pdf-page-${page.pageNumber}`);
     if (domPage) {
-        const availW = Math.max((previewCanvas.clientWidth || 360) - 32, 200);
-        const availH = Math.max((previewCanvas.clientHeight || 500) - 32, 200);
-        const pageW = page.width || 595.0;
-        const pageH = page.height || 842.0;
-        const scale = Math.min(availW / pageW, availH / pageH, 1.0);
-        const targetW = Math.round(pageW * scale);
-        const targetH = Math.round(pageH * scale);
-        
         const clonedPage = domPage.cloneNode(true);
         clonedPage.style.boxShadow = 'none';
         clonedPage.style.margin = '0';

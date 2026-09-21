@@ -1955,6 +1955,7 @@ def generate_from_document(doc, api_key: Optional[str] = None,
 
     yield "status", ("Sending the screenshot, %d image(s) and %d line(s) of text..."
                      % (len(assets), len(page_texts(flat))))
+    yield "assets", assets
 
     # A model that writes nothing is not a dead end while others remain. It happens --
     # a lite model spending its whole budget on reasoning, a stop before the first
