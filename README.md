@@ -309,9 +309,15 @@ trained on both learns to tell them apart and applies a different prior to each.
   a character over the length of a word — it produced `yourbuyersr ead.`. A break in the
   wrong place reads as a typo rather than as a limit of the recogniser, so the text is
   left as read. A dictionary-based splitter would be the honest fix and is not written.
-- **A run is drawn in one colour.** The ink bounds of a two-tone line are measured whole,
-  so `your buyers read.` is now sized correctly, but the run still takes the dominant
-  colour for all of it — the accent half renders in the colour of the other half.
+- **The typeface is approximated, not identified.** A page is reconstructed in one of
+  the faces that ship with it, chosen serif or sans from the stroke weights. Which
+  *particular* grotesque the original used is not determined — that needs matching
+  against a font database, which this does not have. Picking between the two shipped
+  sans faces by drawing the words and comparing them to the ink was tried: the two
+  criteria you can score it by disagree, and on the one page where the answer is
+  decisive the width-aware one chooses the face already in use. With two faces this
+  similar there is nothing to choose between. Weight, size and tracking are measured,
+  so a page comes out the right colour and rhythm in a near-enough face.
 - **Icons are absorbed into the text layer.** OCR reads a glyph-like icon as characters —
   one renders as the literal string `83` — so the icon is neither drawn nor available as
   an element.
