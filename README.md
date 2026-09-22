@@ -300,12 +300,24 @@ trained on both learns to tell them apart and applies a different prior to each.
   with its placeholder, all painted by CSS. But no control with a radius of half its own
   height appears anywhere in the eleven references, so that case has no evidence behind
   it either way.
+- **Words the recogniser runs together stay run together.** PaddleOCR returns tightly
+  set type as one token — `yourbuyersread.`, `Cargocontainer` — and the page renders it
+  that way. Splitting them from the pixels was tried and does not work: the gap between
+  two words is easy to find, but turning a gap position into a position in the string is
+  not, because the letters merge. One headline is 15 characters and 11 marks, so there is
+  no mapping between them, and the measurement font's advance widths drift by more than
+  a character over the length of a word — it produced `yourbuyersr ead.`. A break in the
+  wrong place reads as a typo rather than as a limit of the recogniser, so the text is
+  left as read. A dictionary-based splitter would be the honest fix and is not written.
+- **A run is drawn in one colour.** The ink bounds of a two-tone line are measured whole,
+  so `your buyers read.` is now sized correctly, but the run still takes the dominant
+  colour for all of it — the accent half renders in the colour of the other half.
 - **Icons are absorbed into the text layer.** OCR reads a glyph-like icon as characters —
   one renders as the literal string `83` — so the icon is neither drawn nor available as
   an element.
 - **Ground truth exists for one page.** Component accuracy is therefore a single-page
   measurement, and generalisation is unproven. There are now eleven reference images but
-  only one has a hand-read component list, so "24/25" is a claim about one page. Adding
+  only one has a hand-read component list, so "25/25" is a claim about one page. Adding
   ground truth is the highest-value contribution to this repo.
 - **Output is mostly base64.** Roughly 90% of each exported file is inline PNG data, and
   a page runs 0.6–1.8 MB. Fine to view, not yet a clean hand-editable document.
