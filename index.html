@@ -2210,7 +2210,7 @@ html, body {
                             <span id="epb-score-badge" class="epb-badge epb-badge-score" style="display: none;">Match: --%</span>
                             <span id="epb-fixes-badge" class="epb-badge epb-badge-fixes" style="display: none;">0 fixes</span>
                         </div>
-                        <button id="btn-close-epb" class="btn-icon-subtle epb-close" title="Dismiss" style="display: none;">✕</button>
+                        <button id="btn-close-epb" class="btn-icon-subtle epb-close" title="Dismiss" aria-label="Dismiss" style="display: none;"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
                     </div>
                     <div id="epb-fixes-container" class="epb-fixes-container" style="display: none;">
                         <span class="epb-fixes-title">Fixes:</span>
@@ -2296,7 +2296,7 @@ html, body {
                 <button id="btn-zoom-in" class="btn-control" title="Zoom In"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
                 <button id="btn-zoom-fit" class="btn-control-subtle" title="Fit to Window">Fit Width</button>
                 <div class="divider-v"></div>
-                <button id="btn-theme-toggle" class="btn-control-subtle" title="Toggle Page Theme (Dark/Light)">🌓 Theme</button>
+                <button id="btn-theme-toggle" class="btn-control-subtle" title="Toggle Page Theme (Dark/Light)"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg> Theme</button>
             </div>
             <div class="divider-v"></div>
             <span id="status-info-text" class="status-msg">Ready</span>
@@ -3383,7 +3383,7 @@ function togglePageTheme(container, clickedSwitch) {
         });
     } catch(e) {}
 
-    notify(isDark ? 'Switched to Dark Theme 🌙' : 'Switched to Light Theme ☀️', 'info');
+    notify(isDark ? 'Switched to the dark theme.' : 'Switched to the light theme.', 'info');
 }
 
 const VOID_TAGS = new Set(['input', 'img', 'br', 'hr']);
@@ -4457,10 +4457,12 @@ async function enhanceCurrentDocument() {
     ws.onopen = () => {
         if (elements.epbOperation) elements.epbOperation.textContent = 'Sending Document Payload';
         if (elements.epbDetail) elements.epbDetail.textContent = `Transmitting screenshot & structure (${elemCount} elements) to Gemini...`;
+        // Only the page on screen. The whole document went, every page's images
+        // included, and the server then used page one's screenshot whatever page was
+        // open -- with every page's text.
         ws.send(JSON.stringify({
-            document: state.doc,
-            verify: 15,
-            targetScore: 95.0
+            document: { ...state.doc, pageCount: 1, pages: [page] },
+            verify: 3
         }));
     };
 
@@ -4472,8 +4474,9 @@ async function enhanceCurrentDocument() {
             return;
         }
 
-        if (msg.type === 'status') {
-            if (elements.epbOperation) elements.epbOperation.textContent = msg.phase || 'Processing';
+        if (msg.type === 'phase') {
+            if (elements.epbOperation) elements.epbOperation.textContent = msg.label;
+        } else if (msg.type === 'status') {
             if (elements.epbDetail) elements.epbDetail.textContent = msg.detail;
             setStatus(msg.detail);
         } else if (msg.type === 'assets') {
@@ -4487,11 +4490,14 @@ async function enhanceCurrentDocument() {
         } else if (msg.type === 'score') {
             if (elements.epbScoreBadge) {
                 elements.epbScoreBadge.style.display = 'inline-flex';
-                elements.epbScoreBadge.textContent = `Match: ${msg.score}% (Target ≥ ${msg.target}%)`;
+                elements.epbScoreBadge.textContent = `Match: ${msg.score}%`;
             }
-            if (elements.epbOperation) elements.epbOperation.textContent = `Visual Refinement · Round ${msg.round}/${msg.max_rounds}`;
-            if (elements.epbDetail) elements.epbDetail.textContent = `Critique score: ${msg.score}% (target: ${msg.target}%)`;
-            setStatus(`Visual match: ${msg.score}% (Round ${msg.round}/${msg.max_rounds})`);
+            // Round 0 is the engine's page, which everything else has to beat.
+            const what = msg.label === 'engine' ? "Engine's reconstruction"
+                       : msg.label === 'rewrite' ? 'Rewrite'
+                       : `Round ${msg.round} of ${msg.max_rounds}`;
+            if (elements.epbDetail) elements.epbDetail.textContent = `${what}: ${msg.score}% match`;
+            setStatus(`${what}: ${msg.score}% match`);
         } else if (msg.type === 'issue') {
             fixesCount++;
             if (elements.epbFixesBadge) {
@@ -4516,7 +4522,7 @@ async function enhanceCurrentDocument() {
             cancelScheduledLivePreview();
             frame.srcdoc = finalHtml;
             adjustFrameHeight(frame, ph);
-            if (elements.epbDetail) elements.epbDetail.textContent = 'Applied visual fixes revision ✨';
+            if (elements.epbDetail) elements.epbDetail.textContent = 'A better version was found and is showing now.';
         } else if (msg.type === 'done') {
             finalHtml = msg.html;
             state.enhancedHtml = finalHtml;
@@ -4529,10 +4535,16 @@ async function enhanceCurrentDocument() {
             });
 
             if (elements.epbSpinner) elements.epbSpinner.classList.add('done');
-            if (elements.epbOperation) elements.epbOperation.textContent = 'Enhancement Complete!';
+            if (elements.epbOperation) elements.epbOperation.textContent = 'Done';
             const secs = ((Date.now() - started) / 1000).toFixed(1);
-            const scoreText = (msg.score !== undefined && msg.score !== null) ? ` · Match: ${msg.score}%` : '';
-            if (elements.epbDetail) elements.epbDetail.textContent = `Completed with ${msg.model} in ${secs}s${scoreText}`;
+            // Say where the result came from. When no version beat the engine's page, the
+            // engine's page is what is shown, and that should not be credited to a model.
+            const fromEngine = msg.source === 'engine';
+            const summary = fromEngine
+                ? `No version beat the engine's reconstruction (${msg.score}%), so that is what is shown`
+                : `${msg.score}% match, up from ${msg.engine_score}% for the engine alone (${msg.model})`;
+            const detailText = `${summary} · ${msg.calls} model call${msg.calls === 1 ? '' : 's'} · ${secs}s`;
+            if (elements.epbDetail) elements.epbDetail.textContent = detailText;
             if (elements.btnCloseEpb) elements.btnCloseEpb.style.display = 'inline-flex';
 
             // Show 3-way toggle on right side top: [ Original | Engine | Gemini ]
@@ -4540,8 +4552,9 @@ async function enhanceCurrentDocument() {
             switchViewMode('gemini');
 
             elements.btnEnhance.disabled = false;
-            setStatus(`Enhanced with ${msg.model} in ${secs}s${scoreText}`);
-            notify('Document enhanced successfully ✨', 'success');
+            setStatus(detailText);
+            notify(summary + '.', fromEngine ? 'info' : 'success',
+                   { title: fromEngine ? 'Kept the engine\'s page' : 'Page recreated' });
         } else if (msg.type === 'error') {
             cancelScheduledLivePreview();
             if (elements.epbSpinner) elements.epbSpinner.style.display = 'none';
@@ -4589,7 +4602,7 @@ async function exportDocument(format) {
         setTimeout(() => window.URL.revokeObjectURL(url), 30000);
         a.remove();
         setStatus('Exported Enhanced HTML successfully.');
-        notify('Enhanced HTML exported ✨', 'success');
+        notify('The recreated page was exported.', 'success');
         return;
     }
     

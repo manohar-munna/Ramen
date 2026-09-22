@@ -339,7 +339,9 @@ async def generate_live(ws: WebSocket):
             for kind, payload in enhancer.generate_from_document(
                     doc, model=request.get("model"),
                     verify=int(request.get("verify", enhancer.VERIFY_ROUNDS)),
-                    target_score=float(request.get("targetScore", enhancer.TARGET_ACCURACY_SCORE))):
+                    target_score=float(request.get("targetScore",
+                                                   enhancer.TARGET_ACCURACY_SCORE)),
+                    page_index=int(request.get("page", 0))):
                 if abandoned:
                     logger.info("live generation abandoned by the client")
                     return
@@ -366,6 +368,11 @@ async def generate_live(ws: WebSocket):
                 break
             if kind == "status":
                 await ws.send_json({"type": "status", "detail": payload})
+            elif kind == "phase":
+                # The stage it is in, for the progress bar's heading. The editor read a
+                # `phase` field that nothing ever sent, so the heading said "Processing"
+                # from start to finish.
+                await ws.send_json({"type": "phase", "label": payload})
             elif kind == "assets":
                 await ws.send_json({"type": "assets", "assets": payload})
             elif kind == "issue":
