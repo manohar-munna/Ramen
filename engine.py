@@ -266,53 +266,77 @@ def get_image_color_score(img_bytes: bytes) -> float:
 
 # Font stacks for recognized typography styles.
 FONT_STACK_GEOMETRIC_SANS = "'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-FONT_STACK_EDITORIAL_SERIF = "'Playfair Display', Georgia, 'Times New Roman', serif"
+# Georgia first, not Playfair Display. Playfair had to be fetched from Google while
+# the page rendered, and it is not a face we can measure against locally, so a serif
+# page was fitted with sans metrics and then drawn in a serif that might not have
+# arrived. Georgia ships with Windows and macOS, Liberation Serif stands in for it on
+# Linux, and both can be measured, so what is fitted is what is drawn.
+FONT_STACK_EDITORIAL_SERIF = "Georgia, 'Times New Roman', 'Liberation Serif', serif"
 FONT_STACK_TEXT_SERIF = "'Merriweather', Georgia, 'Times New Roman', serif"
 FONT_STACK_MONO = "'JetBrains Mono', 'Fira Code', Consolas, 'Courier New', monospace"
 FONT_STACK_SYSTEM = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
 
-GOOGLE_FONTS_HTML = (
-    '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
-    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
-    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&'
-    'family=Plus+Jakarta+Sans:wght@400;500;600;700;800&'
-    'family=Poppins:wght@300;400;500;600;700&'
-    'family=Playfair+Display:ital,wght@0,400..900;1,400..900&'
-    'family=Merriweather:wght@400;700&'
-    'family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">\n'
+# The typeface travels with the page.
+#
+# The head used to carry a Google Fonts <link>, which made a reconstruction depend on
+# a network fetch finishing before anyone looked at it. Two consequences, both
+# measured: an exported page opened offline rendered in whatever the system had --
+# the whole point of the reconstruction is that it looks like the original, and it
+# did not -- and the benchmark itself moved by two SSIM points between runs of
+# identical code, because the screenshot sometimes won the race against the font.
+# 4.91% of the page's pixels differ between a render that got the font and one that
+# did not, which is the size of the entire error budget.
+#
+# It also asked for six families to use two. Plus Jakarta Sans is the one that
+# matters: it heads the sans stack and it is the face every text run is measured
+# against, so embedding it is what makes the rendered size equal the fitted size.
+_EMBED_FACES = (
+    ("Plus Jakarta Sans", "PlusJakartaSans.ttf"),
 )
+_font_css_cache: Optional[str] = None
 
-OCR_FONT_STACK = FONT_STACK_GEOMETRIC_SANS
 
-KNOWN_CONCATENATED_WORDS = {
-    'yourbuyersread': 'your buyers read',
-    'linkedincreatorcampaignfor': 'LINKEDIN CREATOR CAMPAIGN FOR',
-    'linkedincreatorcampaignsforbrands': 'LINKEDIN CREATOR CAMPAIGNS FOR BRANDS',
-    'creatorsset': 'creators set',
-    'budgetand': 'budget and',
-    'postabout': 'post about',
-    'creatorsto': 'creators to',
-}
+def embedded_font_css() -> str:
+    """@font-face rules with the shipped fonts inlined, or "" if none are present."""
+    global _font_css_cache
+    if _font_css_cache is not None:
+        return _font_css_cache
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+    rules = []
+    for family, filename in _EMBED_FACES:
+        path = os.path.join(here, filename)
+        try:
+            with open(path, 'rb') as fh:
+                b64 = base64.b64encode(fh.read()).decode('ascii')
+        except OSError:
+            logger.warning("Font %s not found; pages will fall back to a system face.",
+                           filename)
+            continue
+        # A variable font covers every weight from one file, so one rule is enough.
+        rules.append(
+            "@font-face{font-family:'%s';src:url(data:font/ttf;base64,%s) format('truetype');"
+            "font-weight:100 900;font-style:normal;font-display:block}" % (family, b64))
+    _font_css_cache = "\n".join(rules)
+    return _font_css_cache
 
-def restore_ocr_spaces(text: str) -> str:
-    if not text:
-        return text
-    s = text
-    s = re.sub(r'\bStarta\b', 'Start a', s)
-    s = re.sub(r'\bLinkedln\b', 'LinkedIn', s)
-    s = re.sub(r'\bLinkedin\b', 'LinkedIn', s)
 
-    clean_alpha = re.sub(r'[^a-zA-Z]', '', s).lower()
-    if clean_alpha in KNOWN_CONCATENATED_WORDS:
-        rep = KNOWN_CONCATENATED_WORDS[clean_alpha]
-        lead = re.match(r'^[^a-zA-Z]+', s)
-        tail = re.search(r'[^a-zA-Z]+$', s)
-        lead_str = lead.group(0) if lead else ''
-        tail_str = tail.group(0) if tail else ''
-        if s.isupper():
-            return lead_str + rep.upper() + tail_str
-        return lead_str + rep + tail_str
-    return s
+# Words the recogniser ran together are left as it read them.
+#
+# PaddleOCR returns tightly set type as one token -- 'yourbuyersread.',
+# 'Cargocontainer'. This was a table of the exact phrases in one benchmark screenshot,
+# which fixed that screenshot and nothing else, and claimed a general capability the
+# engine does not have.
+#
+# Splitting them from the pixels was tried and does not work: the gap between two
+# words is several times the gap between two letters and easy to find, but turning a
+# gap position into a position in the string is not, because the letters merge. That
+# headline is 15 characters and 11 marks, so there is no mapping from one to the
+# other, and the stand-in font's advance widths drift by more than a character over
+# the length of a word. It split 'yourbuyersread.' into 'yourbuyersr ead.'.
+#
+# A break in the wrong place is worse than a missing one: it reads as a typo rather
+# than as a limit of the recogniser. So the text is left as read, and this is listed
+# as a known limitation rather than papered over for one image.
 
 def detect_font_family(crops: List[np.ndarray]) -> str:
     """Classifies whether the image uses a Serif, Monospace, or Geometric Sans font stack."""
@@ -341,11 +365,20 @@ def detect_font_family(crops: List[np.ndarray]) -> str:
         return FONT_STACK_EDITORIAL_SERIF
     return FONT_STACK_GEOMETRIC_SANS
 
+# Keyed by (serif, bold). The sans entries lead with the file the page embeds, so
+# the measurement and the render are the same outlines rather than two approximations
+# of each other.
 _MEASURE_FACES = {
-    False: ['PlusJakartaSans.ttf', 'Inter.ttf', 'segoeui.ttf', 'Roboto-Regular.ttf',
-            'Helvetica.ttc', 'arial.ttf', 'DejaVuSans.ttf', 'LiberationSans-Regular.ttf'],
-    True: ['PlusJakartaSans.ttf', 'Inter.ttf', 'segoeuib.ttf', 'Roboto-Bold.ttf',
-           'Helvetica-Bold.ttf', 'arialbd.ttf', 'DejaVuSans-Bold.ttf', 'LiberationSans-Bold.ttf'],
+    (False, False): ['PlusJakartaSans.ttf', 'Inter.ttf', 'segoeui.ttf', 'Roboto-Regular.ttf',
+                     'Helvetica.ttc', 'arial.ttf', 'DejaVuSans.ttf',
+                     'LiberationSans-Regular.ttf'],
+    (False, True): ['PlusJakartaSans.ttf', 'Inter.ttf', 'segoeuib.ttf', 'Roboto-Bold.ttf',
+                    'Helvetica-Bold.ttf', 'arialbd.ttf', 'DejaVuSans-Bold.ttf',
+                    'LiberationSans-Bold.ttf'],
+    (True, False): ['georgia.ttf', 'Georgia.ttf', 'times.ttf', 'Times New Roman.ttf',
+                    'LiberationSerif-Regular.ttf', 'DejaVuSerif.ttf'],
+    (True, True): ['georgiab.ttf', 'Georgia Bold.ttf', 'timesbd.ttf',
+                   'LiberationSerif-Bold.ttf', 'DejaVuSerif-Bold.ttf'],
 }
 _FONT_DIRS = [
     os.path.join(os.path.dirname(__file__), 'fonts'),
@@ -354,15 +387,16 @@ _FONT_DIRS = [
     '/usr/share/fonts', '/Library/Fonts', '/System/Library/Fonts',
 ]
 _MEASURE_REF_SIZE = 100  # metrics scale linearly, so measure once and scale
-_font_cache: Dict[bool, Any] = {}
+_font_cache: Dict[Tuple[bool, bool], Any] = {}
 
-def _get_measure_font(bold: bool):
-    """Loads a TTF approximating the rendered font stack, at a fixed reference size."""
-    if bold in _font_cache:
-        return _font_cache[bold]
+def _get_measure_font(bold: bool, serif: bool = False):
+    """Loads the face this run will be rendered in, at a fixed reference size."""
+    key = (serif, bold)
+    if key in _font_cache:
+        return _font_cache[key]
     from PIL import ImageFont
     font = None
-    for face in _MEASURE_FACES[bold]:
+    for face in _MEASURE_FACES[key]:
         for d in _FONT_DIRS:
             p = os.path.join(d, face)
             if os.path.exists(p):
@@ -378,9 +412,12 @@ def _get_measure_font(bold: bool):
                     continue
         if font is not None:
             break
+    if font is None and serif:
+        # No serif to measure with; the sans metrics are closer than nothing.
+        return _get_measure_font(bold, serif=False)
     if font is None:
         logger.warning("No measurement font found; falling back to box-height heuristic.")
-    _font_cache[bold] = font
+    _font_cache[key] = font
     return font
 
 def cluster_font_sizes(runs: List[Dict[str, Any]], tol: float = 0.07) -> None:
@@ -462,7 +499,8 @@ def cluster_text_colors(runs: List[Dict[str, Any]], tol: float = 26.0) -> None:
                 obj.color = hexed
 
 def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
-                    force_size: Optional[float] = None) -> Tuple[float, float, float, float, float]:
+                    force_size: Optional[float] = None,
+                    serif: bool = False) -> Tuple[float, float, float, float, float]:
     """Fits a text run to an OCR ink box, returning (fontSize, letterSpacing, lineHeight).
 
     The OCR box bounds *ink*, not the em square, so its height depends on which glyphs
@@ -478,7 +516,7 @@ def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
                     on the box top, instead of floating on an arbitrary 1.2 multiplier.
     """
     clean = (text or '').strip()
-    font = _get_measure_font(bold) if clean else None
+    font = _get_measure_font(bold, serif) if clean else None
     if font is None:
         return max(9.0, round(box_h * 0.82, 1)), 0.0, 1.2, 0.0, 1.0
 
@@ -508,16 +546,26 @@ def fit_text_to_box(text: str, box_w: float, box_h: float, bold: bool,
     # a headline reading "THE ART" came back as "THEART" -- so when a run has spaces the
     # residual goes into word-spacing first, where the original put it, and only what is
     # left over is spread between letters.
+    # Both limits are what type is actually set at. Tracking runs from about -0.05em on
+    # a tight display face to 0.2em on a spaced-out eyebrow; an extra word gap beyond
+    # half an em is not a thing anyone designs. They were 0.06em and 2.2em, which is
+    # backwards -- far too tight to express the tracking on "LINKEDIN CREATOR CAMPAIGNS
+    # FOR BRANDS", and loose enough to put 35px between the words of a 57px headline
+    # and 22px between the words of a 10px label. Anything these cannot absorb goes to
+    # the glyph width below, where being wrong is least visible.
+    WORD_SPACE_LIMIT = 0.6
+    TRACKING_LIMIT = 0.20
+
     residual = float(box_w) - ink_w * scale
     words = clean.count(' ')
     word_spacing = 0.0
     if words and residual > font_size * 0.06:
-        word_spacing = round(min(residual / words, font_size * 2.2), 2)
+        word_spacing = round(min(residual / words, font_size * WORD_SPACE_LIMIT), 2)
         residual -= word_spacing * words
 
     gaps = max(len(clean) - 1, 1)
     letter_spacing = residual / gaps
-    limit = font_size * 0.06
+    limit = font_size * TRACKING_LIMIT
     letter_spacing = max(-limit, min(limit, letter_spacing))
 
     # CSS centres the (ascent + descent) content box inside the line box, so the ink top
@@ -3114,6 +3162,25 @@ class ImageReconstructor:
             boxes = [l[0] for l in res if len(l) >= 2]
             scores = [l[1][1] for l in res if len(l) >= 2 and len(l[1]) >= 2]
 
+        # Which family this page is set in, decided before the first run is fitted.
+        # It used to be worked out afterwards and written over the styles, so every
+        # size on a serif page had been fitted against sans metrics and then rendered
+        # in a serif -- the two faces do not have the same proportions, and the whole
+        # point of measuring is that they should be the same face.
+        sample = []
+        for text, box, score in zip(texts, boxes, scores):
+            if float(score) < 0.35 or not str(text).strip():
+                continue
+            ys = [int(p[1]) for p in box]
+            xs = [int(p[0]) for p in box]
+            by0, by1 = max(0, min(ys)), min(h, max(ys))
+            bx0, bx1 = max(0, min(xs)), min(w, max(xs))
+            if by1 - by0 >= 16 and bx1 > bx0:
+                sample.append((by1 - by0, img[by0:by1, bx0:bx1]))
+        sample.sort(key=lambda t: -t[0])
+        page_family = detect_font_family([c for _, c in sample[:15]])
+        page_is_serif = page_family == FONT_STACK_EDITORIAL_SERIF
+
         for text, box, score in zip(texts, boxes, scores):
             label = str(text).strip()
             if float(score) < 0.35 or not label:
@@ -3154,9 +3221,6 @@ class ImageReconstructor:
             if len(label) == 1 and (x1 - x0) >= (y1 - y0) * 0.9:
                 continue
 
-            # Restore missing spaces from concatenated OCR outputs (e.g. 'yourbuyersread.' -> 'your buyers read.')
-            label = restore_ocr_spaces(label)
-
             crop = img[y0:y1, x0:x1]
             if crop.size == 0:
                 continue
@@ -3192,12 +3256,29 @@ class ImageReconstructor:
                         text_color = _bgr_to_hex(np.median(stroke_px, axis=0).astype(int))
 
                 ink = colour_selective_ink(crop, candidate, glyph_bgr)
-                # Keep candidate for horizontal bounds so multi-colored lines (e.g. accent
-                # words, two-tone text like "your buyers read") are not clipped to just one word.
-                # Also mask all candidate ink so no text ghost is left on the background.
+                # Mask every candidate pixel so no text ghost is left on the background,
+                # whatever colour it was.
                 ink_mask = np.maximum(ink, candidate)
-                core_ink = keep_core_ink(ink)
+                # Both bounds are taken from all the ink on the line, not just the ink
+                # matching its dominant colour. A two-tone line -- "your buyers read.",
+                # black then accent -- measured only its majority colour, and since
+                # "your" has no ascender and no capital the run was read as 56px tall
+                # where the line is 72, so one headline came out as two sizes, 75px and
+                # 57px. keep_core_ink still drops what does not belong: the descender of
+                # the line above hangs into this box but never reaches its body band.
+                # Bounds from every ink pixel, not only those matching the run's
+                # dominant colour. A line that changes colour part way through --
+                # "your buyers read.", black then accent -- was measured from whichever
+                # half won the vote, and since "your" carries no ascender and no capital
+                # the run came out 56px tall against a real 72. One headline, two sizes.
+                # keep_core_ink still drops what does not belong: the descender of the
+                # line above hangs into this box but never reaches its body band.
+                core_ink = keep_core_ink(ink_mask)
                 rows = np.any(core_ink, axis=1) if core_ink.any() else np.any(candidate, axis=1)
+                # Width still comes from every candidate pixel. keep_core_ink exists to
+                # drop what hangs in from the line above, which is a question about
+                # height; applying it sideways also discarded marks that are simply
+                # narrow, and pulled the box in off the ends of the run.
                 cols = np.any(candidate, axis=0) if candidate.any() else np.any(ink, axis=0)
 
                 if rows.any() and cols.any():
@@ -3227,7 +3308,7 @@ class ImageReconstructor:
                 x0, y0, x1, y1 = ink_box
 
             font_size, letter_spacing, line_height, word_spacing, scale_x = fit_text_to_box(
-                label, x1 - x0, y1 - y0, font_weight == "bold"
+                label, x1 - x0, y1 - y0, font_weight == "bold", serif=page_is_serif
             )
 
             spans = None
@@ -3319,7 +3400,7 @@ class ImageReconstructor:
                                 text=g_text,
                                 bbox=[float(x0_box + g_x0), float(y0), float(x0_box + g_x1), float(y1)],
                                 style=TextStyle(
-                                    fontFamily=OCR_FONT_STACK,
+                                    fontFamily=page_family,
                                     fontSize=float(font_size),
                                     fontWeight=font_weight,
                                     color=g_hex,
@@ -3335,7 +3416,7 @@ class ImageReconstructor:
                 'fontWeight': font_weight,
                 'color': text_color,
                 'style': TextStyle(
-                    fontFamily=OCR_FONT_STACK,
+                    fontFamily=page_family,
                     fontSize=float(font_size),
                     fontWeight=font_weight,
                     color=text_color,
@@ -3621,20 +3702,8 @@ class ImageReconstructor:
         # 3. Text runs, with sizes fitted to real ink bounds
         text_runs, text_mask = ImageReconstructor._extract_text_runs(img)
 
-        # Recognize font family from prominent text crops
-        prominent_crops = [
-            img[max(0, int(r['bbox'][1])):min(h, int(r['bbox'][3])),
-                max(0, int(r['bbox'][0])):min(w, int(r['bbox'][2]))]
-            for r in text_runs if (r['bbox'][3] - r['bbox'][1]) >= 16
-        ]
-        doc_font_family = detect_font_family(prominent_crops)
-        for r in text_runs:
-            if r.get('style'):
-                r['style'].fontFamily = doc_font_family
-            if r.get('spans'):
-                for sp in r['spans']:
-                    if sp.style:
-                        sp.style.fontFamily = doc_font_family
+        # The family was decided inside _extract_text_runs, before the sizes were
+        # fitted against it, and is already on every style.
 
         # 4. What kind of content is where, before asking what components are in it
         dilated_ink = cv2.dilate((text_mask > 0).astype(np.uint8), _K3,
@@ -4418,8 +4487,8 @@ class HTMLRenderer:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{html.escape(doc_title)}</title>
-    {GOOGLE_FONTS_HTML}
     <style>
+{embedded_font_css()}
 {BASE_PAGE_CSS}
     </style>
 </head>
