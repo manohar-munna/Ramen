@@ -62,6 +62,13 @@ class TextStyle(BaseModel):
     letterSpacing: Optional[float] = 0.0
     wordSpacing: Optional[float] = 0.0
     scaleX: Optional[float] = 1.0
+    # Where the lettering changes colour along the run, as (share of the width, hex).
+    # A line set in two colours -- "your buyers read.", black then accent -- cannot be
+    # expressed by `color` alone, and splitting the text at the change needs to know
+    # which character the change falls on, which the pixels do not say: the letters
+    # merge, so there is no mapping from marks to characters. The position of the
+    # change is known exactly though, so it is kept as a position.
+    colorStops: Optional[List[Tuple[float, str]]] = None
     backgroundColor: Optional[str] = None
     opacity: float = 1.0
     # Left inset, used when an element's box was widened to take in a leading icon so
@@ -423,6 +430,123 @@ def _get_measure_font(bold: bool, serif: bool = False):
     _font_cache[key] = font
     return font
 
+# The weights a variable face can be asked for, and what PIL calls each one. Type is
+# not set in two weights: a page has a light label, a medium nav, a semibold card
+# title and an extrabold headline, and calling all of them "bold" or "normal" loses
+# most of what makes it look like itself.
+WEIGHT_NAMES = ((300, 'Light'), (400, 'Regular'), (500, 'Medium'),
+                (600, 'SemiBold'), (700, 'Bold'), (800, 'ExtraBold'))
+_weight_font_cache: Dict[Tuple[bool, int], Any] = {}
+
+
+def _weight_face(serif: bool, weight: int):
+    """The measurement face set to one weight, or None if it cannot be."""
+    key = (serif, weight)
+    if key in _weight_font_cache:
+        return _weight_font_cache[key]
+    from PIL import ImageFont
+    base = _get_measure_font(weight >= 600, serif)
+    font = None
+    path = getattr(base, 'path', None)
+    if path:
+        name = dict(WEIGHT_NAMES).get(weight, 'Regular')
+        try:
+            font = ImageFont.truetype(path, _MEASURE_REF_SIZE)
+            font.set_variation_by_name(name)
+        except Exception:
+            # A static face cannot be asked for a weight; it is the weight it is.
+            font = base if weight >= 600 else _get_measure_font(False, serif)
+    _weight_font_cache[key] = font
+    return font
+
+
+def is_heavy(weight: Any) -> bool:
+    """Whether a weight -- numeric, 'bold' or 'normal' -- is one of the heavy ones."""
+    try:
+        return int(str(weight)) >= 600
+    except (TypeError, ValueError):
+        return str(weight).lower() in ('bold', 'bolder')
+
+
+def _ink_density(mask: np.ndarray) -> float:
+    """Share of a mark's own bounding box that is ink. Scale-free, so it can be
+    compared between a crop off the page and a render of the same string."""
+    if mask is None or mask.size == 0:
+        return 0.0
+    ys, xs = np.nonzero(mask)
+    if len(ys) == 0:
+        return 0.0
+    h = ys.max() - ys.min() + 1
+    w = xs.max() - xs.min() + 1
+    return float(len(ys)) / float(h * w)
+
+
+# Below this ink height the source's own blur is wider than the strokes it is blurring,
+# so the ink is fatter than the lettering and every small label measures heavy. The UI
+# inside a laptop mockup is the usual case.
+WEIGHT_MIN_INK_HEIGHT = 14
+
+
+def estimate_font_weight(text: str, ink: np.ndarray, serif: bool = False,
+                         fallback: int = 400) -> int:
+    """Which weight the lettering is set at, from how much of its box is ink.
+
+    It used to be `bold if stroke_ratio > 0.28 or box_h > 32`, which is two answers to
+    a question with six, and the second half of it called every headline bold whatever
+    its strokes were doing -- a light 40px title came out at 700.
+
+    The same string is rendered in the measurement face at each weight and the one
+    whose ink density matches the crop's is chosen. Density rather than stroke width
+    because it needs no skeleton and no assumption about which strokes are stems, and
+    because it is scale-free: the render and the crop need not be the same size.
+    """
+    clean = (text or '').strip()
+    if not clean or ink is None or ink.size == 0:
+        return fallback
+    if ink.shape[0] < WEIGHT_MIN_INK_HEIGHT:
+        return fallback
+    measured = _ink_density(ink)
+    if measured <= 0.0:
+        return fallback
+
+    from PIL import Image as _Image, ImageDraw as _ImageDraw, ImageFont as _ImageFont
+    # Render the reference at the size the crop is, not at the reference size. A 10px
+    # glyph is mostly the blur at the edge of its own strokes, so its ink density is
+    # far higher than the same letter drawn at 100px -- comparing across sizes made
+    # every small label come out extrabold.
+    target_h = float(ink.shape[0])
+    best, best_err = fallback, 1e9
+    for weight, _name in WEIGHT_NAMES:
+        font = _weight_face(serif, weight)
+        if font is None:
+            continue
+        try:
+            bb = font.getbbox(clean)
+            ref_h = float(bb[3] - bb[1])
+            if ref_h > 0 and target_h >= 4:
+                size = max(6, min(200, int(round(_MEASURE_REF_SIZE * target_h / ref_h))))
+                path = getattr(font, 'path', None)
+                if path:
+                    sized = _ImageFont.truetype(path, size)
+                    try:
+                        sized.set_variation_by_name(dict(WEIGHT_NAMES)[weight])
+                    except Exception:
+                        pass
+                    font = sized
+                    bb = font.getbbox(clean)
+            im = _Image.new('L', (max(1, bb[2] - bb[0] + 8), max(1, bb[3] - bb[1] + 8)), 0)
+            _ImageDraw.Draw(im).text((4 - bb[0], 4 - bb[1]), clean, font=font, fill=255)
+        except Exception:
+            continue
+        ref = _ink_density((np.asarray(im) > 110).astype(np.uint8))
+        if ref <= 0.0:
+            continue
+        err = abs(ref - measured)
+        if err < best_err:
+            best_err, best = err, weight
+    return best
+
+
 def cluster_font_sizes(runs: List[Dict[str, Any]], tol: float = 0.07) -> None:
     """Snaps independently fitted sizes onto the few sizes a real design system uses.
 
@@ -450,7 +574,7 @@ def cluster_font_sizes(runs: List[Dict[str, Any]], tol: float = 0.07) -> None:
             # lands on the ink box it was measured from.
             b = r['bbox']
             _, ls, lh, ws, sx = fit_text_to_box(r['text'], b[2] - b[0], b[3] - b[1],
-                                                r['fontWeight'] == 'bold', force_size=centre)
+                                                is_heavy(r['fontWeight']), force_size=centre)
             r['fontSize'] = centre
             r['style'].fontSize = centre
             r['style'].letterSpacing = ls
@@ -632,6 +756,133 @@ def dominant_ink_colour(crop: np.ndarray, candidate: np.ndarray) -> Optional[np.
     if int(bucket.sum()) < 12:
         return None
     return np.median(px[bucket].reshape(-1, 3), axis=0)
+
+# A band has to hold this much of the run's width, and its colour differ this far from
+# its neighbour, before the lettering counts as having changed colour.
+BAND_MIN_SHARE = 0.12
+BAND_COLOUR_GAP = 70.0
+BAND_RUN = 5                    # consecutive columns of the new colour before believing it
+# ...and the change has to be a change of colour, not of shade. Text darkening as it
+# crosses a photograph, or antialiasing on a thin stroke, moves the grey about without
+# ever picking up a colour; half a headline set in an accent does.
+BAND_NEUTRAL = 20               # max-min across the channels: below this it is a grey
+BAND_COLOURED = 45              # ...and above this it is definitely not
+BAND_HUE_SHIFT = 25.0           # degrees, when both sides carry a colour
+
+
+def _chroma(c: np.ndarray) -> float:
+    return float(int(c.max()) - int(c.min()))
+
+
+def _is_a_colour_change(a: np.ndarray, b: np.ndarray) -> bool:
+    """Whether two ink colours differ in kind, rather than only in lightness.
+
+    Neutral against neutral is a shade of the same thing however far apart the two are
+    -- #1d1d1d and #4f4f4f are both simply grey. Neutral against a colour is the case
+    this exists for: black lettering that turns into an accent. Two colours have to
+    differ in hue, which is what separates a headline in two colours from one
+    travelling over a photograph that changes underneath it.
+    """
+    ca, cb = _chroma(a), _chroma(b)
+    if ca < BAND_NEUTRAL and cb < BAND_NEUTRAL:
+        return False
+    if min(ca, cb) < BAND_NEUTRAL:
+        return max(ca, cb) >= BAND_COLOURED
+    pair = np.array([[a, b]], dtype=np.uint8)
+    hsv = cv2.cvtColor(pair, cv2.COLOR_BGR2HSV)[0].astype(float)
+    dh = abs(hsv[0][0] - hsv[1][0]) * 2.0        # OpenCV packs hue into 0-179
+    return min(dh, 360.0 - dh) >= BAND_HUE_SHIFT
+
+
+def ink_colour_bands(crop: np.ndarray, candidate: np.ndarray, diff: np.ndarray
+                     ) -> Optional[List[Tuple[float, str]]]:
+    """Where along a run the lettering changes colour, or None if it does not.
+
+    Read column by column: the ink in each column has a colour, and a run set in one
+    colour gives the same answer all the way across. Where the answer changes and
+    stays changed for a while, the lettering changed colour.
+
+    The position is returned as a share of the width rather than a character index,
+    because the pixels know the first and not the second: the letters merge, so there
+    is no mapping from marks to characters -- this headline is 15 characters and 11
+    marks. The renderer can place a colour at a position without being told which
+    letter it starts on.
+
+    Only the firm middle of each stroke is sampled. The edge of a letter is a blend
+    into whatever it sits on, and reading colour there invents a band at the end of
+    every word.
+    """
+    h, w = candidate.shape[:2]
+    if w < 24 or h < 6:
+        return None
+    # Firmness is judged within each column, not across the run. A single threshold is
+    # set by whichever colour contrasts most with the ground -- black on white here --
+    # and throws away the other one entirely, which is the case this exists for.
+    cols: List[Optional[np.ndarray]] = []
+    for x in range(w):
+        m = candidate[:, x] > 0
+        if int(m.sum()) < 3:
+            cols.append(None)
+            continue
+        d = diff[:, x][m]
+        core = m.copy()
+        core[m] = d >= float(d.max()) * 0.75
+        if int(core.sum()) < 2:
+            core = m
+        cols.append(np.median(crop[core, x], axis=0))
+
+    bands: List[Tuple[int, int, np.ndarray]] = []
+    cur: List[np.ndarray] = []
+    cur_start = 0
+    pending: List[Tuple[int, np.ndarray]] = []
+    for x, c in enumerate(cols):
+        if c is None:
+            continue
+        if not cur:
+            cur, cur_start = [c], x
+            continue
+        median = np.median(np.asarray(cur), axis=0)
+        if float(np.linalg.norm(c - median)) <= BAND_COLOUR_GAP:
+            cur.append(c)
+            pending = []
+            continue
+        # Different. Believe it only once it has held for a few columns, so a single
+        # odd column inside a letter does not start a band.
+        pending.append((x, c))
+        if len(pending) >= BAND_RUN:
+            bands.append((cur_start, pending[0][0], np.median(np.asarray(cur), axis=0)))
+            cur = [c for _, c in pending]
+            cur_start = pending[0][0]
+            pending = []
+    if cur:
+        bands.append((cur_start, w, np.median(np.asarray(cur), axis=0)))
+
+    wide = [b for b in bands if (b[1] - b[0]) >= max(8.0, w * BAND_MIN_SHARE)]
+    if len(wide) < 2:
+        return None
+    # Neighbours that ended up the same colour are one band after all.
+    merged: List[Tuple[int, int, np.ndarray]] = []
+    for b in wide:
+        if merged and float(np.linalg.norm(b[2] - merged[-1][2])) <= BAND_COLOUR_GAP:
+            merged[-1] = (merged[-1][0], b[1], (merged[-1][2] + b[2]) / 2.0)
+        else:
+            merged.append(b)
+    if len(merged) < 2:
+        return None
+
+    # Every neighbouring pair has to be a real change of colour, or this is one run of
+    # text crossing something that changed underneath it.
+    for i in range(len(merged) - 1):
+        if not _is_a_colour_change(merged[i][2].astype(np.uint8),
+                                   merged[i + 1][2].astype(np.uint8)):
+            return None
+
+    out: List[Tuple[float, str]] = []
+    for i, b in enumerate(merged):
+        start = 0.0 if i == 0 else max(0.0, min(1.0, b[0] / float(w)))
+        out.append((round(start, 4), _bgr_to_hex(b[2].astype(int))))
+    return out
+
 
 def colour_selective_ink(crop: np.ndarray, candidate: np.ndarray,
                          colour: Optional[np.ndarray]) -> np.ndarray:
@@ -3310,9 +3561,36 @@ class ImageReconstructor:
             if ink_box:
                 x0, y0, x1, y1 = ink_box
 
+            # What weight the lettering is actually set at, from the ink itself. The
+            # provisional guess above is a stroke-ratio threshold with a clause that
+            # calls anything taller than 32px bold, which is wrong for every light
+            # headline and has only two answers for a question with six.
+            weight_mask = None
+            if ink_box is not None and ink_mask is not None:
+                bx0, by0, bx1, by1 = ink_box
+                weight_mask = ink_mask[by0 - y0_box:by1 - y0_box,
+                                       bx0 - x0_box:bx1 - x0_box]
+            # Too small to measure falls back to the old stroke-ratio guess, which is
+            # crude but is not systematically wrong the way a blurred measurement is.
+            font_weight = str(estimate_font_weight(
+                label, weight_mask if weight_mask is not None and weight_mask.size
+                else (bin_crop > 0).astype(np.uint8), page_is_serif,
+                fallback=700 if stroke_ratio > 0.28 else 400))
+
             font_size, letter_spacing, line_height, word_spacing, scale_x = fit_text_to_box(
-                label, x1 - x0, y1 - y0, font_weight == "bold", serif=page_is_serif
+                label, x1 - x0, y1 - y0, is_heavy(font_weight), serif=page_is_serif
             )
+
+            # Where the lettering changes colour along the run. Read from the same crop
+            # the box was measured from, so the positions line up with what is drawn.
+            colour_stops = None
+            if candidate is not None and ink_box:
+                bx0, by0, bx1, by1 = ink_box
+                sub_c = candidate[by0 - y0_box:by1 - y0_box, bx0 - x0_box:bx1 - x0_box]
+                sub_d = diff[by0 - y0_box:by1 - y0_box, bx0 - x0_box:bx1 - x0_box]
+                sub_img = crop[by0 - y0_box:by1 - y0_box, bx0 - x0_box:bx1 - x0_box]
+                if sub_c.size and sub_c.shape[1] > 8:
+                    colour_stops = ink_colour_bands(sub_img, sub_c, sub_d)
 
             spans = None
             words = label.split()
@@ -3427,6 +3705,7 @@ class ImageReconstructor:
                     letterSpacing=letter_spacing,
                     wordSpacing=word_spacing,
                     scaleX=scale_x,
+                    colorStops=colour_stops,
                 ),
             }
             if spans:
@@ -4311,8 +4590,29 @@ class HTMLRenderer:
         ws = f"word-spacing: {raw_ws:.2f}px; " if abs(raw_ws) > 0.01 else ""
         bg = f"background-color: {s.backgroundColor};" if (s and s.backgroundColor) else ""
         pl = float(s.paddingLeft) if (s and s.paddingLeft) else 0.0
+
+        # A run set in more than one colour is painted with a gradient of hard stops,
+        # clipped to the glyphs. The alternative is to split the text where the colour
+        # changes, which needs to know which character it changes on -- and the pixels
+        # do not say: the letters merge, so there is no mapping from marks to
+        # characters. The position is known exactly, so it is used as a position.
+        # Skipped when the run has its own background, which background-clip would
+        # otherwise cut to the letters as well.
+        stops = (s.colorStops if (s and s.colorStops) else None)
+        paint = f"color: {col}; "
+        if stops and len(stops) >= 2 and not bg:
+            parts = []
+            for i, (at, hexed) in enumerate(stops):
+                start = max(0.0, min(1.0, float(at))) * 100.0
+                end = (max(0.0, min(1.0, float(stops[i + 1][0]))) * 100.0
+                       if i + 1 < len(stops) else 100.0)
+                parts.append(f"{hexed} {start:.2f}%, {hexed} {end:.2f}%")
+            paint = ("color: transparent; -webkit-text-fill-color: transparent; "
+                     f"background-image: linear-gradient(90deg, {', '.join(parts)}); "
+                     "-webkit-background-clip: text; background-clip: text; ")
+
         return (f"font-family: {ff}; font-size: {fs:.2f}px; font-weight: {fw}; "
-                f"font-style: {fst}; color: {col}; text-align: {ta}; "
+                f"font-style: {fst}; {paint}text-align: {ta}; "
                 f"line-height: {lh:.3f}; {ls}{ws}margin: 0; padding: 0 0 0 {pl:.2f}px; {bg}")
 
     @staticmethod
