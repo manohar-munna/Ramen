@@ -29,6 +29,8 @@ import re
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
+from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
 
 # Distinctive enough that a model will carry it through verbatim, and short enough that
@@ -135,6 +137,51 @@ def restore_assets(html: str, assets: List[str]) -> Tuple[str, List[int]]:
         return _BLANK_PIXEL
 
     return _PLACEHOLDER_RE.sub(swap, html), missing
+
+
+_FONT_FACE_RE = re.compile(r"@font-face\s*\{[^}]*\}", re.I)
+
+
+def strip_font_faces(html: str) -> str:
+    """The page without its embedded typeface.
+
+    The engine carries its font inside the page as base64 so the reconstruction looks
+    the same everywhere. Sent to the model, that is 235,000 characters -- about 58,800
+    tokens, three times the whole of the page's actual markup -- describing nothing it
+    can use. It comes out before the page goes anywhere and goes back in on the way out.
+    """
+    return _FONT_FACE_RE.sub("", html)
+
+
+def at_origin(html: str) -> str:
+    """The engine's page on its own, at the top left, exactly the size it was measured.
+
+    The export is made for reading in a browser: the page sits on a grey desk with 24px
+    of padding round it and a drop shadow. Rendered at the screenshot's size, that puts
+    every element 24px right of and below where it belongs, on a grey frame -- the page
+    scored 56% against its own screenshot for no reason but that, and the model was
+    shown the shifted version as the geometry to keep. The evaluation tool had always
+    stripped the padding; this path never did.
+    """
+    override = ("<style>html,body{margin:0!important;padding:0!important;"
+                "background:transparent!important}body{gap:0!important}"
+                ".pdf-page{box-shadow:none!important;margin:0!important}</style>")
+    at = html.lower().find("</head>")
+    return (html[:at] + override + html[at:]) if at >= 0 else (override + html)
+
+
+def with_fonts(html: str) -> str:
+    """Puts the engine's embedded typeface back into a page that has lost it."""
+    try:
+        from engine import embedded_font_css
+        css = embedded_font_css()
+    except Exception:
+        return html
+    if not css or "@font-face" in html:
+        return html
+    tag = "<style>%s</style>" % css
+    at = html.lower().find("</head>")
+    return (html[:at] + tag + html[at:]) if at >= 0 else (tag + html)
 
 
 _ROLE_RE = re.compile(r'data-role="([^"]+)"')
@@ -687,10 +734,15 @@ def render_html(html: str, width: int = 1400, height: int = 2400,
     chrome = _find_chrome()
     if not chrome:
         return None
+    # Animations are run to their end rather than switched off. `animation:none` leaves
+    # a fade-in at its first frame, invisible, so this used to force `opacity:1` on
+    # every element as well -- which made anything meant to be translucent opaque, both
+    # for the score and in the picture the model is asked to critique. A zero-length
+    # animation lands on its last frame, which is what a person actually sees.
     settled = html.replace(
         "</head>",
-        "<style>*,*::before,*::after{animation:none!important;"
-        "transition:none!important;opacity:1!important}</style></head>", 1)
+        "<style>*,*::before,*::after{animation-duration:0s!important;"
+        "animation-delay:0s!important;transition:none!important}</style></head>", 1)
     try:
         import subprocess
         import tempfile
@@ -725,37 +777,46 @@ def _shot_dims(shot: Optional[Tuple[str, str]]) -> Tuple[int, int]:
 
 
 def calculate_ssim_score(shot: Tuple[str, str], render: Tuple[str, str]) -> float:
-    """Computes SSIM visual match percentage (0.0 to 100.0) between shot and render."""
+    """How closely a render matches the screenshot, 0 to 100, in colour.
+
+    Structural similarity on each colour channel, averaged. It was grayscale SSIM, which
+    cannot see colour at all: a headline drawn black instead of purple scored about the
+    same, so a round that corrected a colour and moved something by a pixel read as a
+    regression and was thrown away. It also went through FidelityChecker, which builds,
+    blends and PNG-encodes a heatmap on every call -- twice a round -- to be read for
+    one number.
+    """
     if not shot or not render:
         return 0.0
     try:
-        shot_bytes = base64.b64decode(shot[1])
-        render_bytes = base64.b64decode(render[1])
-        from engine import FidelityChecker
-        res = FidelityChecker.compare_images(shot_bytes, render_bytes)
-        if "similarityPercent" in res:
-            return float(res["similarityPercent"])
+        import cv2
+        import numpy as np
+        from skimage.metrics import structural_similarity as _ssim
+        a = cv2.imdecode(np.frombuffer(base64.b64decode(shot[1]), np.uint8), cv2.IMREAD_COLOR)
+        b = cv2.imdecode(np.frombuffer(base64.b64decode(render[1]), np.uint8),
+                         cv2.IMREAD_COLOR)
+        if a is None or b is None:
+            return 0.0
+        if a.shape[:2] != b.shape[:2]:
+            b = cv2.resize(b, (a.shape[1], a.shape[0]), interpolation=cv2.INTER_AREA)
+        return float(_ssim(a, b, channel_axis=2)) * 100.0
     except Exception as e:
-        # This module has no `logger`; the handler raised NameError on the way out and
-        # took the refinement round with it, turning a failed comparison into a failed
-        # run. _LOG is what everything else here reports through.
         _LOG.append("ssim: comparison failed (%s)" % e)
     return 0.0
 
 
-_WORDS_RE = re.compile(r"[^\W_]+", re.UNICODE)
-_TAGS_RE = re.compile(r"<[^>]+>")
-_HEADSTYLE_RE = re.compile(r"<(head|script|style)[^>]*>.*?</\1>", re.S | re.I)
-
-
 _CONTROL_RE = re.compile(r"<(button|input|select|textarea)[\s>/]", re.I)
 
-# A refinement may tidy wording it inherited, but wholesale new text means it has
-# started transcribing what it sees in the render instead of reading the HTML.
-REFINE_MAX_WORD_GAIN = 4
-# A refinement may tidy a word or two; losing a handful means it stopped editing the
-# page and started rewriting it.
-REFINE_MAX_WORD_LOSS = 6
+# How far a version's text may move from the page's, in letter trigrams. A correction
+# swaps letters -- about as many lost as gained -- while a dropped line only loses them
+# and invented prose only adds them. So the net change, one way or the other, is held
+# tight, and the gross change, which corrections do produce, only loosely. A single
+# percentage could not do both: 5% let a whole sentence of body copy go, and anything
+# tight enough to catch that refused a page with a lot of misread text put right.
+CONTENT_NET_FLOOR = 36          # trigrams, or...
+CONTENT_NET_SHARE = 0.02        # ...this share of the page, whichever is larger
+CONTENT_GROSS_FLOOR = 60
+CONTENT_GROSS_SHARE = 0.15
 
 
 def _count_controls(html: str) -> int:
@@ -763,39 +824,82 @@ def _count_controls(html: str) -> int:
     return len(_CONTROL_RE.findall(html))
 
 
-def keeps_the_content(before: str, after: str) -> Optional[str]:
-    """Why a refinement should be refused, or None if it may be accepted.
+class _TextNodes(HTMLParser):
+    """The text a reader would see, one chunk per text node."""
 
-    A round is judged on how the render compares with the screenshot, and SSIM is a
-    weak judge of whether the words are still there: a paragraph replaced by a flat
-    panel of the same colour scores about the same, and one replaced by different
-    prose of the same length scores better. This project's own notes say not to tune
-    on that number alone, and these two checks are what stops it being the only vote.
+    _HIDDEN = ("head", "script", "style", "title", "template")
 
-    Cheap enough to run on every round, and they only ever refuse -- a round that
-    keeps the content is still judged on the picture.
+    def __init__(self):
+        super().__init__()
+        self.chunks: List[str] = []
+        self._depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._HIDDEN:
+            self._depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self._HIDDEN and self._depth:
+            self._depth -= 1
+
+    def handle_data(self, data):
+        if not self._depth and data.strip():
+            self.chunks.append(data)
+
+
+def _text_trigrams(html: str) -> Counter:
+    """Letter trigrams of the visible text, taken per text node.
+
+    Per node, so that moving a block elsewhere does not count as changing its words.
+    Letters and digits only, so that splitting a run-together word or re-spacing it
+    costs nothing: "yourbuyersread." and "your buyers read." differ by two trigrams.
     """
-    lost = _visible_words(before) - _visible_words(after)
-    if sum(lost.values()) > REFINE_MAX_WORD_LOSS:
-        common = ", ".join(w for w, _ in lost.most_common(4))
-        return "it dropped %d words (%s)" % (sum(lost.values()), common)
-    gained = _visible_words(after) - _visible_words(before)
-    if sum(gained.values()) > REFINE_MAX_WORD_GAIN:
-        return ("it invented %d words, so it is transcribing the picture rather than "
-                "editing the page" % sum(gained.values()))
+    parser = _TextNodes()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        pass
+    grams: Counter = Counter()
+    for chunk in parser.chunks:
+        t = "".join(ch for ch in chunk.lower() if ch.isalnum())
+        if 0 < len(t) < 3:
+            grams[t] += 1
+        for i in range(len(t) - 2):
+            grams[t[i:i + 3]] += 1
+    return grams
+
+
+def keeps_the_content(before: str, after: str) -> Optional[str]:
+    """Why a version should be refused, or None if it may be accepted.
+
+    Versions are judged on how their render compares with the screenshot, and a picture
+    is a weak judge of whether the words survived: a paragraph replaced by a flat panel
+    of the same colour scores about the same. This is the other vote.
+
+    It used to count whole words, which refused exactly the corrections the model is
+    asked to make -- "yourbuyersread." written as three words and "Linkedln" as
+    "LinkedIn" twice is five invented words by that measure, over a limit of four.
+    Trigrams per text node see those as the small edits they are, and still see a lost
+    paragraph as hundreds.
+    """
+    a, b = _text_trigrams(before), _text_trigrams(after)
+    total = sum(a.values())
+    lost = sum((a - b).values())
+    gained = sum((b - a).values())
+    net = max(CONTENT_NET_FLOOR, int(total * CONTENT_NET_SHARE))
+    gross = max(CONTENT_GROSS_FLOOR, int(total * CONTENT_GROSS_SHARE))
+    if lost - gained > net:
+        return "it dropped text (%d of the page's %d letter groups are gone)" % (lost, total)
+    if gained - lost > net:
+        return "it invented text (%d letter groups that are not on the page)" % gained
+    if lost + gained > gross:
+        return ("it rewrote the text (%d letter groups changed, of %d)"
+                % (lost + gained, total))
     if _count_controls(after) < _count_controls(before):
         return "it turned %d control(s) into something else" % (
             _count_controls(before) - _count_controls(after))
     return None
-
-
-def _visible_words(html: str):
-    """Multiset of words a reader would see. Used to refuse a lossy refinement."""
-    from collections import Counter
-    import html as _h
-    body = _HEADSTYLE_RE.sub(" ", html)
-    body = _TAGS_RE.sub(" ", body)
-    return Counter(w.lower() for w in _WORDS_RE.findall(_h.unescape(body)))
 
 
 def flatten_document(doc, verify: bool = True):
@@ -1180,6 +1284,24 @@ def live_keys(model: str = "", explicit: Optional[str] = None) -> List[str]:
     return fresh or keys or api_keys(explicit)
 
 
+def fresh_keys(model: str = "", explicit: Optional[str] = None) -> List[str]:
+    """Keys that are neither rejected nor known to have nothing left on this model."""
+    now = time.time()
+    return [k for k in api_keys(explicit) if k not in _DEAD_KEYS
+            and now - _SPENT.get((k, model), (0.0, ""))[0] > SPENT_TTL]
+
+
+def _worth_asking(model_name: str, names: List[str], explicit: Optional[str]) -> bool:
+    """Whether to try this model, or go straight to the next one.
+
+    A model with nothing left on any key is skipped while there is another after it.
+    The refinement loop makes a call per step, and each one used to start at the
+    requested model and be refused -- a guaranteed 429, every call, from a model
+    already known to be spent -- before walking on to the one that would answer.
+    """
+    return model_name == names[-1] or bool(fresh_keys(model_name, explicit))
+
+
 def mark_spent(key: str, model: str, reason: str) -> None:
     """Records that this key has nothing left for this model, and when."""
     _SPENT[(key, model)] = (time.time(), reason)
@@ -1270,8 +1392,11 @@ RETRY_BACKOFF = 6.0     # seconds, doubling
 # How many times to go back and ask for images the rewrite lost.
 REPAIR_ATTEMPTS = 2
 
-# Target visual match percentage (SSIM) before exiting the refinement loop.
-TARGET_ACCURACY_SCORE = 95.0
+# A match good enough that another round is not worth a request. It is an early exit,
+# not the goal: the loop stops when it stops improving, because a bar it cannot reach
+# -- which 95% grayscale SSIM was, for every page, when the engine's own pixel-placed
+# reconstruction averages 91% -- turns "until it matches" into "every round, every time".
+TARGET_ACCURACY_SCORE = 98.0
 
 # How many times to render the result and ask the model to close the gap with the
 # original.
@@ -1313,7 +1438,10 @@ def call_gemini(prompt: str, api_key: Optional[str] = None,
     payload = None
     last_error: Optional[EnhancementError] = None
     used_model = None
-    for model_name in models_to_try(model):
+    names = models_to_try(model)
+    for model_name in names:
+        if not _worth_asking(model_name, names, api_key):
+            continue
         keys = live_keys(model_name, api_key)
         for key in keys:
             give_up_on_key = False
@@ -1474,101 +1602,6 @@ def reference_from_document(doc) -> Optional[Tuple[str, str]]:
     return None
 
 
-def extract_assets_from_screenshot(
-    shot: Tuple[str, str],
-    api_key: Optional[str] = None,
-    model: Optional[str] = None,
-    timeout: int = 120
-) -> Tuple[List[str], List[str], Dict[int, Tuple[int, int, int, int]]]:
-    """Detects and crops all visual assets directly from the original screenshot using Gemini Vision.
-
-    Returns:
-        (assets, asset_descriptions, asset_boxes)
-        where assets is a list of base64 data URIs,
-        asset_descriptions is a list of descriptive lines for the prompt,
-        and asset_boxes is a dict mapping asset index to (x0, y0, x1, y1) in pixels.
-    """
-    try:
-        from PIL import Image
-    except ImportError:
-        return [], [], {}
-
-    try:
-        raw = base64.b64decode(shot[1])
-        im = Image.open(io.BytesIO(raw)).convert("RGBA")
-        w, h = im.size
-    except Exception as e:
-        _LOG.append(f"extract_assets_from_screenshot: decode failed ({e})")
-        return [], [], {}
-
-    detection_prompt = """\
-Analyze this screenshot and identify all distinct visual image assets that must be extracted as image crops to faithfully reproduce this webpage in HTML:
-1. Logos and brand marks (e.g. site logo, header logo, wordmark).
-2. Partner, client, or sponsor brand logos (e.g. Envoy, Deel, Figma, Ramp, Notion, etc.).
-3. Complex UI mockups, dashboard previews, product screenshots, device frames, illustrations, and visual preview cards.
-4. User avatars, profile pictures, or avatar clusters.
-5. Distinct custom graphics, icons, badges, or illustrations that cannot be easily done with simple unicode or CSS.
-
-Return a JSON array of objects, each containing:
-- "label": short identifier (e.g. "site_logo", "dashboard_mockup", "partner_figma", "avatars_row")
-- "category": one of ["logo", "partner_logo", "mockup", "avatar", "illustration", "graphic"]
-- "box_2d": [ymin, xmin, ymax, xmax] coordinates normalized from 0 to 1000.
-
-Do NOT include plain text blocks, solid background rectangles, or simple standard buttons.
-Only return the JSON array within ```json ``` fences. Do not omit any visible logos or mockups.
-"""
-    try:
-        reply = call_gemini(detection_prompt, image=shot, api_key=api_key, model=model, timeout=timeout)
-        text = _unfence(reply)
-        m = re.search(r"\[\s*\{.*\}\s*\]", text, re.S)
-        if m:
-            text = m.group(0)
-        items = json.loads(text)
-    except Exception as e:
-        _LOG.append(f"extract_assets_from_screenshot: detection call failed ({e})")
-        return [], [], {}
-
-    assets: List[str] = []
-    lines: List[str] = []
-    boxes: Dict[int, Tuple[int, int, int, int]] = {}
-
-    for item in items:
-        if not isinstance(item, dict) or "box_2d" not in item:
-            continue
-        box = item["box_2d"]
-        if not isinstance(box, list) or len(box) != 4:
-            continue
-        ymin, xmin, ymax, xmax = box
-        x0 = max(0, min(w, int(round(xmin * w / 1000.0))))
-        y0 = max(0, min(h, int(round(ymin * h / 1000.0))))
-        x1 = max(0, min(w, int(round(xmax * w / 1000.0))))
-        y1 = max(0, min(h, int(round(ymax * h / 1000.0))))
-        cw, ch = x1 - x0, y1 - y0
-        if cw < ASSET_MIN_SIDE or ch < ASSET_MIN_SIDE or cw * ch < ASSET_MIN_AREA:
-            continue
-        # Avoid full page background
-        if cw >= w * 0.98 and ch >= h * 0.98:
-            continue
-
-        try:
-            crop = im.crop((x0, y0, x1, y1))
-            buf = io.BytesIO()
-            crop.save(buf, format="PNG", optimize=True)
-            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-            uri = f"data:image/png;base64,{b64}"
-            idx = len(assets)
-            marker = _PLACEHOLDER % idx
-            assets.append(uri)
-            boxes[idx] = (x0, y0, x1, y1)
-            lbl = str(item.get("label", "graphic")).strip()
-            cat = str(item.get("category", "graphic")).strip()
-            lines.append(f"{marker}  {cw}x{ch}  at (x={x0}, y={y0}) -- {lbl} ({cat}): crop directly from original screenshot")
-        except Exception:
-            continue
-
-    return assets, lines, boxes
-
-
 def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] = None,
                  extra: Optional[str] = None, timeout: int = 300,
                  on_retry=None, reference=None,
@@ -1580,18 +1613,11 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
     produced something worth looking at -- but does report the loss so the caller can.
     """
     shot = as_inline_image(reference)
-    if shot:
-        direct_assets, direct_lines, _ = extract_assets_from_screenshot(shot, api_key=api_key, model=model)
-    else:
-        direct_assets, direct_lines = [], []
-
-    if direct_assets:
-        assets = direct_assets
-        asset_lines = direct_lines
-        skeleton, _ = strip_assets(html)
-    else:
-        skeleton, assets = strip_assets(html)
-        asset_lines = describe_assets(assets, roles=asset_roles(html, assets))
+    # The page's own images, where the engine measured them. The embedded typeface comes
+    # out too: it is 58,800 tokens of base64 and goes back in on the way out.
+    skeleton, assets = strip_assets(html)
+    skeleton = strip_font_faces(skeleton)
+    asset_lines = describe_assets(assets, roles=asset_roles(html, assets))
 
     prompt = build_prompt(skeleton, len(assets), extra, asset_lines, has_reference=bool(shot))
 
@@ -1633,7 +1659,7 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
         if not shot:
             break                    # nothing to compare against
         current_html, _ = restore_assets(reply, assets)
-        render = render_html(current_html, width=w, height=h)
+        render = render_html(with_fonts(current_html), width=w, height=h)
         if not render:
             _LOG.append("refine: skipped, no headless browser available")
             break
@@ -1663,14 +1689,19 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
             continue
 
         test_html, _ = restore_assets(better, assets)
-        test_render = render_html(test_html, width=w, height=h)
+        test_render = render_html(with_fonts(test_html), width=w, height=h)
         if test_render:
             test_score = calculate_ssim_score(shot, test_render)
-            refused = keeps_the_content(reply, better)
+            # Judged against what the engine measured, not against the last accepted
+            # round, so small losses cannot accumulate a round at a time.
+            refused = keeps_the_content(skeleton, better)
             if refused:
                 # The picture may well have improved; the page is still worse.
                 _LOG.append("refine: round %d rejected, %s" % (rounds_done + 1, refused))
-            elif test_score >= score - 1.5:
+            # Only an improvement replaces the best. Accepting anything within a point
+            # and a half of it let the working copy sink a little every round while
+            # every later round went on correcting the worse page.
+            elif test_score > best_score + MIN_GAIN:
                 reply = better
                 score = test_score
                 if score > best_score:
@@ -1679,16 +1710,17 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
                 if score >= target_score:
                     rounds_done += 1
                     break
-        elif not keeps_the_content(reply, better):
+        elif not keeps_the_content(skeleton, better):
             reply = better
 
         rounds_done += 1
 
     enhanced, missing = restore_assets(best_reply, assets)
+    enhanced = with_fonts(enhanced)
     return {
         "html": enhanced,
         "refine_rounds": rounds_done,
-        "model": model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL,
+        "model": _LAST_MODEL[0] or model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL,
         "score": best_score,
         "target": target_score,
         "assets_total": len(assets),
@@ -1706,182 +1738,142 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
 
 
 # ============================================================================
-# Building the page from the screenshot, streamed
+# The Enhance button: a pixel-perfect recreation, checked against the screenshot
 # ============================================================================
 #
-# A different job from `enhance_html`, and worth having beside it. That one hands the
-# model the reconstruction and asks for it to be rebuilt, which anchors the result to
-# whatever the engine made of the page -- including its mistakes. This asks for the page
-# to be written from the screenshot, the way screenshot-to-code does it, and streams the
-# answer so the page can be watched assembling itself.
+# The engine already places every element where it was measured, and scores 88-97% on
+# the reference pages doing it. What it gets wrong is what a model is good at: text the
+# recogniser misread, colours and weights it misjudged, artwork it cut into fragments.
+# So the model is given the engine's page as the geometry to keep, the screenshot as the
+# truth, and a render of the engine's page so it can see where the two differ -- and
+# the engine's page is also the floor. Nothing replaces it without measurably beating
+# it, so pressing the button cannot make the page worse than not pressing it.
 #
-# What it keeps from Ramen rather than from that project: the images are real. Where
-# screenshot-to-code fills in placehold.co boxes and describes what ought to go in them,
-# the markers here resolve to the artwork the engine actually cut out of the screenshot.
-# The text is real too -- OCR measured it, so the model is given the strings instead of
-# being asked to read them off a picture, which is where transcription errors come from.
+# This used to write the page from the screenshot alone, screenshot-to-code style, with
+# the engine thrown away: the model guessed every position, then spent up to fifteen
+# rounds trying to guess them back. Watching it write is kept -- the rewrite still
+# streams into the editor -- but it now starts from measurements instead of a guess.
 
 GENERATE_PROMPT = """\
-You are an expert front-end developer. You are given a screenshot of a web page and you
-write a single self-contained HTML file that visually matches it with >= 95%% accuracy.
+You are recreating a web page in HTML so that it is indistinguishable from a screenshot
+of it, pixel for pixel, at exactly %(width)d x %(height)d px.
 
-- Visually match the screenshot closely: background colors, text colors, font families, sizes, weights,
-  spacing, padding, margins, alignment, borders, border-radii, and shadows.
-- Write the FULL code. Never write a comment in place of content -- no "<!-- repeat for
-  each item -->", no "<!-- other nav links here -->". If the screenshot shows nine cards,
-  write nine cards.
-- Use semantic HTML: header, nav, main, section, footer, h1-h6, p, ul/li, button, a.
-- Lay it out with flexbox and grid so it matches the screenshot dimensions (%(width)d x %(height)d px) and reflows cleanly down to 480px.
-- Add hover and focus states on interactive elements with subtle transitions (150-300ms). Disable them under `@media (prefers-reduced-motion: reduce)`.
-- Put all CSS in one <style> block in the head. Plain CSS, no external frameworks or CDN dependencies.
+You have three things:
+1. IMAGE 1, THE TARGET: the screenshot to reproduce.
+2. IMAGE 2, THE MEASURED PAGE: how the reference HTML below renders right now.
+3. THE REFERENCE HTML, below: every element on the page, measured off the screenshot by
+   a layout engine -- its exact position and size, colour, font size, weight and spacing.
 
-THE TEXT
-Use these strings, exactly as written, for the page's text. They were measured from the
-screenshot, so they are more reliable than reading the picture -- including where a word
-looks wrong: several are genuinely cut off behind something in the design, and must stay
-cut off. Do not correct, translate, complete or invent any of them:
+The reference is right about geometry and usually right about style. Where IMAGE 2
+differs from IMAGE 1, the reference is wrong. Write the page so it looks like IMAGE 1,
+starting from the reference and correcting it.
 
-%(texts)s
+- Canvas: exactly %(width)d x %(height)d px. `html, body { margin: 0; padding: 0 }` and one
+  root element of that size with `position: relative; overflow: hidden`. Nothing
+  reflows: no media queries, no percentage widths that depend on the window.
+- Geometry: keep every element at the position and size the reference gives it unless
+  IMAGE 1 shows it somewhere else. Absolute positioning is expected. You may simplify
+  the markup -- drop empty wrappers, use h1, p, nav, a, button -- as long as nothing
+  moves.
+- Text: the reference text was read by OCR and has mistakes -- words run together into
+  one, a lowercase L read as a capital I or the reverse, partly hidden words garbled.
+  Read every string in IMAGE 1 and write what it actually says. Add no text that is not
+  in IMAGE 1, and drop none that is.
+- Style: keep the reference's colours, font sizes, weights and letter-spacing unless
+  IMAGE 1 clearly differs. Text painted with a gradient clipped to the letters is a line
+  set in more than one colour; keep it that way.
+- Font: use the font families the reference names. They are embedded in the finished
+  page; do not load fonts from anywhere.
+- Images: use every RAMEN_ASSET_<n> marker exactly as written, as the src of an <img>,
+  at the position and size the reference gives it. Invent none, and link to nothing
+  external.
+- Static: no entrance animations and no transitions that move or fade anything. Hover
+  colours on links and buttons are fine.
 
-THE IMAGES (EXTRACTED DIRECTLY FROM THE SCREENSHOT)
-Every visual asset in this page has been cropped directly from the original screenshot at high resolution.
-Use these markers as the `src` of `<img>` tags -- write the marker exactly, it is replaced with the real image
-afterwards.
-IMPORTANT: For any complex UI mockup, dashboard preview, illustration, logo, or partner brand mark:
-USE THE EXACT `RAMEN_ASSET_<n>` MARKER! Do NOT attempt to rebuild complex inner dashboards or illustrations with empty divs -- place the high-resolution cropped assets into the layout with proper aspect ratio and width/height.
-Use all %(n_assets)d of them, and do not invent any others or link to any external image:
-
+The images, as markers:
 %(assets)s
 
-Return the complete HTML document and nothing else. No explanation, no markdown fences.
-Start with `<!DOCTYPE html>`.
+Return the complete HTML document and nothing else -- no explanation, no markdown
+fences. Start with <!DOCTYPE html>.
+
+THE REFERENCE HTML:
+%(html)s
 """
 
 
-# Set from looking at the crops rather than guessing. Laid out as a contact sheet, the
-# genuine rubbish on the Reddit page is unmistakable and all of one kind: 178x3, 148x4,
-# 19x5, 44x7 -- antialiasing rims, every one under eight pixels on its short side.
-# Above that line sit real things, including a 13x17 share icon and a 14x11 plus icon
-# that an earlier threshold of 20 discarded, after which the model quite correctly
-# reported the icons as missing and could do nothing about it.
-ASSET_MIN_SIDE = 8
-ASSET_MIN_AREA = 100
-
-
-def _asset_dims(assets: List[str]) -> List[Optional[Tuple[int, int]]]:
-    """Pixel size of each data URI, or None where it cannot be read."""
-    try:
-        from PIL import Image
-    except ImportError:
-        return [None] * len(assets)
-    out: List[Optional[Tuple[int, int]]] = []
-    for uri in assets:
-        try:
-            raw = base64.b64decode(uri.partition(",")[2])
-            out.append(Image.open(io.BytesIO(raw)).size)
-        except Exception:
-            out.append(None)
-    return out
-
-
-def page_texts(doc) -> List[str]:
-    """Every string the engine read, in reading order, deduplicated."""
-    out, seen = [], set()
-    for page in (getattr(doc, "pages", None) or []):
-        rows = []
-        for e in (page.elements or []):
-            text = (getattr(e, "text", None) or "").strip()
-            if text and e.type in ("text", "rect"):
-                b = e.bbox or [0, 0, 0, 0]
-                rows.append((round(float(b[1]) / 12.0), float(b[0]), text))
-        for _, _, text in sorted(rows):
-            key = text.lower()
-            if key not in seen:
-                seen.add(key)
-                out.append(text)
-    return out
-
-
-def build_generate_prompt(texts: List[str], asset_lines: List[str],
+def build_generate_prompt(skeleton: str, asset_lines: List[str],
                           width: int = 1400, height: int = 900) -> str:
     return GENERATE_PROMPT % {
-        "texts": "\n".join("- " + t.replace("\n", " ") for t in texts) or "(none)",
+        "html": skeleton,
         "assets": "\n".join(asset_lines) or "(none)",
-        "n_assets": len(asset_lines),
         "width": width,
         "height": height,
     }
 
 
+# The critique is not told the score. It was, together with a target the page could not
+# reach, and asked what "prevents matching at >= 95%" -- which is a demand for complaints,
+# and it met it every round whether or not there was anything to say.
 CRITIQUE_PROMPT = """\
-Two screenshots are attached:
+Two screenshots are attached, both %(width)d x %(height)d px:
+1. THE TARGET -- the page to reproduce.
+2. THE ATTEMPT -- the current HTML, rendered.
 
-1. THE TARGET -- the original design to reproduce.
-2. THE ATTEMPT -- the current HTML rendered in a browser just now.
+List the visible differences between them: anything missing or extra, in the wrong
+place, the wrong size, colour, font, weight or spacing, and any text that reads
+differently. For each, say where it is (roughly, in pixels from the top left) and what
+it should be instead, for example:
+- The navigation links near y=30 sit about 4px too high and are grey; in the target
+  they are near-black.
 
-The current automated visual similarity match score is %(score).1f%% (Target: >= %(target).1f%%).
-Visually inspect Image 2 (THE ATTEMPT) against Image 1 (THE TARGET) directly (do not just read code).
-Identify the specific visual differences that prevent Image 2 from matching Image 1 at >= %(target).1f%%:
-- Missing sections, logos, brand marks, partner logos, or text that are in the target but absent in the attempt.
-- Misaligned, squished, or overlapping navigation items, headers, cards, or mockups.
-- Spacing, padding, and alignment that do not match.
-- Image assets (RAMEN_ASSET_<n>) at the wrong size, missing, or in the wrong place.
-- Typography (font size, weight, line height, color) that does not match.
-
-Reply with at most 10 actionable bullet points, each starting with "- ". If the attempt already visually matches the target at >= %(target).1f%% fidelity, reply with the single line "- nothing worth changing".
+At most 8 lines, each starting with "- ", the most visible first. If there is no
+difference worth changing, reply with exactly: - nothing worth changing
 """
 
 
 FIX_PROMPT = """\
-Two screenshots are attached:
-1. THE TARGET -- the original design to reproduce.
-2. THE ATTEMPT -- the current HTML rendered in a browser.
+Two screenshots are attached, both %(width)d x %(height)d px:
+1. THE TARGET -- the page to reproduce.
+2. THE ATTEMPT -- the HTML below, rendered.
 
-Below is the current HTML document and a list of problems found by comparing Image 2 (attempt screenshot) against Image 1 (target screenshot):
-
-PROBLEMS OBSERVED IN THE RENDERED SCREENSHOT:
+These differences were found between them:
 %(issues)s
 
-CURRENT MATCH SCORE: %(score).1f%% (Target: >= %(target).1f%%)
+Correct them in the HTML below so it renders like THE TARGET. Change only what those
+differences call for: everything else is already where it should be, and moving it makes
+the page worse.
 
-Fix all of those problems and return the corrected document so the rendered page visually matches THE TARGET (target fidelity >= %(target).1f%%).
-- Visually inspect Image 2 against Image 1. Look directly at how your HTML rendered.
-- Accurately add any missing sections, partner brand logos, badges, and labels mentioned in the problems.
-- Fix any misaligned, squished, or overlapping navigation items, cards, or mockups using proper flexbox/grid layout and CSS.
-- Image sources are `RAMEN_ASSET_<n>` markers, numbered 0 to %(max_asset)d. %(unused_note)s
-  Available high-resolution crops from the screenshot:
-%(asset_list)s
-  Use these `RAMEN_ASSET_<n>` markers for logos, partner marks, avatar clusters, and complex UI mockups/dashboards rather than attempting to rebuild complex mockups with raw divs.
-- Keep the layout flowing and responsive down to 480px, with hover/focus states.
+Keep to the same rules: a fixed %(width)d x %(height)d px canvas with no reflow and no media
+queries; every RAMEN_ASSET_<n> marker kept exactly as written (they are numbered 0 to
+%(max_asset)d). %(unused_note)s No text that is not in THE TARGET, no animations, and the
+same font families.
 
-Return the complete document and nothing else. No explanation, no markdown fences.
-Start with `<!DOCTYPE html>`.
+Return the complete corrected document and nothing else -- no explanation, no markdown
+fences. Start with <!DOCTYPE html>.
 
 %(html)s
 """
 
 
-def build_critique_prompt(score: float = 0.0, target: float = TARGET_ACCURACY_SCORE) -> str:
-    return CRITIQUE_PROMPT % {"score": score, "target": target}
+def build_critique_prompt(width: int = 1400, height: int = 900) -> str:
+    return CRITIQUE_PROMPT % {"width": width, "height": height}
 
 
 def build_fix_prompt(current: str, issues: List[str], n_assets: int,
-                     score: float = 0.0, target: float = TARGET_ACCURACY_SCORE,
-                     asset_lines: Optional[List[str]] = None) -> str:
+                     width: int = 1400, height: int = 900) -> str:
     unused = missing_markers(current, n_assets)
     if unused:
-        note = ("Markers %s are not used anywhere, so those pictures are invisible: "
-                "place them where they belong." % ", ".join(str(i) for i in unused[:12]))
+        note = ("Markers %s are not used anywhere, so those pictures are missing: put "
+                "them back where the target shows them." % ", ".join(str(i) for i in unused[:12]))
     else:
         note = "All of them are in use; keep it that way."
     return FIX_PROMPT % {
-        "issues": "\n".join("- " + i for i in issues) or "- layout does not match",
+        "issues": "\n".join("- " + i for i in issues),
         "html": current,
-        "score": score,
-        "target": target,
+        "width": width,
+        "height": height,
         "max_asset": max(n_assets - 1, 0),
         "unused_note": note,
-        "asset_list": "\n".join(asset_lines or []) or "(none)",
     }
 
 
@@ -1896,7 +1888,7 @@ def parse_critique(reply: str) -> List[str]:
         if not text or text.lower().startswith("nothing worth changing"):
             continue
         out.append(text)
-    return out[:10]
+    return out[:8]
 
 
 def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
@@ -1928,7 +1920,10 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
     resp = None
     last = None
     chosen = None
-    for model_name in models_to_try(model):
+    names = models_to_try(model)
+    for model_name in names:
+        if not _worth_asking(model_name, names, api_key):
+            continue
         keys = live_keys(model_name, api_key)
         if not keys:
             continue
@@ -2047,76 +2042,127 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
                                        "; ".join(why) or "no reason was given"))
 
 
-# How many times to render the finished page, show it to the model beside the original,
-# and let it correct itself. Each round is one request and about a minute.
-VERIFY_ROUNDS = 15
+# The loop's budget. A round is two requests, a critique and a fix, so the default is
+# seven a click including the rewrite. It was thirty-two -- one to detect assets, one to
+# write, and fifteen rounds of two against a target that was never reached -- which is
+# more than the free tier allows a model in a day, and ran only because each failure
+# quietly fell through to a weaker model.
+VERIFY_ROUNDS = 3
+MAX_VERIFY_ROUNDS = 8
+# What a version has to add to the best so far to replace it, in colour-SSIM points.
+# Below this the difference is the noise of re-rendering, not an improvement.
+MIN_GAIN = 0.3
+# Rounds in a row that add nothing before the loop stops asking.
+STALL_LIMIT = 2
+# No new round starts after this many seconds of refinement.
+REFINE_TIME_BUDGET = 480.0
+# A page is about twenty thousand tokens each way; a critique is a paragraph.
+GENERATE_TIMEOUT = 300
+CRITIQUE_TIMEOUT = 150
+LOOP_ATTEMPTS = 2
 
 
 def generate_from_document(doc, api_key: Optional[str] = None,
-                           model: Optional[str] = None, timeout: int = 600,
+                           model: Optional[str] = None, timeout: int = GENERATE_TIMEOUT,
                            verify: int = VERIFY_ROUNDS,
-                           target_score: float = TARGET_ACCURACY_SCORE):
-    """Streams a page written from the screenshot, then restores the real images.
+                           target_score: float = TARGET_ACCURACY_SCORE,
+                           page_index: int = 0):
+    """Recreates one page to match its screenshot as closely as can be measured.
 
     Yields:
-    - ("status", text)
-    - ("chunk", text)
-    - ("issue", text)
-    - ("score", {"score": float, "target": float, "round": int, "max_rounds": int})
-    - ("revision", {"html": html})
-    - ("done", result_dict)
+    - ("phase", label)       what stage it is in, for the progress bar's heading
+    - ("status", text)       what it is doing right now
+    - ("assets", [data uri]) the images the markers stand for, for the live preview
+    - ("chunk", text)        the rewrite as it is written
+    - ("score", {...})       a version was measured
+    - ("issue", text)        a difference the critique found
+    - ("revision", {"html"}) a version that beat the best so far
+    - ("done", {...})        the best version, and how it got there
+
+    The engine's reconstruction is the starting point and the floor: it is measured
+    first, and a version replaces the best only if it keeps the page's text and scores
+    measurably higher. Rounds stop when they stop helping, not when a number is hit.
     """
-    from engine import DocumentData, HTMLRenderer
+    from engine import DocumentData, Exporter
 
-    shot = reference_from_document(doc)
+    pages = list(getattr(doc, "pages", None) or [])
+    if not pages:
+        raise EnhancementError("This document has no pages.")
+    # The page asked for, not the first page that happens to have a screenshot. It used
+    # to take page one's picture whatever page was open, together with every page's
+    # text, and ask for a page that did not exist.
+    page = pages[max(0, min(int(page_index or 0), len(pages) - 1))]
+    shot = as_inline_image(getattr(page, "originalImageSrc", None))
     if not shot:
-        raise EnhancementError(
-            "This document has no original screenshot to work from.")
-
+        raise EnhancementError("This page has no original screenshot to work from.")
     w, h = _shot_dims(shot)
+    rounds_cap = max(0, min(int(verify), MAX_VERIFY_ROUNDS))
+    calls = 0
 
-    yield "status", "Detecting and cropping visual assets directly from the original screenshot..."
-    assets, asset_lines, asset_boxes = extract_assets_from_screenshot(shot, api_key=api_key, model=model)
-
-    if not assets:
-        # Fallback to engine elements if detection found nothing
-        yield "status", "Composing engine fragments as fallback..."
-        flat = flatten_document(doc)
-        html = HTMLRenderer.render_document(
-            DocumentData(title=getattr(doc, "title", "page") or "page",
-                         pageCount=len(flat.pages or []), pages=list(flat.pages or [])),
-            editable=False, interactive=False)
-        _, all_assets = strip_assets(html)
-        roles = asset_roles(html, all_assets)
-        keep = [i for i, dims in enumerate(_asset_dims(all_assets))
-                if dims and min(dims) >= ASSET_MIN_SIDE and dims[0] * dims[1] >= ASSET_MIN_AREA]
-        assets = [all_assets[i] for i in keep]
-        asset_lines = describe_assets(assets,
-                                      roles={n: roles.get(i, "") for n, i in enumerate(keep)})
-        dropped = len(all_assets) - len(assets)
-        if dropped:
-            yield "status", ("Set aside %d fragment(s) too small to place; offering %d image(s)."
-                             % (dropped, len(assets)))
-    else:
-        yield "status", ("Extracted %d high-resolution visual asset(s) directly from original screenshot." % len(assets))
-
+    # ---- the engine's page: the geometry to keep, and the floor to beat ------------
+    yield "phase", "Measuring the page"
+    yield "status", "Composing the engine's reconstruction of this page..."
+    one = DocumentData(title=getattr(doc, "title", None) or "page", pageCount=1, pages=[page])
+    flat = flatten_document(one)
+    engine_html = at_origin(Exporter.export_standalone_html(flat, interactive=False))
+    skeleton, assets = strip_assets(engine_html)
+    skeleton = strip_font_faces(skeleton)
+    asset_lines = describe_assets(assets, roles=asset_roles(engine_html, assets))
     yield "assets", assets
 
-    texts = page_texts(doc)
-    prompt = build_generate_prompt(texts, asset_lines, width=w, height=h)
+    def complete(raw: str) -> Tuple[str, List[int]]:
+        html, missing = restore_assets(raw, assets)
+        return with_fonts(html), missing
 
-    yield "status", ("Sending the screenshot, %d image(s) and %d line(s) of text..."
-                     % (len(assets), len(texts)))
+    def measure(raw: str) -> Tuple[Optional[Tuple[str, str]], float]:
+        rendered = render_html(complete(raw)[0], width=w, height=h)
+        return rendered, (calculate_ssim_score(shot, rendered) if rendered else 0.0)
 
-    buf = []
+    engine_render, engine_score = measure(skeleton)
+    best = {"raw": skeleton, "score": engine_score, "render": engine_render,
+            "source": "engine", "model": None}
+    if engine_render:
+        yield "score", {"score": round(engine_score, 1), "target": target_score,
+                        "round": 0, "max_rounds": rounds_cap, "label": "engine"}
+        yield "status", ("The engine's page matches the screenshot at %.1f%%. "
+                         "Nothing is kept unless it beats that." % engine_score)
+    else:
+        yield "status", ("No headless Chrome was found, so versions cannot be measured "
+                         "against the screenshot; the rewrite is returned unchecked.")
+
+    def consider(raw: str, source: str, used_model: Optional[str]):
+        """Measures a version and says whether it replaces the best, and why not."""
+        refused = keeps_the_content(skeleton, raw)
+        if refused:
+            return None, 0.0, refused
+        if not engine_render:
+            return None, 0.0, ""          # nothing to measure against; taken as it is
+        rendered, score = measure(raw)
+        if not rendered:
+            return None, 0.0, "it would not render"
+        if score > best["score"] + MIN_GAIN:
+            best.update(raw=raw, score=score, render=rendered, source=source,
+                        model=used_model)
+            return rendered, score, ""
+        return rendered, score, ("%.1f%% does not beat the best so far, %.1f%%"
+                                 % (score, best["score"]))
+
+    # ---- the rewrite, streamed so it can be watched --------------------------------
+    yield "phase", "Writing the page"
+    yield "status", ("Sending the screenshot, the engine's measured page and %d image(s)..."
+                     % len(assets))
+    prompt = build_generate_prompt(skeleton, asset_lines, width=w, height=h)
+    images = [shot] + ([engine_render] if engine_render else [])
+    buf: List[str] = []
     tried: List[str] = []
     for candidate in models_to_try(model):
         if candidate in tried:
             continue
         tried.append(candidate)
         buf = []
+        calls += 1
         try:
-            for kind, piece in stream_gemini(prompt, images=[shot], api_key=api_key,
+            for kind, piece in stream_gemini(prompt, images=images, api_key=api_key,
                                              model=candidate, timeout=timeout):
                 if kind == "status":
                     yield "status", piece
@@ -2125,7 +2171,7 @@ def generate_from_document(doc, api_key: Optional[str] = None,
                 yield "chunk", piece
         except EnhancementError as e:
             if buf:
-                raise                      # partly written; cannot start over cleanly
+                raise                      # partly shown; cannot start over cleanly
             remaining = [m for m in models_to_try(model) if m not in tried]
             if not remaining:
                 raise
@@ -2133,138 +2179,119 @@ def generate_from_document(doc, api_key: Optional[str] = None,
             continue
         if buf:
             break
-    if not buf:
-        raise EnhancementError("No model produced a page.")
-
+    # Every later call goes to the model that answered, rather than starting again at
+    # the requested one and being refused on the way down.
+    gen_model = _LAST_MODEL[0] or model or DEFAULT_MODEL
     raw = _unfence("".join(buf))
-    if "<" not in raw:
-        used = _LAST_MODEL[0] or model or DEFAULT_MODEL
-        detail = raw.strip()[:200] or "(nothing at all)"
-        raise EnhancementError(
-            "%s did not return HTML. It said: %s" % (used, detail))
 
-    # ---- look at the result and correct it ----------------------------------------
+    if "<" not in raw:
+        yield "status", ("%s did not return HTML, so the engine's page stands."
+                         % gen_model)
+    else:
+        if "</html>" not in raw.lower():
+            yield "status", "The rewrite came back cut short; measuring what there is."
+        rendered, score, why = consider(raw, "rewrite", gen_model)
+        if rendered is not None or not engine_render:
+            if not engine_render and not why:
+                best.update(raw=raw, source="rewrite", model=gen_model)
+            yield "score", {"score": round(score, 1), "target": target_score,
+                            "round": 0, "max_rounds": rounds_cap, "label": "rewrite"}
+        if why:
+            yield "status", "The rewrite was not kept: %s." % why
+        else:
+            yield "status", "The rewrite is the best so far (%.1f%%)." % best["score"]
+            yield "revision", {"html": complete(best["raw"])[0]}
+
+    # ---- refinement, from the best, until it stops helping -------------------------
     all_issues: List[str] = []
     rounds_done = 0
-    best_score = 0.0
-    best_raw = raw
-
-    MAX_ROUNDS = max(15, verify)
-    TARGET_SCORE = target_score or 95.0
-
-    for attempt in range(1, MAX_ROUNDS + 1):
-        current, _ = restore_assets(raw, assets)
-        yield "status", "Rendering HTML screenshot for visual verification (round %d of %d)..." % (
-            attempt, MAX_ROUNDS)
-        render = render_html(current, width=w, height=h)
-        if not render:
-            yield "status", "No headless browser available, so skipping the checks."
+    stalls = 0
+    started = time.time()
+    for rnd in range(1, rounds_cap + 1):
+        if not best["render"]:
+            break
+        if best["score"] >= target_score:
+            yield "status", "%.1f%% is close enough to stop." % best["score"]
+            break
+        if time.time() - started > REFINE_TIME_BUDGET:
+            yield "status", "Out of time for refinement; keeping the best so far."
             break
 
-        score = calculate_ssim_score(shot, render)
-        if score > best_score:
-            best_score = score
-            best_raw = raw
-
-        yield "score", {
-            "score": round(score, 1),
-            "target": TARGET_SCORE,
-            "round": attempt,
-            "max_rounds": MAX_ROUNDS
-        }
-
-        # Exit condition: if score >= target_score (95%+), we are done!
-        if score >= TARGET_SCORE:
-            yield "status", ("Match target achieved: %.1f%% >= %.1f%%!" % (score, TARGET_SCORE))
-            break
-
-        yield "status", ("Comparing attempt against target (current match: %.1f%%, target: ≥ %.1f%%)..." % (score, TARGET_SCORE))
+        yield "phase", "Checking, round %d of %d" % (rnd, rounds_cap)
+        yield "status", "Comparing the best version with the screenshot..."
+        calls += 1
         try:
-            critique = call_gemini(
-                build_critique_prompt(score=score, target=TARGET_SCORE),
-                api_key=api_key, model=model, timeout=timeout,
-                images=[shot, render])
+            critique = call_gemini(build_critique_prompt(w, h), api_key=api_key,
+                                   model=gen_model, timeout=CRITIQUE_TIMEOUT,
+                                   attempts=LOOP_ATTEMPTS, images=[shot, best["render"]])
         except EnhancementError as e:
-            yield "status", "Check %d critique call failed: %s." % (
-                attempt, short_reason(e))
+            yield "status", "The check could not be made: %s." % short_reason(e)
             break
-
         issues = parse_critique(critique)
+        if not issues:
+            # Nothing is invented to fill the gap. It used to substitute three generic
+            # complaints and have them "fixed", which only ever moved things about.
+            yield "status", "The check found nothing worth changing."
+            break
         for issue in issues:
             yield "issue", issue
 
-        unused = missing_markers(raw, len(assets))
-        if not issues:
-            if score >= TARGET_SCORE:
-                yield "status", "Check %d found nothing worth changing." % attempt
-                break
-            else:
-                # Provide targeted fallback issues when score is below target
-                issues = [
-                    "Layout alignment and container proportions do not fully match the target screenshot.",
-                    "Spacing, margins, and padding need adjustments to match the original layout.",
-                    "Typography font-sizes and line-heights differ from the target design.",
-                ]
-                for issue in issues:
-                    yield "issue", issue
-
-        yield "status", "Applying %d visual fix(es)%s (targeting ≥ %.1f%% match)..." % (
-            len(issues), " and placing %d unused image(s)" % len(unused) if unused else "", TARGET_SCORE)
+        yield "phase", "Fixing, round %d of %d" % (rnd, rounds_cap)
+        yield "status", "Correcting %d difference(s)..." % len(issues)
+        calls += 1
         try:
             fixed = _unfence(call_gemini(
-                build_fix_prompt(raw, issues, len(assets), score=score, target=TARGET_SCORE, asset_lines=asset_lines),
-                api_key=api_key, model=model, timeout=timeout,
-                images=[shot, render]))
+                build_fix_prompt(best["raw"], issues, len(assets), w, h),
+                api_key=api_key, model=gen_model, timeout=timeout,
+                attempts=LOOP_ATTEMPTS, images=[shot, best["render"]]))
         except EnhancementError as e:
-            yield "status", "Could not apply check %d - %s." % (
-                attempt, short_reason(e))
+            yield "status", "The correction could not be made: %s." % short_reason(e)
+            stalls += 1
+            if stalls >= STALL_LIMIT:
+                break
             continue
 
-        if not fixed or "<" not in fixed or len(fixed) < 100:
-            yield "status", "Nothing valid came back to apply from check %d; retrying..." % attempt
-            continue
-
-        # Render the fixed page and check if it improved fidelity
-        fixed_current, _ = restore_assets(fixed, assets)
-        fixed_render = render_html(fixed_current, width=w, height=h)
-        if fixed_render:
-            fixed_score = calculate_ssim_score(shot, fixed_render)
-            # Accept if it improves or stays roughly the same while addressing structural issues
-            if fixed_score >= score - 1.5:
-                raw = fixed
-                rounds_done += 1
-                all_issues.extend(issues)
-                score = fixed_score
-                if score > best_score:
-                    best_score = score
-                    best_raw = raw
-                yield "status", ("Applied round %d: %d fix(es) (new match: %.1f%%)." % (
-                    attempt, len(issues), score))
-                rev_html, _ = restore_assets(raw, assets)
-                yield "revision", {"html": rev_html}
-                if score >= TARGET_SCORE:
-                    yield "status", ("Match target achieved: %.1f%% >= %.1f%%!" % (score, TARGET_SCORE))
-                    break
-            else:
-                yield "status", ("Round %d fix reduced match score (%.1f%% vs %.1f%%); continuing refinement..." % (
-                    attempt, fixed_score, score))
+        fix_model = _LAST_MODEL[0] or gen_model
+        if "<" not in fixed:
+            why = "no HTML came back"
+            rendered = None
         else:
-            raw = fixed
-            rounds_done += 1
-            all_issues.extend(issues)
-            rev_html, _ = restore_assets(raw, assets)
-            yield "revision", {"html": rev_html}
+            rendered, score, why = consider(fixed, "round %d" % rnd, fix_model)
+            if rendered is not None:
+                yield "score", {"score": round(score, 1), "target": target_score,
+                                "round": rnd, "max_rounds": rounds_cap,
+                                "label": "round %d" % rnd}
+        if why:
+            stalls += 1
+            yield "status", "Round %d was not kept: %s." % (rnd, why)
+            if stalls >= STALL_LIMIT:
+                yield "status", ("Stopping: %d rounds in a row added nothing."
+                                 % STALL_LIMIT)
+                break
+            continue
 
-    final, missing = restore_assets(best_raw, assets)
+        stalls = 0
+        rounds_done += 1
+        all_issues.extend(issues)
+        yield "status", "Round %d kept: %.1f%%." % (rnd, best["score"])
+        yield "revision", {"html": complete(best["raw"])[0]}
+
+    final, missing = complete(best["raw"])
     yield "done", {
         "html": final,
-        "model": _LAST_MODEL[0] or model or DEFAULT_MODEL,
+        # Whoever made the version being returned. It used to name whichever model made
+        # the last call, so a page written by one model was credited to the lite model
+        # that failed to improve it.
+        "model": best["model"],
+        "source": best["source"],
+        "engine_score": round(engine_score, 1),
+        "score": round(best["score"], 1),
+        "target": target_score,
         "assets_total": len(assets),
         "assets_missing": missing,
         "verify_rounds": rounds_done,
-        "score": round(best_score, 1),
-        "target": TARGET_SCORE,
         "issues": all_issues,
+        "calls": calls,
         "chars": len(final),
     }
 
