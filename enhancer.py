@@ -736,7 +736,10 @@ def calculate_ssim_score(shot: Tuple[str, str], render: Tuple[str, str]) -> floa
         if "similarityPercent" in res:
             return float(res["similarityPercent"])
     except Exception as e:
-        logger.warning("Failed to calculate SSIM score: %s", e)
+        # This module has no `logger`; the handler raised NameError on the way out and
+        # took the refinement round with it, turning a failed comparison into a failed
+        # run. _LOG is what everything else here reports through.
+        _LOG.append("ssim: comparison failed (%s)" % e)
     return 0.0
 
 
@@ -750,11 +753,40 @@ _CONTROL_RE = re.compile(r"<(button|input|select|textarea)[\s>/]", re.I)
 # A refinement may tidy wording it inherited, but wholesale new text means it has
 # started transcribing what it sees in the render instead of reading the HTML.
 REFINE_MAX_WORD_GAIN = 4
+# A refinement may tidy a word or two; losing a handful means it stopped editing the
+# page and started rewriting it.
+REFINE_MAX_WORD_LOSS = 6
 
 
 def _count_controls(html: str) -> int:
     """Real interactive elements. A rewrite that turns them all into <a> has lost."""
     return len(_CONTROL_RE.findall(html))
+
+
+def keeps_the_content(before: str, after: str) -> Optional[str]:
+    """Why a refinement should be refused, or None if it may be accepted.
+
+    A round is judged on how the render compares with the screenshot, and SSIM is a
+    weak judge of whether the words are still there: a paragraph replaced by a flat
+    panel of the same colour scores about the same, and one replaced by different
+    prose of the same length scores better. This project's own notes say not to tune
+    on that number alone, and these two checks are what stops it being the only vote.
+
+    Cheap enough to run on every round, and they only ever refuse -- a round that
+    keeps the content is still judged on the picture.
+    """
+    lost = _visible_words(before) - _visible_words(after)
+    if sum(lost.values()) > REFINE_MAX_WORD_LOSS:
+        common = ", ".join(w for w, _ in lost.most_common(4))
+        return "it dropped %d words (%s)" % (sum(lost.values()), common)
+    gained = _visible_words(after) - _visible_words(before)
+    if sum(gained.values()) > REFINE_MAX_WORD_GAIN:
+        return ("it invented %d words, so it is transcribing the picture rather than "
+                "editing the page" % sum(gained.values()))
+    if _count_controls(after) < _count_controls(before):
+        return "it turned %d control(s) into something else" % (
+            _count_controls(before) - _count_controls(after))
+    return None
 
 
 def _visible_words(html: str):
@@ -1634,7 +1666,11 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
         test_render = render_html(test_html, width=w, height=h)
         if test_render:
             test_score = calculate_ssim_score(shot, test_render)
-            if test_score >= score - 1.5:
+            refused = keeps_the_content(reply, better)
+            if refused:
+                # The picture may well have improved; the page is still worse.
+                _LOG.append("refine: round %d rejected, %s" % (rounds_done + 1, refused))
+            elif test_score >= score - 1.5:
                 reply = better
                 score = test_score
                 if score > best_score:
@@ -1643,7 +1679,7 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
                 if score >= target_score:
                     rounds_done += 1
                     break
-        else:
+        elif not keeps_the_content(reply, better):
             reply = better
 
         rounds_done += 1
