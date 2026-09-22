@@ -272,9 +272,6 @@ FONT_STACK_GEOMETRIC_SANS = "'Plus Jakarta Sans', 'Inter', system-ui, -apple-sys
 # arrived. Georgia ships with Windows and macOS, Liberation Serif stands in for it on
 # Linux, and both can be measured, so what is fitted is what is drawn.
 FONT_STACK_EDITORIAL_SERIF = "Georgia, 'Times New Roman', 'Liberation Serif', serif"
-FONT_STACK_TEXT_SERIF = "'Merriweather', Georgia, 'Times New Roman', serif"
-FONT_STACK_MONO = "'JetBrains Mono', 'Fira Code', Consolas, 'Courier New', monospace"
-FONT_STACK_SYSTEM = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
 
 # The typeface travels with the page.
 #
@@ -339,7 +336,13 @@ def embedded_font_css() -> str:
 # as a known limitation rather than papered over for one image.
 
 def detect_font_family(crops: List[np.ndarray]) -> str:
-    """Classifies whether the image uses a Serif, Monospace, or Geometric Sans font stack."""
+    """Serif or sans, from the weight distribution of the strokes.
+
+    Serifs put ink at the top and bottom of a stem that a sans does not, so a stem
+    whose ends are markedly heavier than its middle is a serif. Monospace is not
+    detected: it needs even advance widths, which is a different measurement, and
+    claiming it here while never returning it was worse than not claiming it.
+    """
     if not crops:
         return FONT_STACK_GEOMETRIC_SANS
     serif_votes = 0
@@ -2713,7 +2716,7 @@ def score_card(surf: 'Surface', ctx) -> float:
         score += 0.20                                    # children share an alignment
     return score
 
-def score_switch(surf: 'Surface', ctx) -> float:
+def score_switch(surf: 'Surface') -> float:
     """Evidence that a surface is a toggle switch (e.g. dark/light theme switch)."""
     w, h = surf.width, surf.height
     if not (14 <= h <= 56 and 24 <= w <= 140 and 1.35 <= (w / max(h, 1.0)) <= 3.2):
@@ -2750,7 +2753,7 @@ def classify_surface_role(surf: 'Surface', ctx) -> Tuple[str, str, float]:
     Below the promotion threshold a surface still renders pixel-for-pixel -- it just
     renders as a <div> instead of claiming to be something it might not be.
     """
-    sw = score_switch(surf, ctx)
+    sw = score_switch(surf)
     b = score_button(surf, ctx)
     i = score_input(surf, ctx)
     c = score_card(surf, ctx)
