@@ -9,6 +9,7 @@ import base64
 import json
 import zipfile
 import logging
+from collections import Counter
 from typing import List, Optional, Dict, Any, Literal, Tuple
 from pydantic import BaseModel, Field
 from PIL import Image
@@ -481,10 +482,12 @@ def _ink_density(mask: np.ndarray) -> float:
     return float(len(ys)) / float(h * w)
 
 
-# Below this ink height the source's own blur is wider than the strokes it is blurring,
-# so the ink is fatter than the lettering and every small label measures heavy. The UI
-# inside a laptop mockup is the usual case.
-WEIGHT_MIN_INK_HEIGHT = 14
+# Below this ink height the source's own blur and compression are too large a share of
+# the strokes for their density to mean anything, and the lettering measures heavy. At
+# 14px, a screenshot's grey regular body copy measured 600 and the four nav links came
+# out as three different weights; display type is where weight is both visible and
+# measurable, and below it the old stroke-ratio guess is used instead.
+WEIGHT_MIN_INK_HEIGHT = 24
 
 
 def estimate_font_weight(text: str, ink: np.ndarray, serif: bool = False,
@@ -560,21 +563,45 @@ def cluster_font_sizes(runs: List[Dict[str, Any]], tol: float = 0.07) -> None:
     ordered = sorted(runs, key=lambda r: r['fontSize'])
     clusters: List[List[Dict[str, Any]]] = [[ordered[0]]]
     for r in ordered[1:]:
-        if r['fontSize'] <= clusters[-1][-1]['fontSize'] * (1.0 + tol):
+        # Measured from the smallest member of the cluster, not the last one added. By
+        # the last one, a page whose sizes step 9.2, 9.9, 10.3 ... 17.4 -- each within 7%
+        # of the one before -- chains into a single cluster, and its median was imposed
+        # on all of it: nav, labels and body copy all set at 13.3px, with the spacing
+        # re-solved to spread the too-small text across boxes measured for 17px. What
+        # was meant to merge 19.4 with 20.1 was flattening the whole type scale.
+        if r['fontSize'] <= clusters[-1][0]['fontSize'] * (1.0 + tol):
             clusters[-1].append(r)
         else:
             clusters.append([r])
 
     for group in clusters:
         centre = float(np.median([r['fontSize'] for r in group]))
+        # Display lines set at one size share one weight. Two lines of a single headline
+        # measured 800 and 700, because the second is half accent colour and the lighter
+        # ink reads as a lighter stroke. When they disagree the heavier reading wins: a
+        # low-contrast run under-measures, and nothing over-measures at this size.
+        display = [r for r in group if (r['bbox'][3] - r['bbox'][1]) >= WEIGHT_MIN_INK_HEIGHT]
+        if len(display) >= 2:
+            votes = Counter(str(r['fontWeight']) for r in display)
+            top = max(votes.values())
+            weight = max((w for w, n in votes.items() if n == top),
+                         key=lambda w: int(w) if str(w).isdigit() else 400)
+            for r in display:
+                r['fontWeight'] = weight
+                r['style'].fontWeight = weight
+                for sp in (r.get('spans') or []):
+                    if sp.style:
+                        sp.style.fontWeight = weight
         for r in group:
             if abs(r['fontSize'] - centre) < 0.01:
                 continue
             # Re-solve spacing and line-height against the snapped size so the run still
             # lands on the ink box it was measured from.
             b = r['bbox']
-            _, ls, lh, ws, sx = fit_text_to_box(r['text'], b[2] - b[0], b[3] - b[1],
-                                                is_heavy(r['fontWeight']), force_size=centre)
+            _, ls, lh, ws, sx = fit_text_to_box(
+                r['text'], b[2] - b[0], b[3] - b[1], is_heavy(r['fontWeight']),
+                force_size=centre,
+                serif=(r['style'].fontFamily == FONT_STACK_EDITORIAL_SERIF))
             r['fontSize'] = centre
             r['style'].fontSize = centre
             r['style'].letterSpacing = ls
@@ -737,6 +764,11 @@ def scaled_kernel(scale: float, base: int = 3) -> np.ndarray:
 
 TEXT_COLOUR_TOL = 96.0      # how far an antialiased glyph pixel may sit from its own ink
 
+# How far towards the strongest ink pixel a pixel has to be to count as the core of a
+# stroke rather than its antialiased edge.
+INK_CORE_SHARE = 0.7
+
+
 def dominant_ink_colour(crop: np.ndarray, candidate: np.ndarray) -> Optional[np.ndarray]:
     """The most common colour among candidate glyph pixels, as BGR.
 
@@ -745,7 +777,18 @@ def dominant_ink_colour(crop: np.ndarray, candidate: np.ndarray) -> Optional[np.
     neither the glyphs nor the background. The modal quantised colour survives that,
     because the glyphs are the one thing in the set that shares a single colour.
     """
-    px = crop[candidate > 0]
+    mask = candidate > 0
+    if int(mask.sum()) < 8:
+        return None
+    # Only the core of the strokes. The edge of a letter is a blend of the ink and what
+    # it sits on, and a thin word is mostly edge: "in", "once" and "set the" came out
+    # two shades lighter than the words beside them in the same paragraph, and each
+    # was given its own grey. The pixels furthest from the background are the ink.
+    border = np.concatenate([crop[0, :], crop[-1, :], crop[:, 0], crop[:, -1]], axis=0)
+    dist = np.linalg.norm(crop.astype(np.float32)
+                          - np.median(border, axis=0).astype(np.float32), axis=2)
+    core = mask & (dist >= float(dist[mask].max()) * INK_CORE_SHARE)
+    px = crop[core] if int(core.sum()) >= 12 else crop[mask]
     if px.size < 24:
         return None
     q = (px.astype(np.int32) // 16 * 16)
@@ -3645,7 +3688,12 @@ class ImageReconstructor:
                     if len(valid_colors) == len(words):
                         for i in range(len(valid_colors)):
                             for j in range(i + 1, len(valid_colors)):
-                                if np.linalg.norm(valid_colors[i] - valid_colors[j]) > 35.0:
+                                # A change of colour, not of shade: two greys are one
+                                # ink sampled through different amounts of edge, and
+                                # splitting on them gave "Sign" and "in" two colours.
+                                if _is_a_colour_change(
+                                        np.clip(valid_colors[i], 0, 255).astype(np.uint8),
+                                        np.clip(valid_colors[j], 0, 255).astype(np.uint8)):
                                     has_distinct_colors = True
                                     break
                             if has_distinct_colors:
