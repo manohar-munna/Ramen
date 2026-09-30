@@ -22,12 +22,14 @@ of base64 exactly.
 from __future__ import annotations
 
 import base64
+import html
 import io
 import json
 import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from html.parser import HTMLParser
@@ -1738,96 +1740,1144 @@ def enhance_html(html: str, api_key: Optional[str] = None, model: Optional[str] 
 
 
 # ============================================================================
-# The Enhance button: a pixel-perfect recreation, checked against the screenshot
+# The Enhance button: recreate the page so it looks like the screenshot
 # ============================================================================
 #
-# The engine already places every element where it was measured, and scores 88-97% on
-# the reference pages doing it. What it gets wrong is what a model is good at: text the
-# recogniser misread, colours and weights it misjudged, artwork it cut into fragments.
-# So the model is given the engine's page as the geometry to keep, the screenshot as the
-# truth, and a render of the engine's page so it can see where the two differ -- and
-# the engine's page is also the floor. Nothing replaces it without measurably beating
-# it, so pressing the button cannot make the page worse than not pressing it.
+# The target is the screenshot, judged by eye. The last version of this started the
+# model from the engine's reconstruction and made the engine's page the floor, which
+# is why its result looked like the engine: the engine's stand-in typeface, its
+# artwork cut into fragments, the smudges where text was erased from backgrounds.
 #
-# This used to write the page from the screenshot alone, screenshot-to-code style, with
-# the engine thrown away: the model guessed every position, then spent up to fifteen
-# rounds trying to guess them back. Watching it write is kept -- the rewrite still
-# streams into the editor -- but it now starts from measurements instead of a guess.
+# Now the page is recreated from the screenshot itself, with three things settled
+# before the model writes a line:
+#
+# - What is a picture. One call names the photographs, mockups, avatars and logos, and
+#   each one is cropped straight out of the original screenshot and placed where it
+#   sits -- identical by construction, text and all. A tilted laptop screen full of
+#   UI cannot be rebuilt as live text in perspective; a crop of it is exact. The
+#   boxes the model gives are rough, so each is snapped to the picture's own edges.
+# - What typeface. The same call names the families, and they are fetched from Google
+#   Fonts and embedded, so the page is drawn in the right face everywhere. The engine
+#   set everything in Plus Jakarta Sans; a page set in Inter came back in the wrong
+#   letterforms however well it was sized.
+# - Where the text goes. The engine's measured positions are re-solved in the chosen
+#   typeface and given to the model as CSS, so a line lands where the screenshot has it.
+#   The words are for the model to read from the screenshot; the OCR only places them.
 
-GENERATE_PROMPT = """\
-You are recreating a web page in HTML so that it is indistinguishable from a screenshot
-of it, pixel for pixel, at exactly %(width)d x %(height)d px.
+_FONT_DIR_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "fonts")
+_LOCAL_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+_LOCAL_FACES = {"inter": "Inter.ttf", "plus jakarta sans": "PlusJakartaSans.ttf"}
+# A browser's user agent gets woff2, which is small; a plain one gets TTF, which PIL can
+# measure. Google serves both from the same API.
+_UA_BROWSER = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+_UA_PLAIN = "Wget/1.21"
+_WEIGHT_NAMES = {100: "Thin", 200: "ExtraLight", 300: "Light", 400: "Regular",
+                 500: "Medium", 600: "SemiBold", 700: "Bold", 800: "ExtraBold",
+                 900: "Black"}
+_FAMILY_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 \-]{0,48}$")
 
-You have three things:
-1. IMAGE 1, THE TARGET: the screenshot to reproduce.
-2. IMAGE 2, THE MEASURED PAGE: how the reference HTML below renders right now.
-3. THE REFERENCE HTML, below: every element on the page, measured off the screenshot by
-   a layout engine -- its exact position and size, colour, font size, weight and spacing.
 
-The reference is right about geometry and usually right about style. Where IMAGE 2
-differs from IMAGE 1, the reference is wrong. Write the page so it looks like IMAGE 1,
-starting from the reference and correcting it.
+def _slug(family: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", family.lower()).strip("-") or "font"
 
-- Canvas: exactly %(width)d x %(height)d px. `html, body { margin: 0; padding: 0 }` and one
-  root element of that size with `position: relative; overflow: hidden`. Nothing
-  reflows: no media queries, no percentage widths that depend on the window.
-- Geometry: keep every element at the position and size the reference gives it unless
-  IMAGE 1 shows it somewhere else. Absolute positioning is expected. You may simplify
-  the markup -- drop empty wrappers, use h1, p, nav, a, button -- as long as nothing
-  moves.
-- Text: the reference text was read by OCR and has mistakes -- words run together into
-  one, a lowercase L read as a capital I or the reverse, partly hidden words garbled.
-  Read every string in IMAGE 1 and write what it actually says. Add no text that is not
-  in IMAGE 1, and drop none that is.
-- Style: keep the reference's colours, font sizes, weights and letter-spacing unless
-  IMAGE 1 clearly differs. Text painted with a gradient clipped to the letters is a line
-  set in more than one colour; keep it that way.
-- Font: use the font families the reference names. They are embedded in the finished
-  page; do not load fonts from anywhere.
-- Images: use every RAMEN_ASSET_<n> marker exactly as written, as the src of an <img>,
-  at the position and size the reference gives it. Invent none, and link to nothing
-  external.
-- Static: no entrance animations and no transitions that move or fade anything. Hover
-  colours on links and buttons are fine.
 
-The images, as markers:
-%(assets)s
+def _get(url: str, ua: str, timeout: int = 30) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": ua})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
 
-Return the complete HTML document and nothing else -- no explanation, no markdown
-fences. Start with <!DOCTYPE html>.
 
-THE REFERENCE HTML:
-%(html)s
+def _axes(family: str) -> Dict[str, Tuple[float, float]]:
+    """The variable axes Google Fonts has for a family: {"opsz": (14, 32), ...}.
+
+    Read from Google's catalogue once and kept as a small table, since the catalogue is
+    2.7MB. An empty dict when it cannot be had, and the family is fetched as before.
+    """
+    table_path = os.path.join(_FONT_DIR_CACHE, "axes.json")
+    table: Optional[Dict[str, Any]] = None
+    if os.path.exists(table_path):
+        try:
+            with open(table_path, encoding="utf-8") as fh:
+                table = json.load(fh)
+        except Exception:
+            table = None
+    if table is None:
+        try:
+            meta = json.loads(_get("https://fonts.google.com/metadata/fonts", _UA_BROWSER, 60))
+            table = {f["family"].lower(): {a["tag"]: [a["min"], a["max"]] for a in f.get("axes") or []}
+                     for f in meta.get("familyMetadataList") or []}
+            os.makedirs(_FONT_DIR_CACHE, exist_ok=True)
+            with open(table_path, "w", encoding="utf-8") as fh:
+                json.dump(table, fh)
+        except Exception:
+            return {}
+    return {k: (float(v[0]), float(v[1])) for k, v in (table.get(family.lower()) or {}).items()}
+
+
+def _gf_css(family: str, axis: str, ua: str) -> str:
+    fam = urllib.parse.quote(family).replace("%20", "+")
+    url = "https://fonts.googleapis.com/css2?family=%s%s&display=block" % (fam, axis)
+    return _get(url, ua).decode("utf-8", "replace")
+
+
+def _as_weight(w: Any) -> int:
+    try:
+        return max(100, min(900, int(round(int(str(w)) / 100.0)) * 100))
+    except (TypeError, ValueError):
+        return 700 if str(w).lower() in ("bold", "bolder") else 400
+
+
+def measure_face(family: str, weight: int):
+    """A PIL font of this family at this weight, at 100px, for measuring text.
+
+    Fetched from Google Fonts once and cached. When that is not possible -- offline, or
+    a family Google does not have -- a shipped face is used if it is the same family,
+    and otherwise None, and the caller falls back to the engine's own measurements.
+    """
+    from PIL import ImageFont
+    weight = _as_weight(weight)
+    os.makedirs(_FONT_DIR_CACHE, exist_ok=True)
+    order = [weight] + sorted({400, 500, 600, 700, 300, 800} - {weight},
+                              key=lambda x: abs(x - weight))
+    for w in order:
+        path = os.path.join(_FONT_DIR_CACHE, "%s-%d.ttf" % (_slug(family), w))
+        if not os.path.exists(path):
+            try:
+                css = _gf_css(family, ":wght@%d" % w, _UA_PLAIN)
+                url = re.search(r"url\((https://[^)]+)\)", css)
+                if not url:
+                    continue
+                with open(path, "wb") as fh:
+                    fh.write(_get(url.group(1), _UA_PLAIN))
+            except Exception:
+                continue
+        try:
+            return ImageFont.truetype(path, 100)
+        except Exception:
+            continue
+    local = _LOCAL_FACES.get(family.strip().lower())
+    if local and os.path.exists(os.path.join(_LOCAL_FONT_DIR, local)):
+        font = ImageFont.truetype(os.path.join(_LOCAL_FONT_DIR, local), 100)
+        try:
+            font.set_variation_by_name(_WEIGHT_NAMES.get(weight, "Regular"))
+        except Exception:
+            pass
+        return font
+    return None
+
+
+def embedded_family_css(families: List[str], weights: List[int]) -> str:
+    """@font-face rules for these families with the font files inlined.
+
+    Only the latin and latin-extended subsets, which is 30-60KB a family as woff2 --
+    Inter's full TTF is 876KB. Cached per family, so a page is fetched for once.
+    """
+    os.makedirs(_FONT_DIR_CACHE, exist_ok=True)
+    wanted = sorted({_as_weight(w) for w in weights} | {400, 700})
+    rules: List[str] = []
+    for family in families:
+        # With its optical sizes, where it has them. Inter drawn at 76px from its text
+        # cut came out 28px wider than the screenshot's headline and looser in every
+        # letter; the page is set in its display cut, which the browser picks by itself
+        # from the font size once the font carries the axis.
+        axes = _axes(family)
+        tries = [":wght@100..900", ":wght@" + ";".join(str(w) for w in wanted),
+                 ":wght@400;700", ""]
+        if "opsz" in axes and "wght" in axes:
+            lo, hi = axes["opsz"]
+            wlo, whi = axes["wght"]
+            tries.insert(0, ":opsz,wght@%g..%g,%g..%g" % (lo, hi, wlo, whi))
+        cache = os.path.join(_FONT_DIR_CACHE, _slug(family) + "-axes.css")
+        css = None
+        if os.path.exists(cache):
+            with open(cache, encoding="utf-8") as fh:
+                css = fh.read()
+        if css is None:
+            for axis in tries:
+                try:
+                    raw = _gf_css(family, axis, _UA_BROWSER)
+                    break
+                except Exception:
+                    raw = None
+            if raw:
+                keep = []
+                for name, block in re.findall(r"/\*\s*([\w-]+)\s*\*/\s*(@font-face\s*\{[^}]*\})", raw):
+                    if name not in ("latin", "latin-ext"):
+                        continue
+                    for url in re.findall(r"url\((https://[^)]+)\)", block):
+                        try:
+                            data = base64.b64encode(_get(url, _UA_BROWSER)).decode("ascii")
+                        except Exception:
+                            block = ""
+                            break
+                        block = block.replace(url, "data:font/woff2;base64," + data)
+                    if block:
+                        keep.append(block)
+                css = "\n".join(keep)
+                if css:
+                    with open(cache, "w", encoding="utf-8") as fh:
+                        fh.write(css)
+        if not css:
+            # Offline: a shipped face if it is the same family, whole.
+            local = _LOCAL_FACES.get(family.strip().lower())
+            path = os.path.join(_LOCAL_FONT_DIR, local) if local else None
+            if path and os.path.exists(path):
+                with open(path, "rb") as fh:
+                    css = ("@font-face{font-family:'%s';src:url(data:font/ttf;base64,%s) "
+                           "format('truetype');font-weight:100 900;font-display:block}"
+                           % (family, base64.b64encode(fh.read()).decode("ascii")))
+        if css:
+            rules.append(css)
+    return "\n".join(rules)
+
+
+_FONT_LINK_RE = re.compile(r"<link[^>]+fonts\.(?:googleapis|gstatic)\.com[^>]*>", re.I)
+_FONT_IMPORT_RE = re.compile(r"@import\s+url\([^)]*fonts\.googleapis\.com[^)]*\)\s*;?", re.I)
+
+
+def apply_fonts(html: str, css: str) -> str:
+    """The page with its typefaces embedded, and any link to fetch them removed."""
+    html = _FONT_LINK_RE.sub("", html)
+    html = _FONT_IMPORT_RE.sub("", html)
+    if not css:
+        return html
+    tag = '<style id="ramen-fonts">%s</style>' % css
+    at = html.lower().find("</head>")
+    return (html[:at] + tag + html[at:]) if at >= 0 else (tag + html)
+
+
+ANALYSIS_PROMPT = """\
+The attached screenshot is a web page, %(width)d x %(height)d px.
+
+1. FONTS. Name the typeface families the page is set in, as Google Fonts family names:
+   the exact face if it is on Google Fonts, otherwise the closest one that is. Say which
+   is used for headings and which for body text (they may be the same).
+
+2. PICTURES. List every region that is a picture rather than something built from text
+   and CSS boxes: photographs, illustrations, screenshots and mockups of products or
+   devices (with all the text inside them), avatars and profile photos, logos and brand
+   marks including wordmarks, and icons that are not simple shapes. Do not list plain
+   text, buttons, cards, panels, backgrounds or gradients -- those are built in HTML.
+   Give each a box that encloses the whole picture and nothing else.
+
+Reply with JSON only, in this shape:
+{"fonts": {"heading": "Family Name", "body": "Family Name"},
+ "pictures": [{"label": "short name", "box_2d": [ymin, xmin, ymax, xmax]}]}
+box_2d is normalised to 0-1000 on each axis.
 """
 
 
-def build_generate_prompt(skeleton: str, asset_lines: List[str],
-                          width: int = 1400, height: int = 900) -> str:
+def analyse_screenshot(shot: Tuple[str, str], width: int, height: int,
+                       api_key: Optional[str] = None, model: Optional[str] = None,
+                       timeout: int = 150, attempts: int = 2) -> Dict[str, Any]:
+    """The page's typefaces and its pictures, as the model reads them."""
+    reply = call_gemini(ANALYSIS_PROMPT % {"width": width, "height": height},
+                        api_key=api_key, model=model, timeout=timeout,
+                        attempts=attempts, image=shot)
+    text = _unfence(reply)
+    m = re.search(r"\{.*\}", text, re.S)
+    data = json.loads(m.group(0) if m else text)
+    fonts = data.get("fonts") or {}
+    clean = {}
+    for role in ("heading", "body"):
+        name = str(fonts.get(role) or "").strip().strip("'\"")
+        if _FAMILY_OK.match(name):
+            clean[role] = name
+    pictures = [p for p in (data.get("pictures") or [])
+                if isinstance(p, dict) and isinstance(p.get("box_2d"), list)
+                and len(p["box_2d"]) == 4]
+    return {"fonts": clean, "pictures": pictures}
+
+
+# How far outside the model's rough box a picture's own edges may be looked for: a share
+# of the box, and never more than a few pixels. A box can shrink onto its picture freely,
+# but growth is what goes wrong -- on a page with a glow behind it, everything differs
+# from the ground, and a laptop's box grew 108px into the nav and swallowed it.
+SNAP_MARGIN = 0.12
+SNAP_MAX_GROWTH = 14
+
+
+def snap_to_picture(img, x0: int, y0: int, x1: int, y1: int) -> Tuple[int, int, int, int]:
+    """Moves a rough box onto the edges of the picture it was drawn round.
+
+    A picture is whatever stands out from the ground around it, taken as the marks that
+    reach into the middle of the box -- so a neighbouring heading, which the box only
+    grazes, is not pulled in, and a logo the box cut short is completed.
+    """
+    import cv2
+    import numpy as np
+    h, w = img.shape[:2]
+    bw, bh = max(1, x1 - x0), max(1, y1 - y0)
+    mx = max(4, min(SNAP_MAX_GROWTH, int(bw * SNAP_MARGIN)))
+    my = max(4, min(SNAP_MAX_GROWTH, int(bh * SNAP_MARGIN)))
+    ex0, ey0, ex1, ey1 = max(0, x0 - mx), max(0, y0 - my), min(w, x1 + mx), min(h, y1 + my)
+    win = img[ey0:ey1, ex0:ex1]
+    if win.size == 0 or win.shape[0] < 4 or win.shape[1] < 4:
+        return x0, y0, x1, y1
+    border = np.concatenate([win[0, :], win[-1, :], win[:, 0], win[:, -1]], axis=0)
+    dist = np.linalg.norm(win.astype(np.float32)
+                          - np.median(border, axis=0).astype(np.float32), axis=2)
+    content = (dist > 22.0).astype(np.uint8)
+    content = cv2.dilate(content, np.ones((5, 5), np.uint8), iterations=2)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(content, 8)
+    if n <= 1:
+        return x0, y0, x1, y1
+    cx0, cy0 = (x0 - ex0) + bw // 5, (y0 - ey0) + bh // 5
+    cx1, cy1 = (x1 - ex0) - bw // 5, (y1 - ey0) - bh // 5
+    core = lab[max(0, cy0):max(cy0 + 1, cy1), max(0, cx0):max(cx0 + 1, cx1)]
+    touched = set(np.unique(core).tolist()) - {0}
+    if not touched:
+        return x0, y0, x1, y1
+    sx0 = min(int(stats[i, cv2.CC_STAT_LEFT]) for i in touched)
+    sy0 = min(int(stats[i, cv2.CC_STAT_TOP]) for i in touched)
+    sx1 = max(int(stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH]) for i in touched)
+    sy1 = max(int(stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]) for i in touched)
+    # The dilation added two pixels a side; take them back.
+    return (ex0 + max(0, sx0 + 2), ey0 + max(0, sy0 + 2),
+            ex0 + min(win.shape[1], sx1 - 2), ey0 + min(win.shape[0], sy1 - 2))
+
+
+def picture_crops(shot: Tuple[str, str], pictures: List[Dict[str, Any]],
+                  text_boxes: Optional[List[Tuple[float, float, float, float]]] = None):
+    """Crops of the original for each picture: (data uris, prompt lines, pixel boxes).
+
+    A snapped box that takes in a line of text its rough box did not hold goes back to
+    the rough box: that line is the page's own text, and cropping it into a picture
+    would make it uneditable and hide it from everything that checks the text.
+    """
+    import numpy as np
+    from PIL import Image
+    im = Image.open(io.BytesIO(base64.b64decode(shot[1]))).convert("RGB")
+    w, h = im.size
+    arr = np.asarray(im)
+    boxes = []
+    for p in pictures:
+        try:
+            ymin, xmin, ymax, xmax = [float(v) for v in p["box_2d"]]
+        except (TypeError, ValueError):
+            continue
+        rx0, rx1 = sorted((int(xmin * w / 1000.0), int(xmax * w / 1000.0)))
+        ry0, ry1 = sorted((int(ymin * h / 1000.0), int(ymax * h / 1000.0)))
+        x0, y0, x1, y1 = snap_to_picture(arr, rx0, ry0, rx1, ry1)
+        if text_boxes:
+            rough = [(rx0, ry0, rx1, ry1)]
+            snapped = [(x0, y0, x1, y1)]
+            if any(_inside(t, snapped) and not _inside(t, rough) for t in text_boxes):
+                x0, y0, x1, y1 = max(0, rx0), max(0, ry0), min(w, rx1), min(h, ry1)
+        if text_boxes:
+            x0, y0, x1, y1 = clear_of_text((x0, y0, x1, y1), text_boxes)
+        if min(x1 - x0, y1 - y0) < 8:
+            continue
+        if (x1 - x0) >= w * 0.95 and (y1 - y0) >= h * 0.95:
+            continue                      # the whole page is not a picture on it
+        boxes.append((x0, y0, x1, y1, str(p.get("label") or "picture")[:40]))
+
+    # A picture wholly inside a bigger one is already in its crop.
+    boxes.sort(key=lambda b: -(b[2] - b[0]) * (b[3] - b[1]))
+    kept: List[Tuple[int, int, int, int, str]] = []
+    for b in boxes:
+        area = (b[2] - b[0]) * (b[3] - b[1])
+        inside = False
+        for k in kept:
+            ix = max(0, min(b[2], k[2]) - max(b[0], k[0]))
+            iy = max(0, min(b[3], k[3]) - max(b[1], k[1]))
+            if ix * iy >= area * 0.9:
+                inside = True
+                break
+        if not inside:
+            kept.append(b)
+    kept.sort(key=lambda b: (b[1], b[0]))
+
+    assets, lines, pix = [], [], []
+    for i, (x0, y0, x1, y1, label) in enumerate(kept):
+        buf = io.BytesIO()
+        im.crop((x0, y0, x1, y1)).save(buf, format="PNG", optimize=True)
+        assets.append("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii"))
+        lines.append("- %s: left:%dpx; top:%dpx; width:%dpx; height:%dpx"
+                     % (label, x0, y0, x1 - x0, y1 - y0))
+        pix.append((x0, y0, x1, y1))
+    return assets, lines, pix
+
+
+def clear_of_text(box: Tuple[int, int, int, int],
+                  text_boxes: List[Tuple[float, float, float, float]], pad: int = 3
+                  ) -> Tuple[int, int, int, int]:
+    """The box, cut back so it does not reach into any line of the page's own text.
+
+    A picture sits above the page, so where its box reaches over a line of text that
+    line is drawn twice -- the crop's copy over the page's -- a few pixels apart. The
+    laptop's box on 8xbrand started at x=438, inside the headline and the paragraph,
+    and the page read "pcsts" and "prodluct". A line whose middle is in the box is the
+    picture's own and stays; one that only overlaps it is cut out, on whichever side
+    loses the least of the picture.
+    """
+    x0, y0, x1, y1 = box
+    for _ in range(4):
+        changed = False
+        for t in text_boxes:
+            tx0, ty0, tx1, ty1 = t
+            if tx1 <= x0 or tx0 >= x1 or ty1 <= y0 or ty0 >= y1:
+                continue
+            if _inside(t, [(x0, y0, x1, y1)]):
+                continue
+            cuts = [(int(min(x1, tx1 + pad)), y0, x1, y1), (x0, y0, int(max(x0, tx0 - pad)), y1),
+                    (x0, int(min(y1, ty1 + pad)), x1, y1), (x0, y0, x1, int(max(y0, ty0 - pad)))]
+            x0, y0, x1, y1 = max(cuts, key=lambda c: (c[2] - c[0]) * (c[3] - c[1]))
+            changed = True
+        if not changed:
+            break
+    return int(x0), int(y0), int(x1), int(y1)
+
+
+def _crop_uri(im, box) -> str:
+    buf = io.BytesIO()
+    im.crop(tuple(int(v) for v in box)).save(buf, format="PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+# What makes a region of the screenshot a picture nobody placed: detail in the
+# screenshot, none in the page drawn from it.
+UNPLACED_EDGE = 40
+UNPLACED_SCREEN_DETAIL = 0.10
+UNPLACED_PAGE_DETAIL = 0.03
+UNPLACED_MIN_SIDE = 14
+UNPLACED_LIMIT = 12
+
+
+def unplaced_pictures(shot: Tuple[str, str], render: Tuple[str, str],
+                      text_boxes: List[Tuple[float, float, float, float]],
+                      pictures: List[Tuple[int, int, int, int]]
+                      ) -> List[Tuple[int, int, int, int]]:
+    """Regions with something drawn in the screenshot and nothing in the page.
+
+    The call that finds the pictures misses some, and not the same ones twice: one run
+    of 8xbrand found the row of avatars and the next did not, and the page had a blank
+    where they belong. The page drawn from the screenshot shows where: there is detail
+    in the screenshot and flat background in the page. Regions that are mostly a line
+    of text are left alone -- that is text the page put somewhere else, not a picture.
+    """
+    import cv2
+    import numpy as np
+    a = cv2.imdecode(np.frombuffer(base64.b64decode(shot[1]), np.uint8), cv2.IMREAD_GRAYSCALE)
+    b = cv2.imdecode(np.frombuffer(base64.b64decode(render[1]), np.uint8), cv2.IMREAD_GRAYSCALE)
+    if a is None or b is None:
+        return []
+    h, w = a.shape[:2]
+    if b.shape[:2] != (h, w):
+        b = cv2.resize(b, (w, h), interpolation=cv2.INTER_AREA)
+    k = np.ones((3, 3), np.uint8)
+    detail_a = cv2.blur((cv2.morphologyEx(a, cv2.MORPH_GRADIENT, k) > UNPLACED_EDGE).astype(np.float32), (15, 15))
+    detail_b = cv2.blur((cv2.morphologyEx(b, cv2.MORPH_GRADIENT, k) > UNPLACED_EDGE).astype(np.float32), (15, 15))
+    apart = cv2.blur(np.abs(a.astype(np.float32) - b.astype(np.float32)), (9, 9))
+    mask = ((detail_a > UNPLACED_SCREEN_DETAIL) & (detail_b < UNPLACED_PAGE_DETAIL)
+            & (apart > 12)).astype(np.uint8) * 255
+    for x0, y0, x1, y1 in pictures:
+        mask[max(0, y0):y1, max(0, x0):x1] = 0
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    found = []
+    for i in range(1, n):
+        x, y, bw, bh, area = [int(v) for v in stats[i]]
+        if bw < UNPLACED_MIN_SIDE or bh < UNPLACED_MIN_SIDE or area < 250:
+            continue
+        if bw * bh > w * h * 0.25:
+            continue
+        box = (max(0, x - 3), max(0, y - 3), min(w, x + bw + 3), min(h, y + bh + 3))
+        covered = 0.0
+        for tx0, ty0, tx1, ty1 in text_boxes:
+            covered += (max(0.0, min(box[2], tx1) - max(box[0], tx0))
+                        * max(0.0, min(box[3], ty1) - max(box[1], ty0)))
+        if covered > 0.3 * (box[2] - box[0]) * (box[3] - box[1]):
+            continue
+        box = clear_of_text(box, text_boxes)
+        if min(box[2] - box[0], box[3] - box[1]) < UNPLACED_MIN_SIDE:
+            continue
+        found.append(box)
+    found.sort(key=lambda b: -(b[2] - b[0]) * (b[3] - b[1]))
+    return found[:UNPLACED_LIMIT]
+
+
+def _inside(box, pictures) -> bool:
+    cx, cy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+    return any(p[0] <= cx <= p[2] and p[1] <= cy <= p[3] for p in pictures)
+
+
+# The page's background, read off the screenshot at an eighth of its size. Fine enough
+# to carry a glow or a gradient exactly, coarse enough that nothing sharp survives.
+PLATE_SCALE = 8
+# Surfaces smaller than this share of the page -- buttons, badges, inputs -- are cleared
+# from the plate so the HTML's own versions of them do not sit on a blurred copy.
+PLATE_SURFACE_SHARE = 0.15
+# How far a cell has to differ from the wide median around it to be cleared as an object.
+PLATE_OBJECT_CONTRAST = 18
+
+
+def background_plate(shot: Tuple[str, str], clear: List[Tuple[float, float, float, float]]
+                     ) -> str:
+    """The screenshot's background alone -- its colour, glows and gradients -- as an image.
+
+    Every picture is cut from the original with the background it sits on, so on a
+    page whose background is anything but flat, each crop showed as a rectangle of a
+    slightly different colour: the checks kept reporting "a white rectangle" and "a
+    purple square" round things that were in exactly the right place, and asked for
+    them to be moved. A background written in CSS cannot match a photographed glow.
+    One measured off the same screenshot does, so the crops meet it with no seam.
+
+    Text, pictures and small surfaces are cleared first and the gaps filled from what
+    surrounds them, so the plate holds only the ground they sit on.
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image
+    im = np.asarray(Image.open(io.BytesIO(base64.b64decode(shot[1]))).convert("RGB"))
+    h, w = im.shape[:2]
+    sw, sh = max(8, w // PLATE_SCALE), max(8, h // PLATE_SCALE)
+    small = cv2.resize(im, (sw, sh), interpolation=cv2.INTER_AREA)
+    mask = np.zeros((sh, sw), np.uint8)
+    for x0, y0, x1, y1 in clear:
+        a0 = max(0, int((x0 - 4) * sw / w) - 1)
+        b0 = max(0, int((y0 - 4) * sh / h) - 1)
+        a1 = min(sw, int(np.ceil((x1 + 4) * sw / w)) + 1)
+        b1 = min(sh, int(np.ceil((y1 + 4) * sh / h)) + 1)
+        mask[b0:b1, a0:a1] = 255
+    # Anything else that stands out from a wide median of its surroundings is an object,
+    # not ground. The engine does not make a surface for every button -- the dark
+    # "Start a campaign" pills had none -- and a plate that kept them put a blurred dark
+    # smear under the HTML's own buttons.
+    wide = cv2.medianBlur(small, 15)
+    stands_out = (np.abs(small.astype(np.int16) - wide.astype(np.int16)).max(axis=2)
+                  > PLATE_OBJECT_CONTRAST).astype(np.uint8) * 255
+    mask = cv2.bitwise_or(mask, cv2.dilate(stands_out, np.ones((3, 3), np.uint8)))
+    if mask.mean() < 250:
+        small = cv2.inpaint(small, mask, 4, cv2.INPAINT_TELEA)
+    small = cv2.GaussianBlur(small, (0, 0), 1.2)
+    buf = io.BytesIO()
+    Image.fromarray(small).save(buf, format="JPEG", quality=92)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+_MARKER_IMG_RE = re.compile(r"<img\b[^>]*RAMEN_ASSET_\d+[^>]*>", re.I)
+
+
+def picture_layer(assets: List[str], boxes: List[Tuple[int, int, int, int]],
+                  plate: str, width: int, height: int) -> str:
+    """The background plate and every picture, placed exactly, as markup for the page.
+
+    Placed by this code, not by the model. Left to the model, the pictures moved: the
+    check misjudged where they were -- it reported logos cut off below the bottom of an
+    836px page -- and the correction obeyed, shifting a crop that was already exact and
+    taking the page from 91.6% to 64.6%. What was measured is not the model's to move.
+    """
+    imgs = "".join(
+        '<img src="%s" alt="" style="position:absolute;left:%dpx;top:%dpx;'
+        'width:%dpx;height:%dpx;display:block;max-width:none">'
+        % (uri, x0, y0, x1 - x0, y1 - y0)
+        for uri, (x0, y0, x1, y1) in zip(assets, boxes))
+    return ('<style id="ramen-plate">html{background:url(%s) 0 0/%dpx %dpx no-repeat !important}'
+            'body{background:transparent !important}</style>'
+            '<div id="ramen-pictures" aria-hidden="true" style="position:absolute;left:0;top:0;'
+            'width:%dpx;height:%dpx;z-index:40;pointer-events:none">%s</div>'
+            % (plate, width, height, width, height, imgs))
+
+
+def lock_pictures(page_html: str, layer: str) -> str:
+    """The model's page with the pictures and background put where they were measured.
+
+    Any image the model wrote for a picture is removed, and the measured layer is
+    added in its place, above the page and at the page's origin.
+    """
+    page_html = _MARKER_IMG_RE.sub("", page_html)
+    style_at = layer.index("</style>") + len("</style>")
+    style, pictures = layer[:style_at], layer[style_at:]
+    head = page_html.lower().find("</head>")
+    if head >= 0:
+        page_html = page_html[:head] + style + page_html[head:]
+    else:
+        page_html = style + page_html
+    body = page_html.lower().rfind("</body>")
+    if body >= 0:
+        return page_html[:body] + pictures + page_html[body:]
+    return page_html + pictures
+
+
+# A line of display text is set in the heading face from this size up.
+HEADING_MIN_SIZE = 24.0
+
+
+# Weights a line is tried at, to find the one whose ink matches the screenshot's.
+WEIGHT_CANDIDATES = (300, 400, 500, 600, 700, 800, 900)
+# How closely the best weight's letters must match the screenshot's to be believed.
+WEIGHT_MIN_MATCH = 0.5
+# How much better than regular another weight must match, on text below display size.
+WEIGHT_SMALL_MARGIN = 0.03
+# How far the size a small line's width gives may be from the size its height gives, to
+# be tried as well.
+SIZE_BY_WIDTH_SPREAD = 0.15
+# Sizes tried between the two, the last of them the untracked one.
+SIZE_STEPS = 3
+# Lines closer in colour than this, in RGB, are taken for one style.
+STYLE_COLOUR_DISTANCE = 40
+# Rows drawn in one screenshot, so a long list stays inside what the browser will capture.
+CHROME_ROWS_PER_SHOT = 120
+# The least contrast between a line's ink and its ground for its ink to be weighed.
+WEIGHT_MIN_CONTRAST = 40.0
+# A gap in a display line's ink this wide, as a share of its size, is a space: 8xbrand's
+# headline, tracked tight, has word gaps of 0.13-0.16em and letter gaps under 0.06em.
+WORD_GAP_SHARE = 0.1
+
+
+def _chrome_ink(rows: List[Tuple], font_css: str) -> Optional[List[Optional[Tuple]]]:
+    """Ink of each (text, family, weight, size[, letter-spacing]) as the browser draws it.
+
+    Returns, for each row, its ink box relative to where its line box starts (with
+    line-height 1) and the ink itself, 0-1 a pixel. The browser, not a font library,
+    because the browser is what draws the page: it picks the optical size by itself,
+    kerns, and falls back the same way when a font is missing.
+    """
+    if len(rows) > CHROME_ROWS_PER_SHOT:
+        out: List[Optional[Tuple]] = []
+        for at in range(0, len(rows), CHROME_ROWS_PER_SHOT):
+            part = _chrome_ink(rows[at:at + CHROME_ROWS_PER_SHOT], font_css)
+            if part is None:
+                return None
+            out.extend(part)
+        return out
+    import numpy as np
+    from PIL import Image
+    pad = 40
+    tops, y = [], 0
+    rows = [tuple(r) + (0.0,) * (5 - len(r)) for r in rows]
+    for text, family, weight, size, _ in rows:
+        tops.append(y + int(size * 0.5) + 10)
+        y += int(size * 2.2) + 20
+    width = int(min(6000, max(400, max(r[3] * 0.8 * (len(r[0]) + 2) for r in rows) + 2 * pad)))
+    divs = "".join(
+        '<div style="position:absolute;left:%dpx;top:%dpx;font:%d %.2fpx/1 \'%s\';'
+        'letter-spacing:%.2fpx;white-space:pre;color:#000">%s</div>'
+        % (pad, top, weight, size, family, track, html.escape(text))
+        for (text, family, weight, size, track), top in zip(rows, tops))
+    page = ("<!DOCTYPE html><html><head><style>%s\nhtml,body{margin:0;background:#fff}"
+            "</style></head><body>%s</body></html>" % (font_css, divs))
+    shot = render_html(page, width=width, height=y + 20)
+    if not shot:
+        return None
+    g = 255.0 - np.asarray(Image.open(io.BytesIO(base64.b64decode(shot[1]))).convert("L"),
+                           dtype=np.float32)
+    out = []
+    for (text, family, weight, size, _), top in zip(rows, tops):
+        b0 = max(0, top - int(size * 0.5) - 8)
+        band = g[b0:top + int(size * 1.7) + 8]
+        on = band > 60
+        if not on.any():
+            out.append(None)
+            continue
+        ys = np.where(on.any(axis=1))[0]
+        xs = np.where(on.any(axis=0))[0]
+        out.append((float(xs[0] - pad), float(ys[0] + b0 - top),
+                    float(xs[-1] + 1 - pad), float(ys[-1] + 1 + b0 - top),
+                    band[ys[0]:ys[-1] + 1, xs[0]:xs[-1] + 1] / 255.0))
+    return out
+
+
+def _darkness(arr, box, inks: List[Tuple[float, Tuple[int, int, int]]], pad: int = 1):
+    """How much of each pixel in the box is ink rather than ground, 0-1, or None.
+
+    Ground is read round the box; the ink is the line's measured colour, per column
+    where the line changes colour part way.
+    """
+    import numpy as np
+    h, w = arr.shape[:2]
+    x0, y0, x1, y1 = [int(round(v)) for v in box]
+    x0, y0, x1, y1 = max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    ring = np.concatenate([
+        arr[max(0, y0 - 4):y0, x0:x1].reshape(-1, 3), arr[y1:y1 + 4, x0:x1].reshape(-1, 3),
+        arr[y0:y1, max(0, x0 - 4):x0].reshape(-1, 3), arr[y0:y1, x1:x1 + 4].reshape(-1, 3)])
+    if not len(ring):
+        return None
+    ground = np.median(ring.astype(np.float32), axis=0)
+    crop = arr[y0:y1, x0:x1].astype(np.float32)
+    cols = np.zeros((x1 - x0, 3), np.float32)
+    for i in range(x1 - x0):
+        at = i / float(max(1, x1 - x0 - 1))
+        ink = inks[0][1]
+        for frac, colour in inks:
+            if at >= frac:
+                ink = colour
+        cols[i] = ink
+    d = cols - ground
+    reach = (d * d).sum(axis=1)
+    if float(np.sqrt(reach.min())) < WEIGHT_MIN_CONTRAST:
+        return None
+    t = ((crop - ground) * d[None, :, :]).sum(axis=2) / reach[None, :]
+    return np.clip(t, 0.0, 1.0)
+
+
+def _match(screen, drawn) -> Tuple[float, int, int]:
+    """How alike two inks are in shape, -1 to 1, whatever their colour or contrast.
+
+    The ink's amount cannot choose a weight: the screenshot's text is softened by its
+    compression and its colour is measured a little light, and together they made
+    every line read two or three weights heavier than it is. The shape of the letters
+    does not depend on either -- normalised correlation, with the drawn line softened
+    as much as the screenshot is. The drawn line is laid on the screenshot's box as it
+    is, not stretched to it, so a line drawn at the wrong size matches badly, and the
+    best of a pixel's shift either way is taken. Returns (score, dy, dx).
+    """
+    import cv2
+    import numpy as np
+    if screen is None or drawn is None or drawn.size == 0:
+        return -1.0, 0, 0
+    h, w = screen.shape[:2]
+    d = cv2.GaussianBlur(drawn.astype(np.float32), (0, 0), 1.0)
+    a = screen.astype(np.float32) - float(screen.mean())
+    aa = float((a * a).sum())
+    best = (-1.0, 0, 0)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            canvas = np.zeros((h, w), np.float32)
+            y0, x0 = max(0, dy), max(0, dx)
+            sy0, sx0 = max(0, -dy), max(0, -dx)
+            ch = min(h - y0, d.shape[0] - sy0)
+            cw = min(w - x0, d.shape[1] - sx0)
+            if ch <= 0 or cw <= 0:
+                continue
+            canvas[y0:y0 + ch, x0:x0 + cw] = d[sy0:sy0 + ch, sx0:sx0 + cw]
+            b = canvas - float(canvas.mean())
+            den = float(np.sqrt(aa * float((b * b).sum())))
+            if den > 0:
+                score = float((a * b).sum() / den)
+                if score > best[0]:
+                    best = (score, dy, dx)
+    return best
+
+
+# How much of a pixel the drawn letters must cover for the screenshot's pixel there to
+# count as all ink, and how many such pixels a colour is read from.
+FULL_COVER = 0.95
+FULL_COVER_MIN_PIXELS = 6
+
+
+def _fit_colour(arr, box, drawn, dy: int, dx: int,
+                spans: List[Tuple[float, float]]) -> List[Optional[str]]:
+    """The colour each part of a line is set in, fitted to the screenshot's own pixels.
+
+    Where the letters drawn in the browser cover a pixel completely, the screenshot's
+    pixel there is all ink, and their median is its colour. Sampling the darkest pixels
+    of the screenshot alone read small grey text lighter than it is -- few pixels of a
+    16px stroke are all ink, and which ones is a guess without the letters to go by --
+    and fitting ground-plus-coverage read it black, because the screenshot was drawn
+    heavier than the browser draws the same weight (its text carries 1.1-1.7 times the
+    ink), so every pixel looked like more ink than the coverage allowed.
+    """
+    import cv2
+    import numpy as np
+    h, w = arr.shape[:2]
+    x0, y0, x1, y1 = [int(round(v)) for v in box]
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+    bh, bw = y1 - y0, x1 - x0
+    if bh < 2 or bw < 2 or drawn is None:
+        return [None] * len(spans)
+    ring = np.concatenate([
+        arr[max(0, y0 - 4):y0, x0:x1].reshape(-1, 3), arr[y1:y1 + 4, x0:x1].reshape(-1, 3),
+        arr[y0:y1, max(0, x0 - 4):x0].reshape(-1, 3), arr[y0:y1, x1:x1 + 4].reshape(-1, 3)])
+    if not len(ring):
+        return [None] * len(spans)
+    ground = np.median(ring.astype(np.float32), axis=0)
+    d = cv2.GaussianBlur(drawn.astype(np.float32), (0, 0), 1.0)
+    cover = np.zeros((bh, bw), np.float32)
+    ty, tx = max(0, dy), max(0, dx)
+    sy, sx = max(0, -dy), max(0, -dx)
+    ch, cw = min(bh - ty, d.shape[0] - sy), min(bw - tx, d.shape[1] - sx)
+    if ch <= 0 or cw <= 0:
+        return [None] * len(spans)
+    cover[ty:ty + ch, tx:tx + cw] = d[sy:sy + ch, sx:sx + cw]
+    pix = arr[y0:y1, x0:x1].astype(np.float32)
+    full = np.zeros((bh, bw), np.float32)
+    raw = drawn.astype(np.float32)
+    full[ty:ty + ch, tx:tx + cw] = raw[sy:sy + ch, sx:sx + cw]
+    out: List[Optional[str]] = []
+    for a, b in spans:
+        c0, c1 = int(a * bw), max(int(a * bw) + 1, int(b * bw))
+        core = full[:, c0:c1] >= FULL_COVER
+        if int(core.sum()) < FULL_COVER_MIN_PIXELS:
+            out.append(None)
+            continue
+        # Of those, the ones furthest from the ground: a pixel a stroke's edge half
+        # covers in the screenshot can be fully covered in the browser's drawing.
+        inside = pix[:, c0:c1][core]
+        far = np.linalg.norm(inside - ground, axis=1)
+        ink = np.median(inside[far >= np.percentile(far, 60)], axis=0)
+        out.append("#%02x%02x%02x" % tuple(int(round(v)) for v in np.clip(ink, 0, 255)))
+    return out
+
+
+def _hex_rgb(c: str) -> Tuple[int, int, int]:
+    c = (c or "#000000").lstrip("#")
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    try:
+        return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+    except ValueError:
+        return 0, 0, 0
+
+
+def _respace(text: str, dark, size: float, face) -> str:
+    """The line with the spaces its ink shows put back where the OCR lost them.
+
+    PaddleOCR reads a large headline as "yourbuyersread.", and every measurement taken
+    of that string is off by two spaces' width -- the tracking came out loose enough to
+    read wrong, and the model, correcting the words, had no way to correct the width.
+    The ink has the gaps: a run of empty columns a space wide is a space.
+    """
+    import numpy as np
+    if dark is None or len(text) < 4 or size < HEADING_MIN_SIZE or face is None:
+        return text
+    empty = dark.max(axis=0) < 0.2
+    gaps, run = [], 0
+    for i, e in enumerate(empty):
+        if e:
+            run += 1
+        else:
+            if run and i - run > 0 and run >= WORD_GAP_SHARE * size:
+                gaps.append((i - run / 2.0) / float(len(empty)))
+            run = 0
+    if not gaps:
+        return text
+    try:
+        total = float(face.getlength(text)) or 1.0
+        edges = [float(face.getlength(text[:i])) / total for i in range(len(text) + 1)]
+    except Exception:
+        edges = [i / float(len(text)) for i in range(len(text) + 1)]
+    inserts = []
+    for f in gaps:
+        i = min(range(1, len(text)), key=lambda j: abs(edges[j] - f))
+        near = text[max(0, i - 2):i + 2]
+        if " " not in near:
+            inserts.append(i)
+    for i in sorted(set(inserts), reverse=True):
+        text = text[:i] + " " + text[i:]
+    return text
+
+
+def _colour_runs(text: str, stops, face) -> List[Tuple[str, str]]:
+    """The line cut into the parts it is set in, each with its colour.
+
+    A line that changes colour was described as "colours #05060e from 0% of its width,
+    then #6871c5 from 29%", and the model painted it with a gradient clipped to the
+    text. That clips to the line's box, and with the tight line-height a headline is
+    set at, the tails of every y and p were cut off. Named parts are written as spans.
+    """
+    try:
+        total = float(face.getlength(text)) if face is not None else 0.0
+    except Exception:
+        total = 0.0
+    edges = ([float(face.getlength(text[:i])) / total for i in range(len(text) + 1)]
+             if total else [i / float(max(1, len(text))) for i in range(len(text) + 1)])
+    cuts = []
+    for frac, _ in list(stops)[1:]:
+        i = min(range(1, len(text)), key=lambda j: abs(edges[j] - float(frac)))
+        for d in (0, 1, -1, 2, -2):          # a colour changes between words
+            j = i + d
+            if 0 < j < len(text) and (text[j - 1] == " " or text[j] == " "):
+                i = j if text[j - 1] == " " else j + 1
+                break
+        cuts.append(max(1, min(len(text) - 1, i)))
+    parts, at = [], 0
+    for cut, (_, colour) in zip(cuts + [len(text)], stops):
+        if cut > at:
+            parts.append((text[at:cut], colour))
+            at = cut
+    return parts
+
+
+def _pil_css(text: str, box, family: str, weight: int, size_hint: float, st) -> str:
+    """The line's CSS from a font library's measurements, when the browser is not there."""
+    x0, y0, x1, y1 = box
+    face = measure_face(family, weight)
+    if face is not None:
+        try:
+            ink = face.getbbox(text)
+            ascent, descent = face.getmetrics()
+            ink_w, ink_h = float(ink[2] - ink[0]), float(ink[3] - ink[1])
+            if ink_h > 0 and ink_w > 0:
+                scale = (y1 - y0) / ink_h
+                size = 100.0 * scale
+                track = ((x1 - x0) - ink_w * scale) / max(len(text) - 1, 1)
+                track = max(-0.12 * size, min(0.25 * size, track))
+                return ("left:%.1fpx; top:%.1fpx; font:%d %.2fpx/1 '%s'; letter-spacing:%.2fpx"
+                        % (x0 - ink[0] * scale, y0 - ink[1] * scale, weight, size, family, track))
+        except Exception:
+            pass
+    return ("left:%.1fpx; top:%.1fpx; font:%d %.2fpx/1 '%s'; letter-spacing:%.2fpx"
+            % (x0, y0, weight, size_hint, family, float(st.letterSpacing or 0.0)))
+
+
+def text_hints(page, pictures, fonts: Dict[str, str], shot: Optional[Tuple[str, str]] = None,
+               font_css: str = "") -> Tuple[List[str], str, List[int]]:
+    """CSS for every line of text not inside a picture, solved in the page's own fonts.
+
+    The engine measured where each line's ink is. Size, weight and tracking are solved
+    again here by drawing each line in the browser, in the fonts the page is given, and
+    matching its ink to the screenshot's: the size from the ink's height, the weight
+    from how much ink there is, the tracking from its width. The engine's own numbers
+    were solved in its stand-in face and read the headline as 800 when it is 700.
+
+    Returns the prompt lines, a reference page of the same text for the content check,
+    and the weights used.
+    """
+    import numpy as np
+    from PIL import Image
+    heading = fonts.get("heading") or fonts.get("body") or "Inter"
+    body = fonts.get("body") or heading
+    arr = (np.asarray(Image.open(io.BytesIO(base64.b64decode(shot[1]))).convert("RGB"))
+           if shot else None)
+    runs = [e for e in (page.elements or [])
+            if e.type == "text" and (e.text or "").strip() and e.style is not None]
+    runs.sort(key=lambda e: (round(float(e.bbox[1]) / 8.0), float(e.bbox[0])))
+    items: List[Dict[str, Any]] = []
+    for e in runs:
+        box = tuple(float(v) for v in e.bbox)
+        if _inside(box, pictures):
+            continue
+        st = e.style
+        size_hint = float(st.fontSize or 14.0)
+        family = heading if size_hint >= HEADING_MIN_SIZE else body
+        stops = ([(float(at), c) for at, c in st.colorStops]
+                 if st.colorStops and len(st.colorStops) >= 2 else [(0.0, st.color or "#000000")])
+        inks = [(f, _hex_rgb(c)) for f, c in stops]
+        dark = _darkness(arr, box, inks, pad=0) if arr is not None else None
+        weight = _as_weight(st.fontWeight)
+        text = _respace(" ".join((e.text or "").split()), dark, size_hint,
+                        measure_face(family, weight))
+        items.append({"text": text, "box": box, "family": family, "weight": weight,
+                      "size": size_hint, "stops": stops, "dark": dark, "st": st, "css": None})
+
+    # ---- in the browser: each line drawn at every weight, at the size its ink's height
+    # ---- gives with the tracking its width then needs -- and, for small text, also at
+    # ---- the size its width gives untracked -- and the one shaped most like it kept
+    measured = False
+    if items and font_css and arr is not None:
+        first = _chrome_ink([(i["text"], i["family"], i["weight"], i["size"]) for i in items], font_css)
+        if first:
+            for i, ink in zip(items, first):
+                if ink and ink[3] > ink[1]:
+                    i["size"] *= (i["box"][3] - i["box"][1]) / (ink[3] - ink[1])
+            n = len(WEIGHT_CANDIDATES)
+            plain = _chrome_ink([(i["text"], i["family"], w, i["size"])
+                                 for i in items for w in WEIGHT_CANDIDATES], font_css)
+            if plain:
+                for k, i in enumerate(items):
+                    bw = i["box"][2] - i["box"][0]
+                    gaps = max(len(i["text"]) - 1, 1)
+                    i["cands"] = []
+                    for w, ink in zip(WEIGHT_CANDIDATES, plain[k * n:(k + 1) * n]):
+                        if not ink or ink[2] <= ink[0]:
+                            continue
+                        track = (bw - (ink[2] - ink[0])) / gaps
+                        track = max(-0.12 * i["size"], min(0.25 * i["size"], track))
+                        i["cands"].append((w, i["size"], track))
+                        # A 16px line's ink is 16px tall, and a pixel of that is 6% of
+                        # its size: small text is more often right at the size its width
+                        # gives, untracked, than tracked to fit a size a pixel out.
+                        by_width = i["size"] * bw / (ink[2] - ink[0])
+                        if i["size"] < HEADING_MIN_SIZE and abs(by_width / i["size"] - 1.0) <= SIZE_BY_WIDTH_SPREAD:
+                            for step in range(1, SIZE_STEPS + 1):
+                                size = i["size"] + (by_width - i["size"]) * step / SIZE_STEPS
+                                natural = (ink[2] - ink[0]) * size / i["size"]
+                                i["cands"].append((w, size, (bw - natural) / gaps))
+                drawn = _chrome_ink([(i["text"], i["family"], w, size, track)
+                                     for i in items for (w, size, track) in i["cands"]], font_css)
+                if drawn:
+                    measured = True
+                    at = 0
+                    for i in items:
+                        tried = drawn[at:at + len(i["cands"])]
+                        at += len(i["cands"])
+                        scored = []
+                        for cand, ink in zip(i["cands"], tried):
+                            if ink:
+                                m = _match(i["dark"], ink[4]) if i["dark"] is not None else (0.0, 0, 0)
+                                scored.append((m[0], cand, ink, m))
+                        if not scored:
+                            continue
+                        best = max(scored, key=lambda t: t[0])
+                        # Text of a dozen pixels is too coarse to tell neighbouring
+                        # weights apart reliably: "For creators" matched 300 at 0.877
+                        # and 400 at 0.862. Regular stands unless another clearly wins.
+                        if i["size"] < HEADING_MIN_SIZE:
+                            regular = [t for t in scored if t[1][0] == 400]
+                            if regular:
+                                r = max(regular, key=lambda t: t[0])
+                                if best[0] - r[0] < WEIGHT_SMALL_MARGIN:
+                                    best = r
+                        if i["dark"] is not None and best[0] < WEIGHT_MIN_MATCH:
+                            best = next((t for t in scored if t[1][0] == i["weight"]), best)
+                        i["weight"], i["size"], i["track"] = best[1]
+                        i["ink"], i["match"] = best[2], best[0]
+                        i["fit"] = best[3]
+                        i["by_weight"] = {}
+                        for t in sorted(scored, key=lambda t: t[0]):
+                            i["by_weight"][t[1][0]] = t
+
+    # Lines solved one at a time come out a few percent apart even when they are one
+    # headline, because each line's ink height depends on which letters it happens to
+    # contain. Near sizes are one size, and display lines of one size one weight.
+    order = sorted(range(len(items)), key=lambda k: items[k]["size"])
+    groups: List[List[int]] = []
+    for k in order:
+        if groups and items[k]["size"] <= items[groups[-1][0]]["size"] * 1.07:
+            groups[-1].append(k)
+        else:
+            groups.append([k])
+    for g in groups:
+        # Lines of one colour in a group are one style: they take the weight their
+        # matches favour, each at its own best size for that weight.
+        styles: List[List[int]] = []
+        for k in g:
+            ink = _hex_rgb(items[k]["stops"][0][1])
+            for st_ in styles:
+                ref_ink = _hex_rgb(items[st_[0]]["stops"][0][1])
+                if sum((p - q) ** 2 for p, q in zip(ink, ref_ink)) ** 0.5 < STYLE_COLOUR_DISTANCE:
+                    st_.append(k)
+                    break
+            else:
+                styles.append([k])
+        for st_ in styles:
+            if len(st_) < 2:
+                continue
+            votes: Counter = Counter()
+            for k in st_:
+                votes[items[k]["weight"]] += items[k].get("match", 0.0)
+            top = max(votes.items(), key=lambda kv: (kv[1], kv[0]))[0]
+            for k in st_:
+                t = (items[k].get("by_weight") or {}).get(top)
+                if items[k]["weight"] != top and t:
+                    items[k]["weight"], items[k]["size"], items[k]["track"] = t[1]
+                    items[k]["ink"], items[k]["match"], items[k]["fit"] = t[2], t[0], t[3]
+        # One size for a style: the one its best-matched line was found at. The median
+        # of the whole group took the paragraph to the size of a button's label.
+        for st_ in styles:
+            centre = items[max(st_, key=lambda k: items[k].get("match", 0.0))]["size"]
+            for k in st_:
+                items[k]["scale"] = centre / items[k]["size"]
+                items[k]["size"] = centre
+
+    lines, ref, weights = [], [], []
+    for i in items:
+        x0, y0, x1, y1 = i["box"]
+        ink = i.get("ink") if measured else None
+        if ink:
+            k = i.get("scale", 1.0)
+            ix0, iy0, ix1 = ink[0] * k, ink[1] * k, ink[2] * k
+            size = i["size"]
+            track = ((x1 - x0) - (ix1 - ix0)) / max(len(i["text"]) - 1, 1) + i["track"] * k
+            track = max(-0.12 * size, min(0.25 * size, track))
+            css = ("left:%.1fpx; top:%.1fpx; font:%d %.2fpx/1 '%s'; letter-spacing:%.2fpx"
+                   % (x0 - ix0, y0 - iy0, i["weight"], size, i["family"], track))
+        else:
+            css = _pil_css(i["text"], i["box"], i["family"], i["weight"], i["size"], i["st"])
+        weights.append(i["weight"])
+        if ink and i.get("fit") and arr is not None:
+            bounds = [f for f, _ in i["stops"]] + [1.0]
+            fitted = _fit_colour(arr, i["box"], ink[4], i["fit"][1], i["fit"][2],
+                                 list(zip(bounds[:-1], bounds[1:])))
+            i["stops"] = [(f, c2 or c) for (f, c), c2 in zip(i["stops"], fitted)]
+        if len(i["stops"]) >= 2:
+            parts = _colour_runs(i["text"], i["stops"], measure_face(i["family"], i["weight"]))
+            colour = ("in parts, one <span> each (not a gradient or background-clip): "
+                      + ", then ".join('"%s" color:%s' % (t.replace('"', "'"), c) for t, c in parts))
+        else:
+            colour = "color:%s" % i["stops"][0][1]
+        lines.append('- "%s" -- %s; %s; white-space:nowrap  (measured width %dpx)'
+                     % (i["text"].replace('"', "'"), css, colour, round(x1 - x0)))
+        ref.append("<p>%s</p>" % html.escape(i["text"]))
+    return lines, "<html><body>%s</body></html>" % "".join(ref), weights
+
+
+GENERATE_PROMPT = """\
+Recreate the attached screenshot as one HTML page that looks exactly like it, at exactly
+%(width)d x %(height)d px. The two will be put side by side, and it should not be possible
+to tell which is the screenshot.
+
+CANVAS
+`html, body { margin: 0; padding: 0 }` and one root element exactly %(width)d x %(height)d px
+with `position: relative; overflow: hidden`. Nothing may depend on the window size: no
+media queries, no percentage or viewport units for layout.
+
+PICTURES AND BACKGROUND -- ALREADY DONE
+These regions of the screenshot are pictures, and they are cut from it and placed on the
+page for you, exactly where they are listed. So is the page's background -- its colour,
+gradients and glows, measured off the screenshot. Do not write <img> tags for pictures, do
+not give html, body or the root element a background, and do not draw page-wide gradients.
+Leave the picture regions empty: they already hold everything drawn inside them, text
+included.
+%(assets)s
+
+TEXT
+All other text is written as real HTML text. Each line below was measured off the
+screenshot; the CSS puts its letters where the screenshot has them, so position each line
+absolutely with that CSS. The words were read by OCR and contain mistakes -- words run
+together, l and I confused, fragments garbled -- so read every line in the screenshot and
+write what it actually says. Add no text that is not in the screenshot and leave none out.
+Where you correct a line -- put back a space the OCR lost, say -- keep it the measured
+width by adjusting its letter-spacing, so its letters still land where they are.
+%(texts)s
+
+TYPEFACES
+Headings are set in '%(heading)s' and body text in '%(body)s'. Use exactly those
+font-family names. The fonts are supplied with the page, so do not link to or import any.
+
+EVERYTHING ELSE
+Cards, panels, buttons, inputs, badges, borders, radii, shadows and dividers are built in
+CSS, matching the screenshot's colours, sizes and positions exactly. Buttons and links are
+real <button> and <a> elements, with their labels positioned as measured above. Nothing
+animates.
+
+Return the complete HTML document and nothing else -- no explanation, no markdown fences.
+Start with <!DOCTYPE html>.
+"""
+
+
+def build_generate_prompt(asset_lines: List[str], text_lines: List[str],
+                          fonts: Dict[str, str], width: int = 1400,
+                          height: int = 900) -> str:
+    heading = fonts.get("heading") or fonts.get("body") or "Inter"
     return GENERATE_PROMPT % {
-        "html": skeleton,
-        "assets": "\n".join(asset_lines) or "(none)",
+        "assets": "\n".join(asset_lines) or "(there are none)",
+        "texts": "\n".join(text_lines) or "(there is none)",
+        "heading": heading,
+        "body": fonts.get("body") or heading,
         "width": width,
         "height": height,
     }
 
 
-# The critique is not told the score. It was, together with a target the page could not
-# reach, and asked what "prevents matching at >= 95%" -- which is a demand for complaints,
-# and it met it every round whether or not there was anything to say.
+# The critique is told what is exact, so that it does not report it. It used to judge
+# everything, and it cannot measure: it put logos at y=865 on an 836px page and a sun
+# icon at x=855 when it sits at 1360, and asked for crops that were already exact to be
+# moved -- which the correction did, and the page fell from 91.6% to 64.6%.
 CRITIQUE_PROMPT = """\
 Two screenshots are attached, both %(width)d x %(height)d px:
 1. THE TARGET -- the page to reproduce.
 2. THE ATTEMPT -- the current HTML, rendered.
 
-List the visible differences between them: anything missing or extra, in the wrong
-place, the wrong size, colour, font, weight or spacing, and any text that reads
-differently. For each, say where it is (roughly, in pixels from the top left) and what
-it should be instead, for example:
-- The navigation links near y=30 sit about 4px too high and are grey; in the target
-  they are near-black.
+Some things in THE ATTEMPT are exact already and must not be reported: the pictures
+(photographs, mockups, device screens, avatars, logos, icons), which are cut from THE
+TARGET and placed where they are in it; the page's background colours and gradients,
+taken from it too; and where each line of text starts.
 
-At most 8 lines, each starting with "- ", the most visible first. If there is no
-difference worth changing, reply with exactly: - nothing worth changing
+Compare everything else. Buttons, inputs, cards, panels, badges and dividers: is each one
+there, and are its colour, border, corner radius, shadow and size right? The text: does
+it read the same, and are its colour, weight and size right? Name each thing by what it
+is and what it says -- the "Book a call" button, the line "your buyers read." -- not by
+coordinates, and say what it should be instead.
+
+At most 8 lines, each starting with "- ", the most visible first. If there is nothing
+worth changing, reply with exactly: - nothing worth changing
 """
 
 
@@ -1840,13 +2890,12 @@ These differences were found between them:
 %(issues)s
 
 Correct them in the HTML below so it renders like THE TARGET. Change only what those
-differences call for: everything else is already where it should be, and moving it makes
-the page worse.
-
-Keep to the same rules: a fixed %(width)d x %(height)d px canvas with no reflow and no media
-queries; every RAMEN_ASSET_<n> marker kept exactly as written (they are numbered 0 to
-%(max_asset)d). %(unused_note)s No text that is not in THE TARGET, no animations, and the
-same font families.
+differences call for:
+- Do not move any line of text. Keep its left, top, font-size and letter-spacing as they
+  are, unless a difference is specifically about that line.
+- Do not add images and do not give the page a background: the pictures and the page's
+  background are added separately, exactly where they belong.
+- Keep the fixed %(width)d x %(height)d px canvas, the same font families, and no animation.
 
 Return the complete corrected document and nothing else -- no explanation, no markdown
 fences. Start with <!DOCTYPE html>.
@@ -1859,21 +2908,13 @@ def build_critique_prompt(width: int = 1400, height: int = 900) -> str:
     return CRITIQUE_PROMPT % {"width": width, "height": height}
 
 
-def build_fix_prompt(current: str, issues: List[str], n_assets: int,
+def build_fix_prompt(current: str, issues: List[str],
                      width: int = 1400, height: int = 900) -> str:
-    unused = missing_markers(current, n_assets)
-    if unused:
-        note = ("Markers %s are not used anywhere, so those pictures are missing: put "
-                "them back where the target shows them." % ", ".join(str(i) for i in unused[:12]))
-    else:
-        note = "All of them are in use; keep it that way."
     return FIX_PROMPT % {
         "issues": "\n".join("- " + i for i in issues),
         "html": current,
         "width": width,
         "height": height,
-        "max_asset": max(n_assets - 1, 0),
-        "unused_note": note,
     }
 
 
@@ -2042,11 +3083,8 @@ def stream_gemini(prompt: str, images: Optional[List[Tuple[str, str]]] = None,
                                        "; ".join(why) or "no reason was given"))
 
 
-# The loop's budget. A round is two requests, a critique and a fix, so the default is
-# seven a click including the rewrite. It was thirty-two -- one to detect assets, one to
-# write, and fifteen rounds of two against a target that was never reached -- which is
-# more than the free tier allows a model in a day, and ran only because each failure
-# quietly fell through to a weaker model.
+# The loop's budget: one call to read the screenshot, one to write the page, and two a
+# round after that. Before the first rewrite of this path it was thirty-two a click.
 VERIFY_ROUNDS = 3
 MAX_VERIFY_ROUNDS = 8
 # What a version has to add to the best so far to replace it, in colour-SSIM points.
@@ -2055,8 +3093,7 @@ MIN_GAIN = 0.3
 # Rounds in a row that add nothing before the loop stops asking.
 STALL_LIMIT = 2
 # No new round starts after this many seconds of refinement.
-REFINE_TIME_BUDGET = 480.0
-# A page is about twenty thousand tokens each way; a critique is a paragraph.
+REFINE_TIME_BUDGET = 600.0
 GENERATE_TIMEOUT = 300
 CRITIQUE_TIMEOUT = 150
 LOOP_ATTEMPTS = 2
@@ -2067,30 +3104,24 @@ def generate_from_document(doc, api_key: Optional[str] = None,
                            verify: int = VERIFY_ROUNDS,
                            target_score: float = TARGET_ACCURACY_SCORE,
                            page_index: int = 0):
-    """Recreates one page to match its screenshot as closely as can be measured.
+    """Recreates one page so it looks like its screenshot.
 
     Yields:
     - ("phase", label)       what stage it is in, for the progress bar's heading
     - ("status", text)       what it is doing right now
-    - ("assets", [data uri]) the images the markers stand for, for the live preview
-    - ("chunk", text)        the rewrite as it is written
+    - ("layer", html)        the background and pictures, placed, for the live preview
+    - ("fonts", css)         the embedded typefaces, for the live preview
+    - ("chunk", text)        the page as it is written
     - ("score", {...})       a version was measured
-    - ("issue", text)        a difference the critique found
-    - ("revision", {"html"}) a version that beat the best so far
+    - ("issue", text)        a difference the check found
+    - ("revision", {"html"}) a better version
     - ("done", {...})        the best version, and how it got there
-
-    The engine's reconstruction is the starting point and the floor: it is measured
-    first, and a version replaces the best only if it keeps the page's text and scores
-    measurably higher. Rounds stop when they stop helping, not when a number is hit.
     """
     from engine import DocumentData, Exporter
 
     pages = list(getattr(doc, "pages", None) or [])
     if not pages:
         raise EnhancementError("This document has no pages.")
-    # The page asked for, not the first page that happens to have a screenshot. It used
-    # to take page one's picture whatever page was open, together with every page's
-    # text, and ask for a page that did not exist.
     page = pages[max(0, min(int(page_index or 0), len(pages) - 1))]
     shot = as_inline_image(getattr(page, "originalImageSrc", None))
     if not shot:
@@ -2099,70 +3130,92 @@ def generate_from_document(doc, api_key: Optional[str] = None,
     rounds_cap = max(0, min(int(verify), MAX_VERIFY_ROUNDS))
     calls = 0
 
-    # ---- the engine's page: the geometry to keep, and the floor to beat ------------
+    # ---- the engine's page, measured only so the result can be compared with it -----
     yield "phase", "Measuring the page"
-    yield "status", "Composing the engine's reconstruction of this page..."
     one = DocumentData(title=getattr(doc, "title", None) or "page", pageCount=1, pages=[page])
-    flat = flatten_document(one)
-    engine_html = at_origin(Exporter.export_standalone_html(flat, interactive=False))
-    skeleton, assets = strip_assets(engine_html)
-    skeleton = strip_font_faces(skeleton)
-    asset_lines = describe_assets(assets, roles=asset_roles(engine_html, assets))
-    yield "assets", assets
+    engine_page = with_fonts(at_origin(Exporter.export_standalone_html(one, interactive=False)))
+    engine_render = render_html(engine_page, width=w, height=h)
+    engine_score = calculate_ssim_score(shot, engine_render) if engine_render else 0.0
+
+    # ---- what the screenshot is made of: typefaces and pictures -------------------
+    yield "phase", "Reading the screenshot"
+    yield "status", "Identifying the typefaces and the pictures in the screenshot..."
+    calls += 1
+    try:
+        found = analyse_screenshot(shot, w, h, api_key=api_key, model=model,
+                                   timeout=CRITIQUE_TIMEOUT, attempts=LOOP_ATTEMPTS)
+    except (EnhancementError, ValueError) as e:
+        yield "status", "The screenshot could not be read (%s); carrying on without it." % (
+            short_reason(e) if isinstance(e, EnhancementError) else "no JSON came back")
+        found = {"fonts": {}, "pictures": []}
+    fonts = found["fonts"] or {}
+    if not fonts:
+        # The engine's own choice, rather than a guess.
+        fam = next((e.style.fontFamily for e in page.elements
+                    if e.type == "text" and e.style is not None), "") or ""
+        first = fam.split(",")[0].strip().strip("'\"") or "Inter"
+        fonts = {"heading": first, "body": first}
+    gen_model = _LAST_MODEL[0] or model or DEFAULT_MODEL
+
+    text_boxes = [tuple(float(v) for v in e.bbox) for e in page.elements
+                  if e.type == "text" and (e.text or "").strip()]
+    assets, asset_lines, picture_boxes = picture_crops(shot, found["pictures"], text_boxes)
+    surfaces = [tuple(float(v) for v in e.bbox) for e in page.elements if e.type == "rect"
+                and (e.bbox[2] - e.bbox[0]) * (e.bbox[3] - e.bbox[1]) < w * h * PLATE_SURFACE_SHARE]
+    plate = background_plate(shot, text_boxes + [tuple(b) for b in picture_boxes] + surfaces)
+    layer = picture_layer(assets, picture_boxes, plate, w, h)
+    yield "layer", layer
+    yield "status", ("Set in %s%s; %d picture(s) cut from the screenshot."
+                     % (fonts.get("heading"),
+                        "" if fonts.get("body") == fonts.get("heading")
+                        else " and " + str(fonts.get("body")), len(assets)))
+
+    families = sorted({f for f in (fonts.get("heading"), fonts.get("body")) if f})
+    font_css = embedded_family_css(families, list(WEIGHT_CANDIDATES))
+    yield "status", "Measuring each line of text in %s..." % " and ".join(families)
+    text_lines, reference, weights = text_hints(page, picture_boxes, fonts, shot, font_css)
+    if not font_css:
+        yield "status", "The typefaces could not be fetched; the page will use a fallback."
+    yield "fonts", font_css
 
     def complete(raw: str) -> Tuple[str, List[int]]:
-        html, missing = restore_assets(raw, assets)
-        return with_fonts(html), missing
+        return apply_fonts(lock_pictures(raw, layer), font_css), []
 
     def measure(raw: str) -> Tuple[Optional[Tuple[str, str]], float]:
         rendered = render_html(complete(raw)[0], width=w, height=h)
         return rendered, (calculate_ssim_score(shot, rendered) if rendered else 0.0)
 
-    engine_render, engine_score = measure(skeleton)
-    best = {"raw": skeleton, "score": engine_score, "render": engine_render,
-            "source": "engine", "model": None}
-    if engine_render:
-        yield "score", {"score": round(engine_score, 1), "target": target_score,
-                        "round": 0, "max_rounds": rounds_cap, "label": "engine"}
-        yield "status", ("The engine's page matches the screenshot at %.1f%%. "
-                         "Nothing is kept unless it beats that." % engine_score)
-    else:
-        yield "status", ("No headless Chrome was found, so versions cannot be measured "
-                         "against the screenshot; the rewrite is returned unchecked.")
+    versions: List[Dict[str, Any]] = []
 
-    def consider(raw: str, source: str, used_model: Optional[str]):
-        """Measures a version and says whether it replaces the best, and why not."""
-        refused = keeps_the_content(skeleton, raw)
-        if refused:
-            return None, 0.0, refused
-        if not engine_render:
-            return None, 0.0, ""          # nothing to measure against; taken as it is
+    def better(a: Dict[str, Any], b: Optional[Dict[str, Any]]) -> bool:
+        """Whether version a should replace b as the one to show."""
+        if b is None:
+            return True
+        if bool(a["refused"]) != bool(b["refused"]):
+            return not a["refused"]       # keeping the page's text comes first
+        return a["score"] > b["score"] + MIN_GAIN
+
+    def take(raw: str, source: str, used_model: str) -> Dict[str, Any]:
         rendered, score = measure(raw)
-        if not rendered:
-            return None, 0.0, "it would not render"
-        if score > best["score"] + MIN_GAIN:
-            best.update(raw=raw, score=score, render=rendered, source=source,
-                        model=used_model)
-            return rendered, score, ""
-        return rendered, score, ("%.1f%% does not beat the best so far, %.1f%%"
-                                 % (score, best["score"]))
+        v = {"raw": raw, "render": rendered, "score": score, "source": source,
+             "model": used_model, "refused": keeps_the_content(reference, raw) or ""}
+        versions.append(v)
+        return v
 
-    # ---- the rewrite, streamed so it can be watched --------------------------------
+    # ---- the page, written from the screenshot and streamed -----------------------
     yield "phase", "Writing the page"
-    yield "status", ("Sending the screenshot, the engine's measured page and %d image(s)..."
-                     % len(assets))
-    prompt = build_generate_prompt(skeleton, asset_lines, width=w, height=h)
-    images = [shot] + ([engine_render] if engine_render else [])
+    yield "status", "Writing the page from the screenshot..."
+    prompt = build_generate_prompt(asset_lines, text_lines, fonts, width=w, height=h)
     buf: List[str] = []
     tried: List[str] = []
-    for candidate in models_to_try(model):
+    for candidate in models_to_try(gen_model):
         if candidate in tried:
             continue
         tried.append(candidate)
         buf = []
         calls += 1
         try:
-            for kind, piece in stream_gemini(prompt, images=images, api_key=api_key,
+            for kind, piece in stream_gemini(prompt, images=[shot], api_key=api_key,
                                              model=candidate, timeout=timeout):
                 if kind == "status":
                     yield "status", piece
@@ -2171,38 +3224,45 @@ def generate_from_document(doc, api_key: Optional[str] = None,
                 yield "chunk", piece
         except EnhancementError as e:
             if buf:
-                raise                      # partly shown; cannot start over cleanly
-            remaining = [m for m in models_to_try(model) if m not in tried]
+                raise
+            remaining = [m for m in models_to_try(gen_model) if m not in tried]
             if not remaining:
                 raise
             yield "status", "%s. Trying %s..." % (short_reason(e), remaining[0])
             continue
         if buf:
             break
-    # Every later call goes to the model that answered, rather than starting again at
-    # the requested one and being refused on the way down.
-    gen_model = _LAST_MODEL[0] or model or DEFAULT_MODEL
+    gen_model = _LAST_MODEL[0] or gen_model
     raw = _unfence("".join(buf))
-
     if "<" not in raw:
-        yield "status", ("%s did not return HTML, so the engine's page stands."
-                         % gen_model)
-    else:
-        if "</html>" not in raw.lower():
-            yield "status", "The rewrite came back cut short; measuring what there is."
-        rendered, score, why = consider(raw, "rewrite", gen_model)
-        if rendered is not None or not engine_render:
-            if not engine_render and not why:
-                best.update(raw=raw, source="rewrite", model=gen_model)
-            yield "score", {"score": round(score, 1), "target": target_score,
-                            "round": 0, "max_rounds": rounds_cap, "label": "rewrite"}
-        if why:
-            yield "status", "The rewrite was not kept: %s." % why
-        else:
-            yield "status", "The rewrite is the best so far (%.1f%%)." % best["score"]
-            yield "revision", {"html": complete(best["raw"])[0]}
+        raise EnhancementError("%s did not return HTML. It said: %s"
+                               % (gen_model, raw.strip()[:200] or "(nothing)"))
+    if "</html>" not in raw.lower():
+        yield "status", "The page came back cut short; measuring what there is."
 
-    # ---- refinement, from the best, until it stops helping -------------------------
+    best = take(raw, "rewrite", gen_model)
+    # Pictures the first look missed show as detail in the screenshot and bare ground in
+    # the page. They are cut and placed like the rest, and the page measured again.
+    if best["render"]:
+        extra = unplaced_pictures(shot, best["render"], text_boxes, picture_boxes)
+        if extra:
+            from PIL import Image
+            im = Image.open(io.BytesIO(base64.b64decode(shot[1]))).convert("RGB")
+            assets = assets + [_crop_uri(im, b) for b in extra]
+            picture_boxes = list(picture_boxes) + extra
+            layer = picture_layer(assets, picture_boxes, plate, w, h)
+            yield "layer", layer
+            yield "status", "%d more picture(s) found in the screenshot and placed." % len(extra)
+            versions.remove(best)
+            best = take(raw, "rewrite", gen_model)
+    if best["render"]:
+        yield "score", {"score": round(best["score"], 1), "target": target_score,
+                        "round": 0, "max_rounds": rounds_cap, "label": "rewrite"}
+    yield "revision", {"html": complete(best["raw"])[0]}
+    if best["refused"]:
+        yield "status", "The page lost some of the text: %s." % best["refused"]
+
+    # ---- look at it beside the screenshot, and correct it -------------------------
     all_issues: List[str] = []
     rounds_done = 0
     stalls = 0
@@ -2210,15 +3270,15 @@ def generate_from_document(doc, api_key: Optional[str] = None,
     for rnd in range(1, rounds_cap + 1):
         if not best["render"]:
             break
-        if best["score"] >= target_score:
+        if best["score"] >= target_score and not best["refused"]:
             yield "status", "%.1f%% is close enough to stop." % best["score"]
             break
         if time.time() - started > REFINE_TIME_BUDGET:
-            yield "status", "Out of time for refinement; keeping the best so far."
+            yield "status", "Out of time for corrections; keeping the best version."
             break
 
         yield "phase", "Checking, round %d of %d" % (rnd, rounds_cap)
-        yield "status", "Comparing the best version with the screenshot..."
+        yield "status", "Comparing the page with the screenshot..."
         calls += 1
         try:
             critique = call_gemini(build_critique_prompt(w, h), api_key=api_key,
@@ -2228,9 +3288,9 @@ def generate_from_document(doc, api_key: Optional[str] = None,
             yield "status", "The check could not be made: %s." % short_reason(e)
             break
         issues = parse_critique(critique)
+        if best["refused"]:
+            issues = ["Some of the screenshot's text is missing or wrong: %s." % best["refused"]] + issues
         if not issues:
-            # Nothing is invented to fill the gap. It used to substitute three generic
-            # complaints and have them "fixed", which only ever moved things about.
             yield "status", "The check found nothing worth changing."
             break
         for issue in issues:
@@ -2241,7 +3301,7 @@ def generate_from_document(doc, api_key: Optional[str] = None,
         calls += 1
         try:
             fixed = _unfence(call_gemini(
-                build_fix_prompt(best["raw"], issues, len(assets), w, h),
+                build_fix_prompt(best["raw"], issues, w, h),
                 api_key=api_key, model=gen_model, timeout=timeout,
                 attempts=LOOP_ATTEMPTS, images=[shot, best["render"]]))
         except EnhancementError as e:
@@ -2250,50 +3310,51 @@ def generate_from_document(doc, api_key: Optional[str] = None,
             if stalls >= STALL_LIMIT:
                 break
             continue
-
-        fix_model = _LAST_MODEL[0] or gen_model
         if "<" not in fixed:
-            why = "no HTML came back"
-            rendered = None
-        else:
-            rendered, score, why = consider(fixed, "round %d" % rnd, fix_model)
-            if rendered is not None:
-                yield "score", {"score": round(score, 1), "target": target_score,
-                                "round": rnd, "max_rounds": rounds_cap,
-                                "label": "round %d" % rnd}
-        if why:
             stalls += 1
-            yield "status", "Round %d was not kept: %s." % (rnd, why)
+            yield "status", "Round %d returned no HTML." % rnd
             if stalls >= STALL_LIMIT:
-                yield "status", ("Stopping: %d rounds in a row added nothing."
-                                 % STALL_LIMIT)
                 break
             continue
 
-        stalls = 0
-        rounds_done += 1
-        all_issues.extend(issues)
-        yield "status", "Round %d kept: %.1f%%." % (rnd, best["score"])
-        yield "revision", {"html": complete(best["raw"])[0]}
+        v = take(fixed, "round %d" % rnd, _LAST_MODEL[0] or gen_model)
+        if v["render"]:
+            yield "score", {"score": round(v["score"], 1), "target": target_score,
+                            "round": rnd, "max_rounds": rounds_cap, "label": "round %d" % rnd}
+        if better(v, best):
+            best = v
+            stalls = 0
+            rounds_done += 1
+            all_issues.extend(issues)
+            yield "status", "Round %d kept: %.1f%%." % (rnd, best["score"])
+            yield "revision", {"html": complete(best["raw"])[0]}
+        else:
+            stalls += 1
+            why = v["refused"] or ("%.1f%% does not beat %.1f%%" % (v["score"], best["score"]))
+            yield "status", "Round %d was not kept: %s." % (rnd, why)
+            if stalls >= STALL_LIMIT:
+                yield "status", "Stopping: %d rounds in a row added nothing." % STALL_LIMIT
+                break
 
     final, missing = complete(best["raw"])
     yield "done", {
         "html": final,
-        # Whoever made the version being returned. It used to name whichever model made
-        # the last call, so a page written by one model was credited to the lite model
-        # that failed to improve it.
         "model": best["model"],
         "source": best["source"],
         "engine_score": round(engine_score, 1),
         "score": round(best["score"], 1),
         "target": target_score,
+        "fonts": fonts,
+        "pictures": len(assets),
         "assets_total": len(assets),
         "assets_missing": missing,
         "verify_rounds": rounds_done,
         "issues": all_issues,
+        "text_check": best["refused"] or "kept",
         "calls": calls,
         "chars": len(final),
     }
+
 
 # ---------------------------------------------------------------- command line
 

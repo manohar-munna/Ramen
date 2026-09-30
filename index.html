@@ -3172,10 +3172,21 @@ function cancelScheduledLivePreview() {
     pendingLiveHtml = null;
 }
 
+let liveFontCss = '';
+// The background and pictures, measured and placed by the server; the page being
+// written leaves room for them, so they go on top of it here just as they will at the end.
+let liveLayer = '';
+
 function scheduleLivePreviewUpdate(frame, rawCode, assets, minHeight = 900) {
     if (!frame) return;
     let html = extractHtml(rawCode);
     if (!html || html.length < 20) return;
+    if (liveFontCss) {
+        const tag = '<style>' + liveFontCss + '</style>';
+        const at = html.toLowerCase().indexOf('</head>');
+        html = at >= 0 ? html.slice(0, at) + tag + html.slice(at) : tag + html;
+    }
+    if (liveLayer) html += liveLayer;
 
     if (assets && assets.length > 0) {
         html = html.replace(/(?:RAMEN_)?ASSET_(\d+)\b/g, (match, idx) => {
@@ -4449,6 +4460,8 @@ async function enhanceCurrentDocument() {
     let finalHtml = null;
     let fixesCount = 0;
     let harvestedAssets = [];
+    liveFontCss = '';
+    liveLayer = '';
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${location.host}/ws/generate`);
@@ -4479,8 +4492,12 @@ async function enhanceCurrentDocument() {
         } else if (msg.type === 'status') {
             if (elements.epbDetail) elements.epbDetail.textContent = msg.detail;
             setStatus(msg.detail);
-        } else if (msg.type === 'assets') {
-            harvestedAssets = msg.assets || [];
+        } else if (msg.type === 'layer') {
+            liveLayer = msg.html || '';
+        } else if (msg.type === 'fonts') {
+            // The page's own typefaces, so what is being written is drawn in them as it
+            // arrives rather than in whatever the browser falls back to.
+            liveFontCss = msg.css || '';
         } else if (msg.type === 'chunk') {
             buffer += msg.text;
             if (elements.epbOperation) elements.epbOperation.textContent = 'Generating responsive markup';

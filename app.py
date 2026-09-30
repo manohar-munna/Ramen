@@ -373,8 +373,13 @@ async def generate_live(ws: WebSocket):
                 # `phase` field that nothing ever sent, so the heading said "Processing"
                 # from start to finish.
                 await ws.send_json({"type": "phase", "label": payload})
-            elif kind == "assets":
-                await ws.send_json({"type": "assets", "assets": payload})
+            elif kind == "layer":
+                # The measured background and pictures, so they are in the live preview
+                # from the start rather than only once the page is finished.
+                await ws.send_json({"type": "layer", "html": payload})
+            elif kind == "fonts":
+                # The page's typefaces, so the live preview is drawn in them too.
+                await ws.send_json({"type": "fonts", "css": payload})
             elif kind == "issue":
                 await ws.send_json({"type": "issue", "detail": payload})
             elif kind == "score":
