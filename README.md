@@ -9,10 +9,11 @@ measured from the pixels: colour segmentation, shape evidence, OCR, and typograp
 fitting. The only learned component in the reconstruction path is the OCR, and it only
 reads text.
 
-There is also an **optional** pass that hands the finished HTML to Gemini to be rebuilt
-with real layout and transitions. It is off unless you supply a key, it runs after
-reconstruction rather than inside it, and it cannot change what the engine measured — see
-[Enhancement](#enhancement-optional).
+There is also an **optional** pass that uses Gemini: the **Enhance** button recreates the
+page from the original screenshot, with the typefaces, pictures, background and text
+metrics measured by code and handed to the model. It is off unless you supply a key, it
+runs after reconstruction rather than inside it, and it cannot change what the engine
+measured — see [Enhancement](#enhancement-optional).
 
 ---
 
@@ -78,7 +79,7 @@ Ramen/
 ├── app.py                       # FastAPI server & REST API endpoints
 ├── engine.py                    # Reconstruction engine
 ├── index.html                   # Single-page desktop editor UI
-├── enhancer.py                  # Optional Gemini rewrite pass (not part of the engine)
+├── enhancer.py                  # Optional Gemini passes (not part of the engine)
 ├── test_app.py                  # Test suite for engine & API
 ├── requirements.txt
 ├── .env.example                 # Copy to .env for the enhancement key
@@ -177,23 +178,97 @@ all eleven.
 
 ## Enhancement (optional)
 
-The engine optimises for faithfulness and is measured on it, which is why its output is a
-pile of absolutely-positioned divs: nothing in the pipeline is rewarded for the page being
-well *built*. Rewriting it as flowing, semantic, animated HTML has no ground truth to
-measure against, so it is a separate pass and a language model does it.
+Two passes use Gemini. Both live in `enhancer.py`, outside the engine, and both are off
+until a key is configured.
 
 ```bash
 cp .env.example .env                        # then put a Gemini key in it
+```
+
+| | Starts from | Aims for | Run from |
+|---|---|---|---|
+| **Recreate** | the original screenshot | a page that looks identical to it | the **Enhance** button (`/ws/generate`) |
+| **Rewrite** | the engine's reconstruction | the same page, built with flex/grid and semantic tags | `python enhancer.py`, `POST /api/enhance`, `tools/enhance_all.py` |
+
+### Recreate — the Enhance button
+
+The Enhance button used to hand the model the engine's reconstruction, and the page came
+back looking like the engine — its mistakes included. It now works from the original
+screenshot. What code can measure, it measures, and either hands to the model as numbers
+or places on the page itself; the model builds only what is left.
+
+1. **Read the screenshot** (one call). The model names the typefaces, as Google Fonts
+   families, and boxes the pictures.
+2. **Fonts.** Each family is fetched from Google Fonts with its optical-size axis where it
+   has one, and embedded (latin and latin-ext woff2). 8xbrand's headline is set in Inter's
+   display cut: drawn from the text cut, the same line ran 28px wider and looser.
+3. **Pictures** — photographs, mockups, avatars, logos, icons — are cropped from the
+   screenshot, snapped to their content and placed by code, above the page, at the
+   measured coordinates. A box that reaches over a line of the page's own text is cut
+   back first: otherwise the crop's copy of the words sits over the page's copy and the
+   headline reads "pcsts".
+4. **Background.** The screenshot at an eighth of its size, with text, pictures and small
+   surfaces removed and filled in from around them, becomes the page's background image.
+   It carries glows and gradients exactly, so a crop meets it with no visible edge. The
+   model is told not to paint the page background.
+5. **Text.** Every OCR line is drawn in Chrome, in the embedded fonts, at every weight.
+   The size comes from the ink's height (and for small text also from its width at normal
+   tracking), the tracking from its width, the weight from which drawing's letter shapes
+   correlate best with the screenshot's, and the colour from the pixels the drawn
+   letters cover completely. A line that changes colour part-way is handed over as
+   spans, and the spaces OCR drops from display-size lines (`yourbuyersread.`) are put
+   back from the gaps in the ink.
+6. **Write** (one streamed call). The model writes the page with that CSS for every line,
+   and builds buttons, cards, inputs, borders and shadows itself.
+7. **Missed pictures.** The picture list differs from run to run — one run of 8xbrand
+   found the row of avatars and the next did not. After the draft is rendered, any region
+   with detail in the screenshot and bare background in the page, and not mostly text,
+   is cropped and placed like the rest.
+8. **Check and fix** (two calls a round, up to three rounds). The check is told what is
+   already exact — pictures, background, where each line starts — and names what is wrong
+   by what it is and says ("the *Book a call* button"), not by coordinates. The fix may
+   not move text or add images. A round is kept only if it keeps the page's text and beats
+   the best version by 0.3 points; two rounds in a row without that, or ten minutes, and
+   it stops.
+
+The score is colour SSIM against the screenshot. Grayscale SSIM scores a black headline
+and a purple one about the same.
+
+On 8xbrand (1600×836, a landing page with a laptop mockup, a two-colour headline and a
+row of avatars):
+
+| | colour SSIM |
+|---|---|
+| Engine reconstruction | **88.9%** |
+| Recreate, model placing the pictures itself | 91.6% draft; check rounds took it to 64.6% and 66.9%, not kept |
+| Recreate, pictures and background placed by code | **93.3%** draft; rounds 92.4% and 93.0%, not kept |
+| Everything handed to the model, assembled with no model at all | **94.8%** |
+
+The last row is what the measurements alone reproduce: the model's part is the gap above
+it — buttons, borders, the header rule. Two caveats. This is one page, so it says nothing
+yet about the others. And the browser-measured text (step 5) came after the 93.3% run;
+the one live run since then ended its stream early, at about 150 seconds, and scored
+71.1% on a half-written page, so the current code has not been measured end to end.
+
+A run costs `2 + 2 × rounds` calls — two to eight — and took 15 to 22 minutes with two
+rounds on a flash model. While it runs, the editor's preview shows the page as it is
+written, already in its fonts and with the pictures and background in place.
+
+### Rewrite — the command line
+
+The engine optimises for faithfulness and is measured on it, which is why its output is a
+pile of absolutely-positioned divs: nothing in the pipeline is rewarded for the page being
+well *built*. Rewriting it as flowing, semantic, animated HTML has no ground truth to
+measure against, so this pass hands the reconstruction to the model to rebuild.
+
+```bash
 python enhancer.py benchmarks/images/axion-logistics.png
 python enhancer.py page.json --dry-run      # prompt size, no network call
 python enhancer.py --list-models            # what this key can actually call
 python tools/enhance_all.py                 # every reference, scored; resumable
 ```
 
-Or press **Enhance** in the editor. The result opens in a new tab; the reconstruction is
-untouched.
-
-### Images are held back
+#### Images are held back
 
 About 95% of a reconstructed page by weight is inline base64 PNG — the logistics page is
 1.52M characters, roughly 380k tokens, none of which a language model can use, since it
@@ -206,7 +281,7 @@ or a small graphic. That costs about 1.4k characters and is what took the refere
 photographs from scattered fragments to correctly proportioned images — a model asked to
 lay out pictures it cannot see needs to be told something about them.
 
-### Fragments are composed first
+#### Fragments are composed first
 
 The residual pass cuts out exactly the pixels CSS could not explain, so a photographic
 page arrives as dozens of crops that only add up to a picture because each is pinned to a
@@ -225,7 +300,7 @@ directions: one refused a page that was provably identical while passing another
 change is handed over unflattened. Six of the eleven flatten, five fall back, and all
 eleven render identically to their reconstruction.
 
-### When the model drops an image
+#### When the model drops an image
 
 It is asked for that image back by anchor rather than by rewrite. Requesting a corrected
 copy of the whole document meant regenerating seventy thousand characters to add four
@@ -234,7 +309,7 @@ one line per lost image — the marker and a short run of text copied from its o
 and the insertion is done locally: the anchor must appear exactly once or it is refused
 and counted. Whichever attempt lost least is kept.
 
-### What it will and will not do
+#### What it will and will not do
 
 The prompt forbids changing any visible text, dropping any image marker, or moving far
 from the original palette and type scale; it asks for flex/grid layout, semantic tags,
@@ -247,7 +322,7 @@ Output varies between runs of the same page. Axion came back once with no text l
 once 29 words short, same prompt, different model. Treat the enhanced page as a draft,
 and treat the audit as the thing that tells you which draft you got.
 
-### Measured across all eleven references
+#### Measured across all eleven references
 
 | | |
 |---|---|
@@ -256,6 +331,8 @@ and treat the audit as the thing that tells you which draft you got.
 | Images dropped in total | **0**, so the repair pass never had to fire |
 | `position: absolute` | 78 → 7, 128 → 4, 118 → 6, typical |
 | Flex/grid containers | 9 to 33 per page, from 2 |
+
+### Keys and models
 
 | | |
 |---|---|
@@ -309,7 +386,11 @@ trained on both learns to tell them apart and applies a different prior to each.
   a character over the length of a word — it produced `yourbuyersr ead.`. A break in the
   wrong place reads as a typo rather than as a limit of the recogniser, so the text is
   left as read. A dictionary-based splitter would be the honest fix and is not written.
-- **The typeface is approximated, not identified.** A page is reconstructed in one of
+  The Enhance path does put the spaces back, for display-size lines only: it measures
+  the string in the page's own font rather than the engine's stand-in, and on 8xbrand
+  that gives `your buyers read.` At body sizes the gap between letters is as wide as a
+  space's threshold would be, so small text is left as read there too.
+- **The engine approximates the typeface; it does not identify it.** A page is reconstructed in one of
   the faces that ship with it, chosen serif or sans from the stroke weights. Which
   *particular* grotesque the original used is not determined — that needs matching
   against a font database, which this does not have. Picking between the two shipped
@@ -317,19 +398,25 @@ trained on both learns to tell them apart and applies a different prior to each.
   criteria you can score it by disagree, and on the one page where the answer is
   decisive the width-aware one chooses the face already in use. With two faces this
   similar there is nothing to choose between. Weight, size and tracking are measured,
-  so a page comes out the right colour and rhythm in a near-enough face.
+  so a page comes out the right colour and rhythm in a near-enough face. A display
+  serif comes back as a condensed sans, and on most pages this is the largest remaining
+  visual difference. The Enhance path gets the family from the model instead, and is
+  only as right as that answer: on 8xbrand it said Inter, which drawing the headline in
+  Chrome beside the screenshot confirmed.
+- **Screenshots can be drawn heavier than Chrome draws.** 8xbrand's text carries 1.1 to
+  1.7 times the ink Chrome gives the same words at the same weight — probably a macOS
+  capture. The Enhance path therefore picks weight by letter shape, not by how dark the
+  text is. At body sizes the shapes of neighbouring weights are within noise of each
+  other, so small text stays at 400 unless another weight wins clearly.
 - **Icons are absorbed into the text layer.** OCR reads a glyph-like icon as characters —
   one renders as the literal string `83` — so the icon is neither drawn nor available as
   an element.
 - **Ground truth exists for one page.** Component accuracy is therefore a single-page
   measurement, and generalisation is unproven. There are now eleven reference images but
-  only one has a hand-read component list, so "25/25" is a claim about one page. Adding
+  only one has a hand-read component list, so "24/25" is a claim about one page. Adding
   ground truth is the highest-value contribution to this repo.
 - **Output is mostly base64.** Roughly 90% of each exported file is inline PNG data, and
   a page runs 0.6–1.8 MB. Fine to view, not yet a clean hand-editable document.
-- **Typeface is approximated.** The engine fits size, spacing and width, but cannot
-  identify the original face; a display serif comes back as a condensed sans. This is
-  the largest remaining visual difference on most pages.
 - **Layout is absolute.** Output is pixel-accurate but does not reflow; there is no
   flex/grid inference yet.
 - **Translucency is rasterised.** Glassmorphic panels are kept as pixels rather than
